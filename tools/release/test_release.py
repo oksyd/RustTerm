@@ -116,6 +116,51 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'build-host path'):
             artifacts.verify_binary_privacy(io.BytesIO(data))
 
+    def test_msvc_upstream_paths_are_not_mistaken_for_our_checkout(self):
+        upstream = r'D:\a\_work\1\s\src\vctools\crt\vcstartup\src\startup\exe_common.inl'
+        for path in (upstream, upstream.replace('\\', '/')):
+            for encoding in ('utf-8', 'utf-16-le'):
+                with self.subTest(path=path, encoding=encoding):
+                    artifacts.verify_binary_privacy(io.BytesIO(path.encode(encoding)))
+
+    def test_foreign_windows_user_and_checkout_paths_are_rejected(self):
+        for path in (r'C:\Users\Example User\source.rs', r'C:\Users\测试\source.rs',
+                     r'D:\a\ExampleProject\ExampleProject\source.rs'):
+            for spelling in (path, path.replace('\\', '/')):
+                for encoding in ('utf-8', 'utf-16-le'):
+                    for prefix in (b'', b'\x7f'):
+                        with self.subTest(path=spelling, encoding=encoding, prefix=prefix), \
+                             self.assertRaisesRegex(ValueError, 'build-host path'):
+                            artifacts.verify_binary_privacy(io.BytesIO(prefix + spelling.encode(encoding)))
+
+    def test_unrelated_binary_strings_are_not_joined_into_paths(self):
+        for data in (b'C:\\Us\x00ers\\example\\file.rs',
+                     'C:\\Us\x00ers\\example\\file.rs'.encode('utf-16-le')):
+            artifacts.verify_binary_privacy(io.BytesIO(data))
+
+    def test_configured_windows_paths_are_always_rejected(self):
+        # A known build root must win even when it resembles a supplier path.
+        root = r'D:\a\_work\1\s'
+        with patch.object(artifacts, 'build_paths', return_value=[(root, '/rustterm')]):
+            for encoding in ('utf-8', 'utf-16-le'):
+                with self.subTest(encoding=encoding), self.assertRaisesRegex(ValueError, 'configured build directory') as error:
+                    artifacts.verify_binary_privacy(io.BytesIO((root + r'\source.rs').encode(encoding)))
+                self.assertNotIn(root, str(error.exception))
+
+    def test_utf16_windows_path_crossing_scan_boundary_is_rejected(self):
+        path = r'D:\a\ExampleProject\ExampleProject\source.rs'.encode('utf-16-le')
+        data = b'\x00' * (1024 * 1024 - 13) + path
+        with self.assertRaisesRegex(ValueError, 'GitHub workspace, UTF-16LE'):
+            artifacts.verify_binary_privacy(io.BytesIO(data))
+
+    def test_compiler_mapping_retains_actual_github_workspace(self):
+        workspace = self.directory / 'workspace'
+        checkout = self.directory / 'test source'
+        with patch.object(artifacts, 'ROOT', checkout), patch.dict(os.environ, {'GITHUB_WORKSPACE': str(workspace)}):
+            paths = artifacts.build_paths()
+            self.assertIn((str(workspace.resolve()), '/workspace'), paths)
+            self.assertIn((str(checkout.resolve()), '/rustterm'), paths)
+
     @unittest.skipUnless(shutil.which('rustc'), 'Rust compiler is unavailable')
     def test_compiler_removes_source_path_from_file_macro(self):
         checkout = self.directory / 'checkout with spaces'
@@ -129,7 +174,7 @@ class ReleaseTests(unittest.TestCase):
             subprocess.run(['rustc', str(source), '-o', str(binary), *flags], check=True, capture_output=True)
             with binary.open('rb') as built:
                 artifacts.verify_binary_privacy(built)
-        self.assertIn(b'/rustterm/main.rs', binary.read_bytes())
+        self.assertIn(b'/rustterm/main.rs', binary.read_bytes().replace(b'\\', b'/'))
 
     def test_prerelease_and_build_metadata(self):
         for version, expected in [('1.2.3-rc.1', 'true'), ('1.2.3+build.2', 'false')]:

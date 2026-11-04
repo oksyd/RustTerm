@@ -19,6 +19,12 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 PLATFORMS = {"linux-x86_64": "tar.gz", "windows-x86_64": "zip"}
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
+USER_DIRECTORY = re.compile(rb'/(?:home|Users)/[^/\x00\r\n]+/|[a-z]:[/\\]users[/\\][^/\\\x00\r\n]+[/\\]', re.I)
+# Hosted GitHub checkouts repeat the repository name. A generic drive:/a/
+# prefix also matches upstream MSVC CRT source paths, which are not host data.
+HOSTED_WORKSPACE = re.compile(rb'[a-z]:[/\\]a[/\\]([^/\\\s\x00]+)[/\\]\1(?:[/\\]|$)', re.I)
+PATH_PATTERNS = [('user directory', USER_DIRECTORY), ('GitHub workspace', HOSTED_WORKSPACE)]
+WIDE_PATH_PATTERNS = [(kind, re.compile(pattern.pattern.decode('ascii'), re.I)) for kind, pattern in PATH_PATTERNS]
 
 
 def package_info():
@@ -41,7 +47,13 @@ def build_paths():
     ]
     if directory := os.environ.get('CARGO_TARGET_DIR'):
         paths.append((ROOT / directory, '/target'))
-    return sorted({(str(path.resolve()), replacement) for path, replacement in paths}, key=lambda item: len(item[0]))
+    if workspace := os.environ.get('GITHUB_WORKSPACE'):
+        # Compiler tests use a temporary source root but may still run in the
+        # checkout. Account for both locations, including junction spellings.
+        if Path(workspace).resolve() != ROOT.resolve():
+            paths.append((Path(workspace), '/workspace'))
+    return sorted({(str(spelling), replacement) for path, replacement in paths
+                   for spelling in (path.absolute(), path.resolve())}, key=lambda item: len(item[0]))
 
 
 def release_environment(target=None):
@@ -80,20 +92,39 @@ def verify_binary_privacy(source):
     needles = set()
     for path, _ in build_paths():
         # A filesystem root is not an identifying path.
-        if len(Path(path).parts) < 2:
+        if path in {'/', '\\'} or re.fullmatch(r'[a-z]:[/\\]', path, re.I):
             continue
         for spelling in {path, path.replace('\\', '/')}:
             needles.update(spelling.lower().encode(encoding) for encoding in ('utf-8', 'utf-16-le'))
-    # The draft job may run on a different host than the build job.
-    identifying_path = re.compile(rb'/(?:home|Users)/[^/\s\x00]+/|[a-z]:[/\\](?:users|a)[/\\][^/\\\s\x00]+[/\\]', re.I)
     overlap = max(1024, max(map(len, needles), default=0))
     tail = b''
+    position = 0
     while chunk := source.read(1024 * 1024):
         data = tail + chunk
         lower = data.lower()
-        if any(needle in lower for needle in needles) or identifying_path.search(data) or identifying_path.search(data.replace(b'\x00', b'')):
-            raise ValueError('Executable contains a build-host path; rebuild with the release packaging tools')
+        def reject(kind, offset):
+            # Give useful CI diagnostics without printing the identifying path.
+            location = position - len(tail) + offset
+            raise ValueError(f'Executable contains a build-host path ({kind}, byte 0x{location:x}); rebuild with the release packaging tools')
+
+        for needle in needles:
+            if (offset := lower.find(needle)) >= 0:
+                reject('configured build directory', offset)
+        # The draft job may run on a different host than the build job.
+        for kind, pattern in PATH_PATTERNS:
+            if match := pattern.search(data):
+                reject(kind, match.start())
+        # Decode both possible UTF-16LE alignments, preserving NUL separators
+        # and non-ASCII user names. Stripping NULs joins unrelated strings.
+        for alignment in (0, 1):
+            end = len(data) - (len(data) - alignment) % 2
+            wide = data[alignment:end].decode('utf-16-le', errors='replace')
+            for kind, pattern in WIDE_PATH_PATTERNS:
+                if match := pattern.search(wide):
+                    offset = alignment + len(wide[:match.start()].encode('utf-16-le'))
+                    reject(kind + ', UTF-16LE', offset)
         tail = data[-overlap:]
+        position += len(chunk)
 
 
 def version_info(tag, manifest=None):
