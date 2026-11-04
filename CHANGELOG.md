@@ -3,6 +3,10 @@
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.4
 ## [0.1.3] - 2026-11-04
 
 ### 🐛 Bug Fixes
