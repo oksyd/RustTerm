@@ -168,13 +168,15 @@ impl AudioInput {
             .as_mut()
             .ok_or(Error::Invalid("audio capture encoder"))?
             .encode(samples)?;
-        if encoded.is_empty() {
-            return Ok(Vec::new());
+        let mut actions = Vec::with_capacity(encoded.len() * 2);
+        for frame in encoded {
+            let mut packet = Vec::with_capacity(frame.len() + 1);
+            packet.push(6);
+            packet.extend_from_slice(&frame);
+            actions.push(Action::Send(vec![5]));
+            actions.push(Action::Send(packet));
         }
-        let mut packet = Vec::with_capacity(encoded.len() + 1);
-        packet.push(6);
-        packet.extend_from_slice(&encoded);
-        Ok(vec![Action::Send(vec![5]), Action::Send(packet)])
+        Ok(actions)
     }
 
     pub fn reset(&mut self, generation: u64) {
@@ -303,35 +305,60 @@ mod tests {
     }
 
     #[cfg(feature = "audio-codecs")]
+    fn aac(frames: u32) -> (AudioInput, u64) {
+        let mut input = AudioInput::default();
+        input.receive(&packet(1, 2)).unwrap();
+        let mut formats = packet(2, 1);
+        formats.extend_from_slice(&27u32.to_le_bytes());
+        formats.extend_from_slice(&0xa106u16.to_le_bytes());
+        formats.extend_from_slice(&1u16.to_le_bytes());
+        formats.extend_from_slice(&44100u32.to_le_bytes());
+        formats.extend_from_slice(&8000u32.to_le_bytes());
+        formats.extend_from_slice(&1u16.to_le_bytes());
+        formats.extend_from_slice(&16u16.to_le_bytes());
+        formats.extend_from_slice(&0u16.to_le_bytes());
+        input.receive(&formats).unwrap();
+        let actions = input.open(0, frames, false).unwrap();
+        let Action::Event(ChannelEvent::Capture(CaptureEvent::Open(request))) = actions[0] else {
+            panic!("capture")
+        };
+        input.confirm(request.generation, true).unwrap();
+        (input, request.generation)
+    }
+
+    #[cfg(feature = "audio-codecs")]
+    #[test]
+    fn microphone_sends_independently_decodable_raw_aac_packets() {
+        let (mut input, generation) = aac(4096);
+        let actions = input.samples(generation, &[0; 4096 * 2]).unwrap();
+        assert!(actions.len() >= 4);
+        assert!(actions.len().is_multiple_of(2));
+        let mut decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
+        decoder.config_raw(&[0x12, 0x08]).unwrap(); // AAC-LC, 44.1 kHz, mono.
+        for pair in actions.chunks_exact(2) {
+            assert!(matches!(&pair[0], Action::Send(data) if data == &[5]));
+            let Action::Send(data) = &pair[1] else {
+                panic!("capture packet")
+            };
+            assert_eq!(data[0], 6);
+            let frame = &data[1..];
+            assert!(!frame.is_empty());
+            assert_ne!(frame[0], 0xff);
+            assert_eq!(decoder.fill(frame).unwrap(), frame.len());
+            decoder.decode_frame(&mut [0; 1024]).unwrap();
+            assert_eq!(decoder.stream_info().frameSize, 1024);
+        }
+    }
+
+    #[cfg(feature = "audio-codecs")]
     #[test]
     fn capture_discontinuity_discards_aac_history_before_resuming() {
-        fn aac() -> (AudioInput, u64) {
-            let mut input = AudioInput::default();
-            input.receive(&packet(1, 2)).unwrap();
-            let mut formats = packet(2, 1);
-            formats.extend_from_slice(&27u32.to_le_bytes());
-            formats.extend_from_slice(&0xa106u16.to_le_bytes());
-            formats.extend_from_slice(&1u16.to_le_bytes());
-            formats.extend_from_slice(&44100u32.to_le_bytes());
-            formats.extend_from_slice(&8000u32.to_le_bytes());
-            formats.extend_from_slice(&1u16.to_le_bytes());
-            formats.extend_from_slice(&16u16.to_le_bytes());
-            formats.extend_from_slice(&0u16.to_le_bytes());
-            input.receive(&formats).unwrap();
-            let actions = input.open(0, 320, false).unwrap();
-            let Action::Event(ChannelEvent::Capture(CaptureEvent::Open(request))) = actions[0]
-            else {
-                panic!("capture")
-            };
-            input.confirm(request.generation, true).unwrap();
-            (input, request.generation)
-        }
-        let (mut input, generation) = aac();
+        let (mut input, generation) = aac(320);
         for _ in 0..6 {
             input.samples(generation, &[0x34; 640]).unwrap();
         }
         input.reset(generation);
-        let (mut fresh, fresh_generation) = aac();
+        let (mut fresh, fresh_generation) = aac(320);
         let packets = |actions: Vec<Action>| {
             actions
                 .into_iter()

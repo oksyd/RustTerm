@@ -112,6 +112,13 @@ impl SettingsForm {
                     .child(updates.message().render()),
             )
             .child(actions)
+            .when(
+                updates
+                    .installation
+                    .as_ref()
+                    .is_some_and(update::Installation::is_debian),
+                |body| body.child(hint(i18n_key::UPDATES_DEBIAN_HELP)),
+            )
             .when(updates.installation.is_none(), |body| {
                 body.child(hint(if cfg!(windows) {
                     i18n_key::UPDATES_WINDOWS_PORTABLE

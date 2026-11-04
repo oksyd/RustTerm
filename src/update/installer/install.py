@@ -57,8 +57,14 @@ def safe_directory(path, *, create=True):
     if create:
         path.mkdir(mode=0o755, parents=True, exist_ok=True)
     info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
-        raise ValueError(f"Installation directory must be owned by this user and not writable by others: {path}")
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"Installation path must be a directory, not a symlink: {path}")
+    if info.st_uid != os.geteuid():
+        raise ValueError(f"Installation directory must be owned by the current user: {path}")
+    # A user may deliberately share their directories with their group (umask
+    # 0002). Preserve that policy instead of chmod'ing existing directories.
+    if info.st_mode & 0o002:
+        raise ValueError(f"Installation directory must not be writable by everyone: {path}")
 
 
 def destination(prefix, relative):
@@ -239,7 +245,8 @@ def main():
                 options.expected_manifest_sha256)
     except (OSError, ValueError, KeyError, TypeError, KeyboardInterrupt) as error:
         print(f"RustTerm installation failed: {error}", file=sys.stderr)
-        print("If rollback was interrupted, run this installer again with the same prefix to recover.", file=sys.stderr)
+        if (prefix / JOURNAL).exists() or (prefix / JOURNAL).is_symlink():
+            print("An installation transaction remains. Run this installer again with the same prefix to recover.", file=sys.stderr)
         return 1
     print(f"{'Removed' if options.uninstall else 'Installed'} RustTerm in {prefix}; configuration and credentials retained.")
     # Cache refresh is best-effort and bounded; it cannot invalidate committed files.

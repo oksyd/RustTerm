@@ -1,6 +1,8 @@
 """Small filesystem-only installer regressions; never launch RustTerm or build a binary."""
 
 import hashlib
+import contextlib
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -49,6 +51,54 @@ class InstallerTests(unittest.TestCase):
         installer.install(self.package, self.prefix, uninstall=True)
         self.assertEqual(config.read_text(), "user data")
         self.assertTrue(all(not (self.prefix / relative).exists() for relative in installer.FILES))
+
+    def test_group_writable_user_directories_are_preserved_through_install_update_and_remove(self):
+        directories = [self.prefix, *(self.prefix / name for name in [
+            'bin', 'share', 'share/icons', 'share/icons/hicolor',
+            'share/icons/hicolor/scalable', 'share/icons/hicolor/scalable/apps',
+        ])]
+        for path in directories:
+            path.mkdir(parents=True, exist_ok=True)
+            path.chmod(0o775)
+        unrelated = self.prefix / 'bin/other-program'
+        unrelated.write_bytes(b'untouched')
+        installer.install(self.package, self.prefix)
+        self.set_binary(b'new version')
+        installer.install(self.package, self.prefix)
+        self.assertEqual((self.prefix / 'bin/rustterm').read_bytes(), b'new version')
+        installer.install(self.package, self.prefix, uninstall=True)
+        for path in directories:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o775)
+        self.assertEqual(unrelated.read_bytes(), b'untouched')
+
+    def test_world_writable_foreign_owned_and_symlink_directories_are_rejected(self):
+        self.prefix.mkdir()
+        self.prefix.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, 'writable by everyone'):
+            installer.install(self.package, self.prefix)
+        self.prefix.chmod(0o775)
+        with mock.patch.object(installer.os, 'geteuid', return_value=os.geteuid() + 1):
+            with self.assertRaisesRegex(ValueError, 'owned by the current user'):
+                installer.install(self.package, self.prefix)
+        outside = self.prefix.parent / 'outside'
+        outside.mkdir()
+        (self.prefix / 'bin').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'not a symlink'):
+            installer.install(self.package, self.prefix)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_recovery_hint_only_appears_for_a_pending_transaction(self):
+        self.prefix.mkdir()
+        for pending in [False, True]:
+            if pending:
+                (self.prefix / installer.JOURNAL).write_text('pending transaction')
+            error = io.StringIO()
+            with mock.patch.object(installer.sys, 'argv', ['install.py', '--prefix', str(self.prefix)]), \
+                 mock.patch.object(installer, 'install', side_effect=ValueError('directory error')), \
+                 contextlib.redirect_stderr(error):
+                self.assertEqual(installer.main(), 1)
+            self.assertIn('directory error', error.getvalue())
+            self.assertEqual('transaction remains' in error.getvalue(), pending)
 
     def test_mid_commit_failure_restores_every_old_file(self):
         installer.install(self.package, self.prefix)

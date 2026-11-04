@@ -2,6 +2,10 @@ use super::*;
 use std::os::unix::fs::DirBuilderExt;
 use std::{fs, io::Cursor, path::Path};
 
+fn select_release(release: GithubRelease, current: &str) -> Result<Option<Release>> {
+    select_release_for_installation(release, current, false)
+}
+
 fn release_json(version: &str) -> GithubRelease {
     let name = format!(
         "rustterm-{}-linux-x86_64.tar.gz",
@@ -19,6 +23,37 @@ fn release() -> Release {
     select_release(release_json("0.2.0"), "0.1.0")
         .unwrap()
         .unwrap()
+}
+
+#[test]
+fn release_package_matches_the_installation_method() {
+    let mut metadata = release_json("0.2.0");
+    let deb_name = "rustterm-0.2.0-linux-x86_64.deb";
+    for name in [deb_name.to_owned(), format!("{deb_name}.sha256")] {
+        metadata.assets.push(Asset {
+            browser_download_url: format!("{RELEASES_URL}/download/0.2.0/{name}"),
+            name,
+            size: 120,
+            digest: None,
+        });
+    }
+    let mut without_deb = release_json("0.2.0");
+    assert!(select_release_for_installation(without_deb, "0.1.0", true).is_err());
+    let deb = select_release_for_installation(metadata, "0.1.0", true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(deb.archive.name, deb_name);
+    assert_eq!(deb.checksum.name, format!("{deb_name}.sha256"));
+    assert!(release().archive.name.ends_with(".tar.gz"));
+    for bad_url in [
+        "http://github.com/oksyd/RustTerm/releases/download/0.2.0/update.deb",
+        "https://other.example/update.deb",
+    ] {
+        without_deb = release_json("0.2.0");
+        without_deb.assets[0].name = deb_name.into();
+        without_deb.assets[0].browser_download_url = bad_url.into();
+        assert!(select_release_for_installation(without_deb, "0.1.0", true).is_err());
+    }
 }
 
 #[test]
@@ -299,7 +334,7 @@ fn archive_rejects_links_duplicate_files_wrong_root_and_manifest_mismatch() {
 }
 
 #[test]
-fn debian_installation_is_not_managed_by_the_user_prefix_updater() {
+fn debian_manifest_under_a_user_prefix_is_not_a_system_installation() {
     let dir = tempfile::tempdir().unwrap();
     let prefix = dir.path();
     fs::create_dir(prefix.join("bin")).unwrap();
@@ -316,7 +351,7 @@ fn debian_installation_is_not_managed_by_the_user_prefix_updater() {
     )
     .unwrap();
     let error = Installation::at_executable(&prefix.join("bin/rustterm")).unwrap_err();
-    assert!(error.to_string().contains(".deb with APT"));
+    assert!(error.to_string().contains("installed by APT under /usr"));
     assert_eq!(
         fs::read(prefix.join("bin/rustterm")).unwrap(),
         b"installed binary"
@@ -347,8 +382,24 @@ fn verified_package_updates_custom_prefix_without_running_downloaded_scripts() {
     )
     .unwrap();
     fs::write(prefix.join("keep-config"), b"untouched").unwrap();
+    // Existing user directories may be group-writable (umask 0002).
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&prefix, fs::Permissions::from_mode(0o775)).unwrap();
+    fs::set_permissions(prefix.join("bin"), fs::Permissions::from_mode(0o775)).unwrap();
     let installation = Installation::at_executable(&prefix.join("bin/rustterm")).unwrap();
     installation.install(&package).unwrap();
+    assert_eq!(
+        fs::metadata(&prefix).unwrap().permissions().mode() & 0o777,
+        0o775
+    );
+    assert_eq!(
+        fs::metadata(prefix.join("bin"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o775
+    );
     assert_eq!(fs::read(prefix.join("keep-config")).unwrap(), b"untouched");
     let result = std::process::Command::new(installation.executable())
         .output()

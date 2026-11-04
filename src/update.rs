@@ -1,5 +1,6 @@
 //! Release updates use authenticated HTTPS, bounded downloads, verified archives,
-//! and the same transactional installer as manual installations.
+//! and either APT or the transactional user-prefix installer.
+mod debian;
 mod install;
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
@@ -154,7 +155,7 @@ fn client(proxy: &str, timeout: Duration) -> Result<ureq::Agent> {
         .into())
 }
 
-pub fn check(proxy: &str) -> Result<Option<Release>> {
+pub fn check(proxy: &str, installation: Option<&Installation>) -> Result<Option<Release>> {
     let agent = client(proxy, Duration::from_secs(30))?;
     let response = agent
         .get(LATEST_URL)
@@ -171,13 +172,18 @@ pub fn check(proxy: &str) -> Result<Option<Release>> {
         other => other.context("GitHub Releases request failed")?,
     };
     let bytes = read_bounded(response.body_mut().as_reader(), MAX_METADATA)?;
-    select_release(
+    select_release_for_installation(
         serde_json::from_slice(&bytes).context("Invalid GitHub release response")?,
         CURRENT_VERSION,
+        installation.is_some_and(Installation::is_debian),
     )
 }
 
-fn select_release(release: GithubRelease, current: &str) -> Result<Option<Release>> {
+fn select_release_for_installation(
+    release: GithubRelease,
+    current: &str,
+    debian: bool,
+) -> Result<Option<Release>> {
     if release.draft || release.prerelease {
         return Ok(None);
     }
@@ -192,7 +198,11 @@ fn select_release(release: GithubRelease, current: &str) -> Result<Option<Releas
         return Ok(None);
     }
     let platform = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        "linux-x86_64.tar.gz"
+        if debian {
+            "linux-x86_64.deb"
+        } else {
+            "linux-x86_64.tar.gz"
+        }
     } else if cfg!(all(windows, target_arch = "x86_64")) {
         "windows-x86_64.zip"
     } else {
@@ -281,6 +291,14 @@ pub fn download_and_install(
     mut progress: impl FnMut(Progress),
 ) -> Result<()> {
     installation.validate()?;
+    ensure!(
+        release.archive.name.ends_with(if installation.is_debian() {
+            ".deb"
+        } else {
+            ".tar.gz"
+        }),
+        "The update package does not match the installation method"
+    );
     let agent = client(proxy, Duration::from_secs(20 * 60))?;
     let mut response = agent.get(&release.checksum.browser_download_url).call()?;
     let expected = checksum(
@@ -300,7 +318,11 @@ pub fn download_and_install(
     let staging = tempfile::Builder::new()
         .prefix("rustterm-update-")
         .tempdir()?;
-    let archive_path = staging.path().join("release.tar.gz");
+    let archive_path = staging.path().join(if installation.is_debian() {
+        "rustterm-update.deb"
+    } else {
+        "release.tar.gz"
+    });
     let mut archive = File::create(&archive_path)?;
     let mut response = agent.get(&release.archive.browser_download_url).call()?;
     copy_archive(
@@ -315,11 +337,21 @@ pub fn download_and_install(
     drop(archive);
     progress(Progress::Verifying);
     cancelled(cancel)?;
-    let package = install::unpack(&archive_path, staging.path(), release)?;
+    let package = if installation.is_debian() {
+        debian::verify_package(&archive_path, &release.version)?;
+        archive_path
+    } else {
+        install::unpack(&archive_path, staging.path(), release)?
+    };
     cancelled(cancel)?;
+    installation.validate()?;
     let _installing = cancel.begin_install()?;
     progress(Progress::Installing);
-    installation.install(&package)?;
+    if installation.is_debian() {
+        debian::install(&package, &release.version, proxy)?;
+    } else {
+        installation.install(&package)?;
+    }
     Ok(())
 }
 

@@ -32,7 +32,7 @@ Download your platform's x86_64 package from [Releases](https://github.com/oksyd
 sudo apt install ./rustterm-<version>-linux-x86_64.deb
 ```
 
-Launch **RustTerm** from your application menu or run `rustterm`. Install a newer `.deb` the same way to update; uninstall with `sudo apt remove rustterm`.
+Launch **RustTerm** from your application menu or run `rustterm`. In-app updates download the new `.deb` and request system authorization to install it through APT. You can also install a newer `.deb` manually; uninstall with `sudo apt remove rustterm`.
 
 For installation without `sudo`, extract the `.tar.gz` and run `./install.sh` (Python 3.11+). This installs to `~/.local` and supports in-app updates.
 

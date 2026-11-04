@@ -263,7 +263,7 @@ def package_deb(source, output):
         # dlopen libraries are invisible to dpkg-shlibdeps. Fontconfig also
         # supplies the system font configuration read by the terminal renderer.
         dependencies = dependencies.removeprefix('shlibs:Depends=') + (
-            ', fontconfig, libvulkan1, libwayland-client0, libwayland-cursor0, libpulse0, ca-certificates')
+            ', fontconfig, libvulkan1, libwayland-client0, libwayland-cursor0, libpulse0, ca-certificates, pkexec')
         files = sorted(path for path in root.rglob('*') if path.is_file())
         installed_size = sum((path.stat().st_size + 1023) // 1024 for path in files)
         (control / 'control').write_text(

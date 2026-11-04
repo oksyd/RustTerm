@@ -83,7 +83,7 @@ Desktop binaries for RustTerm {info['version']}.
 | Linux x86_64, user installation | `rustterm-{info['version']}-linux-x86_64.tar.gz` | Extract and run `./install.sh` (Python 3.11+) |
 | Windows x86_64 (MSVC) | `rustterm-{info['version']}-windows-x86_64.zip` | Extract and run `rustterm.exe` |
 
-The Ubuntu `.deb` includes the application menu entry and installs runtime dependencies through APT. Download and install the next `.deb` to update; uninstall with `sudo apt remove rustterm`. The `.tar.gz` supports installation without sudo and in-app updates. Both Linux packages contain the same executable.
+The Ubuntu `.deb` includes the application menu entry and installs runtime dependencies through APT. In-app updates download the new `.deb` and request system authorization for APT to install it; uninstall with `sudo apt remove rustterm`. The `.tar.gz` supports installation without sudo and in-app updates. Both Linux packages contain the same executable.
 
 Packages include licenses, README, and build metadata. `SHA256SUMS` covers all downloads; each package also has an individual `.sha256` file.
 

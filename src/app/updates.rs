@@ -137,9 +137,10 @@ impl Updates {
         self.status = Status::Checking;
         self.error = None;
         self.release = None;
+        let installation = self.installation.clone();
         let worker = cx
             .background_executor()
-            .spawn(async move { update::check(&proxy) });
+            .spawn(async move { update::check(&proxy, installation.as_ref()) });
         self.operation = Some(cx.spawn(async move |this, cx| {
             let result = worker.await;
             let _ = this.update(cx, |this, cx| {

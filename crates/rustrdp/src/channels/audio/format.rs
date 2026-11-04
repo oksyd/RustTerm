@@ -204,9 +204,9 @@ impl CaptureEncoder {
         Ok(Self::Simple(format))
     }
 
-    pub fn encode(&mut self, samples: &[u8]) -> Result<Vec<u8>> {
+    pub fn encode(&mut self, samples: &[u8]) -> Result<Vec<Vec<u8>>> {
         match self {
-            Self::Simple(format) => format.encode_capture(samples),
+            Self::Simple(format) => Ok(vec![format.encode_capture(samples)?]),
             #[cfg(feature = "audio-codecs")]
             Self::Aac(encoder) => encoder.encode(samples),
         }

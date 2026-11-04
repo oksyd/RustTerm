@@ -1,0 +1,32 @@
+name: Build cache
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'src/**'
+      - 'crates/**'
+      - 'assets/**'
+      - '.cargo/**'
+      - '.github/workflows/**'
+      - 'tools/release/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    # Different tags cannot read one another's caches. All of them can read
+    # caches written by a push/dispatch on the repository's default branch.
+    if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch
+    uses: ./.github/workflows/build.yml
+    with:
+      commit: ${{ github.sha }}

@@ -236,7 +236,7 @@ class ReleaseTests(unittest.TestCase):
         manifest = artifacts.verify_deb(archive, VERSION)
         self.assertEqual(manifest['installation'], 'deb')
         dependencies = subprocess.check_output(['dpkg-deb', '-f', str(archive), 'Depends'], text=True)
-        for dependency in ['libc6 (>= 2.39)', 'libvulkan1', 'libwayland-client0', 'libpulse0', 'fontconfig']:
+        for dependency in ['libc6 (>= 2.39)', 'libvulkan1', 'libwayland-client0', 'libpulse0', 'fontconfig', 'pkexec']:
             self.assertIn(dependency, dependencies)
         listing = subprocess.check_output(['dpkg-deb', '-c', str(archive)], text=True)
         self.assertIn('./usr/bin/rustterm', listing)

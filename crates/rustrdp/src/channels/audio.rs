@@ -77,6 +77,15 @@ struct Confirmation {
     block: u8,
 }
 
+impl Confirmation {
+    fn action(self, elapsed_ms: u32) -> Action {
+        let mut body = Vec::with_capacity(4);
+        body.extend_from_slice(&self.timestamp.wrapping_add(elapsed_ms as u16).to_le_bytes());
+        body.extend_from_slice(&[self.block, 0]);
+        Action::Send(pdu(WAVE_CONFIRM, &body))
+    }
+}
+
 pub(super) struct Audio {
     max_message: usize,
     formats: Vec<WaveFormat>,
@@ -190,15 +199,7 @@ impl Audio {
             // worker completions must not acknowledge newer server blocks.
             return Ok(Vec::new());
         };
-        let mut body = Vec::with_capacity(4);
-        body.extend_from_slice(
-            &confirmation
-                .timestamp
-                .wrapping_add(elapsed_ms as u16)
-                .to_le_bytes(),
-        );
-        body.extend_from_slice(&[confirmation.block, 0]);
-        Ok(vec![Action::Send(pdu(WAVE_CONFIRM, &body))])
+        Ok(vec![confirmation.action(elapsed_ms)])
     }
 
     fn negotiate(&mut self, mut reader: Reader<'_>) -> Result<Vec<Action>> {
@@ -280,18 +281,19 @@ impl Audio {
             return Err(Error::Backpressure);
         }
         let format = self.formats[index];
-        if self
-            .decoder
-            .as_ref()
-            .is_none_or(|(previous, _)| *previous != index)
-        {
-            self.decoder = Some((index, Decoder::new(format)?));
-        }
-        let (_, decoder) = self
-            .decoder
-            .as_mut()
-            .ok_or(Error::Invalid("audio decoder"))?;
-        let data = decoder.decode(data, self.max_message)?;
+        let data = match self.decode_samples(index, data) {
+            Ok(data) => data,
+            Err(error) => {
+                // A bad optional audio block must not tear down the desktop.
+                // Discard decoder history, acknowledge the skipped block so the
+                // server can continue, and surface a nonfatal channel warning.
+                self.decoder = None;
+                return Ok(vec![
+                    Confirmation { timestamp, block }.action(0),
+                    Action::Event(ChannelEvent::RequestRejected(error)),
+                ]);
+            }
+        };
         self.next_token = self
             .next_token
             .checked_add(1)
@@ -311,6 +313,21 @@ impl Audio {
                 data,
             }),
         ))])
+    }
+
+    fn decode_samples(&mut self, index: usize, data: Vec<u8>) -> Result<Vec<u8>> {
+        if self
+            .decoder
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != index)
+        {
+            self.decoder = Some((index, Decoder::new(self.formats[index])?));
+        }
+        let (_, decoder) = self
+            .decoder
+            .as_mut()
+            .ok_or(Error::Invalid("audio decoder"))?;
+        decoder.decode(data, self.max_message)
     }
 }
 
@@ -441,6 +458,56 @@ mod tests {
             }
         );
         assert_eq!(audio.confirm(samples.token, 5).unwrap().len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "audio-codecs")]
+    fn legacy_wave_reassembles_microsoft_raw_aac_before_decoding() {
+        let mut audio = Audio::new(65536);
+        audio
+            .receive(&formats(&[format(0xa106, 1, 44100)]))
+            .unwrap();
+        let info = [
+            WAVE, 0, 12, 0, 10, 0, 0, 0, 7, 0, 0, 0, 0x00, 0xc8, 0x00, 0x07,
+        ];
+        assert!(audio.receive(&info).unwrap().is_empty());
+        let samples = take_samples(audio.receive(&[0; 4]).unwrap());
+        assert_eq!(samples.data.len(), 2048);
+        let confirmation = audio.confirm(samples.token, 2).unwrap();
+        assert!(matches!(&confirmation[0], Action::Send(data)
+            if data == &[WAVE_CONFIRM, 0, 4, 0, 12, 0, 7, 0]));
+    }
+
+    #[test]
+    #[cfg(feature = "audio-codecs")]
+    fn malformed_aac_is_acknowledged_without_ending_the_channel() {
+        for malformed in [&[0xff; 9][..], &[0x00][..]] {
+            let mut audio = Audio::new(65536);
+            audio
+                .receive(&formats(&[format(0xa106, 1, 44100)]))
+                .unwrap();
+            let actions = audio.receive(&wave2(0, 10, 3, malformed)).unwrap();
+            assert!(
+                actions.iter().any(|action| matches!(
+                    action,
+                    Action::Event(ChannelEvent::RequestRejected(_))
+                ))
+            );
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Send(data)
+            if data == &[WAVE_CONFIRM, 0, 4, 0, 10, 0, 3, 0]))
+            );
+            assert!(audio.pending.is_empty());
+            let samples = take_samples(
+                audio
+                    .receive(&wave2(0, 20, 4, &[0x00, 0xc8, 0x00, 0x07]))
+                    .unwrap(),
+            );
+            assert_eq!(samples.data, vec![0; 2048]);
+            assert_eq!(audio.confirm(samples.token, 1).unwrap().len(), 1);
+        }
     }
 
     #[test]

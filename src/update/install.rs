@@ -22,6 +22,7 @@ const INSTALLER: &str = include_str!("installer/install.py");
 pub struct Installation {
     prefix: PathBuf,
     manifest_sha256: [u8; 32],
+    debian: bool,
 }
 impl Installation {
     pub fn current() -> Result<Self> {
@@ -60,6 +61,7 @@ impl Installation {
         let installation = Self {
             prefix,
             manifest_sha256: Sha256::digest(&marker).into(),
+            debian: manifest["installation"] == "deb",
         };
         installation.validate()?;
         Ok(installation)
@@ -67,6 +69,10 @@ impl Installation {
 
     pub fn executable(&self) -> PathBuf {
         self.prefix.join("bin/rustterm")
+    }
+
+    pub fn is_debian(&self) -> bool {
+        self.debian
     }
 
     pub(super) fn validate(&self) -> Result<()> {
@@ -83,8 +89,8 @@ impl Installation {
         );
         let manifest: serde_json::Value = serde_json::from_slice(&marker)?;
         ensure!(
-            manifest["installation"] != "deb",
-            "Update Debian packages by installing the new .deb with APT"
+            (manifest["installation"] == "deb") == self.debian,
+            "The installation method changed. Restart RustTerm before updating."
         );
         ensure!(
             manifest["platform"] == "linux-x86_64" && manifest["variant"] == "release",
@@ -101,17 +107,39 @@ impl Installation {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            if self.debian {
+                ensure!(
+                    self.prefix == Path::new("/usr"),
+                    "Debian packages must be installed by APT under /usr"
+                );
+                for path in [
+                    &self.prefix,
+                    &self.executable(),
+                    &self.prefix.join(MANIFEST),
+                ] {
+                    let metadata = fs::symlink_metadata(path)?;
+                    ensure!(
+                        metadata.uid() == 0 && metadata.mode() & 0o022 == 0,
+                        "Debian installation files must be owned by root and not writable by other users"
+                    );
+                }
+                return super::debian::validate_installed(CURRENT_VERSION);
+            }
             let metadata = fs::metadata(&self.prefix)?;
             ensure!(
                 metadata.uid() == rustix::process::geteuid().as_raw()
-                    && metadata.mode() & 0o022 == 0,
-                "Installation directory must be owned by this user and not writable by others"
+                    && metadata.mode() & 0o002 == 0,
+                "Installation directory must be owned by this user and not writable by everyone"
             );
         }
         Ok(())
     }
 
     pub(super) fn install(&self, package: &Path) -> Result<()> {
+        ensure!(
+            !self.debian,
+            "Debian installations must be updated through APT"
+        );
         self.validate()?;
         // Execute our bundled installer, never scripts from a downloaded archive.
         fs::write(package.join("install.py"), INSTALLER)?;

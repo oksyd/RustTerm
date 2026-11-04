@@ -13,6 +13,10 @@ use symphonia_core::{
     units::{Duration, Timestamp},
 };
 
+const AAC_RATES: [u32; 13] = [
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+];
+
 pub(crate) struct Encoder {
     codec: fdk_aac::enc::Encoder,
     pcm: Vec<i16>,
@@ -36,7 +40,9 @@ impl Encoder {
                 ChannelMode::Stereo
             },
             audio_object_type: AudioObjectType::Mpeg4LowComplexity,
-            transport: Transport::Adts,
+            // MS-RDPEA / MS-RDPEAI's WAVE_FORMAT_AAC (0xa106) carries raw AAC
+            // access units. An ADTS header is not part of this wire format.
+            transport: Transport::Raw,
         })
         .map_err(|_| Error::Unsupported("AAC capture format"))?;
         let info = codec
@@ -52,7 +58,7 @@ impl Encoder {
         })
     }
 
-    pub fn encode(&mut self, samples: &[u8]) -> Result<Vec<u8>> {
+    pub fn encode(&mut self, samples: &[u8]) -> Result<Vec<Vec<u8>>> {
         if samples.len() > 256 * 1024 || !samples.len().is_multiple_of(2) {
             return Err(Error::Limit("AAC capture samples"));
         }
@@ -66,6 +72,7 @@ impl Encoder {
         );
         let mut remaining = self.pcm.as_slice();
         let mut output = Vec::new();
+        let mut output_bytes = 0;
         while !remaining.is_empty() {
             let encoded = self
                 .codec
@@ -77,10 +84,15 @@ impl Encoder {
             {
                 return Err(Error::Invalid("AAC encoder progress"));
             }
-            if encoded.output_size > (256 * 1024usize).saturating_sub(output.len()) {
+            if encoded.output_size > (256 * 1024usize).saturating_sub(output_bytes) {
                 return Err(Error::Limit("AAC capture output"));
             }
-            output.extend_from_slice(&self.packet[..encoded.output_size]);
+            // Raw AAC has no frame-length header. Each encoder access unit
+            // must remain a separate RDPEAI DATA packet.
+            if encoded.output_size != 0 {
+                output.push(self.packet[..encoded.output_size].to_vec());
+                output_bytes += encoded.output_size;
+            }
             remaining = &remaining[encoded.input_consumed..];
         }
         Ok(output)
@@ -92,6 +104,12 @@ pub(in crate::channels::audio) struct Decoder {
     codec: Box<dyn AudioDecoder>,
     pending: Vec<u8>,
     scratch: Vec<i16>,
+    aac: Option<AacTransport>,
+}
+
+enum AacTransport {
+    Raw(fdk_aac::dec::Decoder),
+    Adts,
 }
 
 impl Decoder {
@@ -133,12 +151,41 @@ impl Decoder {
             codec,
             pending: Vec::new(),
             scratch: Vec::new(),
+            aac: None,
         })
     }
 
     pub fn decode(&mut self, data: &[u8], limit: usize) -> Result<Vec<u8>> {
         let mut output = Vec::new();
         if self.format.encoding == Encoding::Aac {
+            if data.is_empty() {
+                return Err(Error::Invalid("empty AAC packet"));
+            }
+            if self.aac.is_none() {
+                // Raw AAC elements cannot start with the ADTS sync byte. Keep
+                // framing fixed for this stream, including fragmented headers.
+                self.aac = Some(if data[0] == 0xff {
+                    AacTransport::Adts
+                } else {
+                    let rate = AAC_RATES
+                        .iter()
+                        .position(|&rate| rate == self.format.pcm.sample_rate)
+                        .ok_or(Error::Unsupported("AAC sample rate"))?
+                        as u8;
+                    let config = [
+                        (2 << 3) | (rate >> 1),
+                        (rate << 7) | ((self.format.pcm.channels as u8) << 3),
+                    ];
+                    let mut decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
+                    decoder
+                        .config_raw(&config)
+                        .map_err(|_| Error::Unsupported("AAC raw configuration"))?;
+                    AacTransport::Raw(decoder)
+                });
+            }
+            if let Some(AacTransport::Raw(decoder)) = &mut self.aac {
+                return decode_raw(decoder, self.format, &mut self.scratch, data, limit);
+            }
             if data.len() > limit.saturating_sub(self.pending.len()) {
                 return Err(Error::Limit("buffered AAC data"));
             }
@@ -189,6 +236,44 @@ impl Decoder {
     }
 }
 
+fn decode_raw(
+    decoder: &mut fdk_aac::dec::Decoder,
+    format: WaveFormat,
+    scratch: &mut Vec<i16>,
+    data: &[u8],
+    limit: usize,
+) -> Result<Vec<u8>> {
+    if data.len() > limit {
+        return Err(Error::Limit("AAC audio payload"));
+    }
+    scratch.resize(1024 * usize::from(format.pcm.channels), 0);
+    let consumed = decoder
+        .fill(data)
+        .map_err(|_| Error::Invalid("AAC raw payload"))?;
+    if consumed != data.len() {
+        return Err(Error::Limit("buffered AAC data"));
+    }
+    // Unlike ADTS, raw AAC is packet-delimited. Do not merge truncated access
+    // units with the next RDP packet or silently discard concatenated frames.
+    decoder
+        .decode_frame(scratch)
+        .map_err(|_| Error::Invalid("AAC raw payload"))?;
+    let info = decoder.stream_info();
+    if info.sampleRate != format.pcm.sample_rate as i32
+        || info.numChannels != i32::from(format.pcm.channels)
+        || info.frameSize != 1024
+    {
+        return Err(Error::Invalid("decoded AAC format"));
+    }
+    if scratch.len() > limit / 2 {
+        return Err(Error::Limit("decoded audio block"));
+    }
+    Ok(scratch
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect())
+}
+
 fn append(
     decoded: GenericAudioBufferRef<'_>,
     format: WaveFormat,
@@ -216,9 +301,9 @@ struct AdtsHeader {
 
 impl AdtsHeader {
     fn parse(bytes: &[u8], format: WaveFormat) -> Result<Self> {
-        const RATES: [u32; 13] = [
-            96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-        ];
+        if bytes.len() < 7 {
+            return Err(Error::Truncated);
+        }
         if bytes[0] != 0xff || bytes[1] & 0xf6 != 0xf0 {
             return Err(Error::Invalid("AAC ADTS header"));
         }
@@ -226,7 +311,7 @@ impl AdtsHeader {
         let rate_index = usize::from((bytes[2] >> 2) & 15);
         let channels = u16::from(((bytes[2] & 1) << 2) | (bytes[3] >> 6));
         if profile != 2
-            || RATES.get(rate_index) != Some(&format.pcm.sample_rate)
+            || AAC_RATES.get(rate_index) != Some(&format.pcm.sample_rate)
             || channels != format.pcm.channels
             || bytes[6] & 3 != 0
         {
@@ -303,6 +388,16 @@ mod tests {
     }
 
     #[test]
+    fn microsoft_aac_raw_access_units_decode_without_adts_headers() {
+        let frame = [0x00, 0xc8, 0x00, 0x07];
+        let mut decoder = Decoder::new(format(Encoding::Aac, 1)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(decoder.decode(&frame, 4096).unwrap(), vec![0; 2048]);
+        }
+        assert!(decoder.decode(&frame, 2047).is_err());
+    }
+
+    #[test]
     fn aac_lc_silence_survives_fragmentation_and_concatenated_frames() {
         // AAC-LC single-channel element, zero scale-factor bands, then ID_END.
         // ADTS describes one 1024-sample mono frame at 44.1 kHz.
@@ -319,19 +414,55 @@ mod tests {
     }
 
     #[test]
-    fn captured_pcm_is_encoded_as_decodable_adts_across_small_capture_packets() {
+    fn captured_pcm_is_encoded_as_decodable_raw_aac_across_small_capture_packets() {
         let format = format(Encoding::Aac, 1);
         let mut encoder = Encoder::new(format).unwrap();
         let mut decoder = Decoder::new(format).unwrap();
         let mut pcm_bytes = 0;
         // Less than a quarter second, no wall-clock waits or audio device.
         for _ in 0..32 {
-            let packet = encoder.encode(&[0; 320 * 2]).unwrap();
-            if !packet.is_empty() {
+            for packet in encoder.encode(&[0; 320 * 2]).unwrap() {
+                assert_ne!(packet[0], 0xff, "RDP AAC capture must not add ADTS headers");
                 pcm_bytes += decoder.decode(&packet, 65536).unwrap().len();
             }
         }
         assert!(pcm_bytes >= 1024 * 2);
         assert!(decoder.pending.is_empty());
+    }
+
+    #[test]
+    fn raw_aac_preserves_stereo_access_unit_boundaries_for_large_capture_buffers() {
+        for channels in [1, 2] {
+            for sample_rate in [16000, 44100, 48000] {
+                let mut format = format(Encoding::Aac, 1);
+                format.pcm.channels = channels;
+                format.pcm.sample_rate = sample_rate;
+                format.byte_rate = 8000 * u32::from(channels);
+                let mut encoder = Encoder::new(format).unwrap();
+                let mut decoder = Decoder::new(format).unwrap();
+                let tone = (0..4096)
+                    .flat_map(|frame| {
+                        let sample = ((frame as f32 * 440.0 * std::f32::consts::TAU
+                            / sample_rate as f32)
+                            .sin()
+                            * 8000.0) as i16;
+                        (0..channels).flat_map(move |_| sample.to_le_bytes())
+                    })
+                    .collect::<Vec<_>>();
+                let packets = encoder.encode(&tone).unwrap();
+                assert!(packets.len() >= 2);
+                let mut audible = false;
+                for packet in packets {
+                    let pcm = decoder.decode(&packet, 65536).unwrap();
+                    assert_eq!(pcm.len(), 1024 * usize::from(channels) * 2);
+                    audible |= pcm
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .any(|bytes| i16::from_le_bytes(*bytes).unsigned_abs() > 1000);
+                }
+                assert!(audible, "AAC must preserve the captured signal");
+            }
+        }
     }
 }
