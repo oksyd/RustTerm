@@ -83,6 +83,10 @@ impl Installation {
         );
         let manifest: serde_json::Value = serde_json::from_slice(&marker)?;
         ensure!(
+            manifest["installation"] != "deb",
+            "Update Debian packages by installing the new .deb with APT"
+        );
+        ensure!(
             manifest["platform"] == "linux-x86_64" && manifest["variant"] == "release",
             "Install a release package with install.sh to enable in-app updates"
         );

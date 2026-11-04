@@ -18,6 +18,12 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 PLATFORMS = {"linux-x86_64": "tar.gz", "windows-x86_64": "zip"}
+LINUX_FILES = {
+    'bin/rustterm', 'share/applications/io.rustterm.RustTerm.desktop',
+    'share/icons/hicolor/scalable/apps/io.rustterm.RustTerm.svg',
+    'share/doc/rustterm/README.md', 'share/doc/rustterm/LICENSE',
+    'share/doc/rustterm/alacritty_terminal-LICENSE-APACHE',
+}
 VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z")
 USER_DIRECTORY = re.compile(rb'/(?:home|Users)/[^/\x00\r\n]+/|[a-z]:[/\\]users[/\\][^/\\\x00\r\n]+[/\\]', re.I)
 # Hosted GitHub checkouts repeat the repository name. A generic drive:/a/
@@ -213,17 +219,145 @@ def package_windows(options):
     print(f'Package: {output / (name+".zip")}')
 
 
-def verify_archive(archive, version, platform_name):
-    name = f'rustterm-{version}-{platform_name}'
+def verify_checksum(archive):
     sidecar = archive.with_name(archive.name + '.sha256')
     if sidecar.read_text(encoding='ascii').split() != [digest(archive), archive.name]:
         raise ValueError(f'Invalid checksum: {archive.name}')
-    windows = platform_name.startswith('windows-')
-    expected = {'rustterm.exe', 'build-info.json', 'README.md', 'LICENSE', 'alacritty_terminal-LICENSE-APACHE'} if windows else {
-        'bin/rustterm', 'build-info.json', 'install.py', 'install.sh',
-        'share/applications/io.rustterm.RustTerm.desktop', 'share/icons/hicolor/scalable/apps/io.rustterm.RustTerm.svg',
-        'share/doc/rustterm/README.md', 'share/doc/rustterm/LICENSE', 'share/doc/rustterm/alacritty_terminal-LICENSE-APACHE',
+
+
+def debian_version(version):
+    if not VERSION.fullmatch(version): raise ValueError('Invalid version')
+    # Debian's ~ sorts a prerelease before the corresponding stable version.
+    return version.replace('-', '~')
+
+
+def package_deb(source, output):
+    """Package the same Linux payload for dpkg, without a user-prefix installer."""
+    source, output = Path(source).resolve(), Path(output).resolve()
+    manifest = json.loads((source / 'build-info.json').read_text(encoding='utf-8'))
+    version = manifest['version']
+    archive = output / f'rustterm-{version}-linux-x86_64.deb'
+    output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='rustterm-deb-') as temporary:
+        work = Path(temporary)
+        root = work / 'debian/rustterm'
+        control = root / 'DEBIAN'
+        control.mkdir(parents=True)
+        for relative in sorted(LINUX_FILES):
+            destination = root / 'usr' / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source / relative, destination)
+            destination.chmod(0o755 if relative == 'bin/rustterm' else 0o644)
+        # Keep the system package distinct even when the application runs as root.
+        manifest['installation'] = 'deb'
+        (root / 'usr/share/doc/rustterm/build-info.json').write_text(
+            json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
+        shutil.copyfile(ROOT / 'LICENSE', root / 'usr/share/doc/rustterm/copyright')
+        (work / 'debian/control').write_text(
+            'Source: rustterm\n\nPackage: rustterm\nArchitecture: amd64\n', encoding='utf-8')
+        dependencies = subprocess.check_output(
+            ['dpkg-shlibdeps', '-O', '-e' + str(root / 'usr/bin/rustterm')],
+            cwd=work, text=True).strip()
+        if not dependencies.startswith('shlibs:Depends=') or '\n' in dependencies:
+            raise ValueError('Could not determine Debian runtime dependencies')
+        # dlopen libraries are invisible to dpkg-shlibdeps. Fontconfig also
+        # supplies the system font configuration read by the terminal renderer.
+        dependencies = dependencies.removeprefix('shlibs:Depends=') + (
+            ', fontconfig, libvulkan1, libwayland-client0, libwayland-cursor0, libpulse0, ca-certificates')
+        files = sorted(path for path in root.rglob('*') if path.is_file())
+        installed_size = sum((path.stat().st_size + 1023) // 1024 for path in files)
+        (control / 'control').write_text(
+            f'Package: rustterm\nVersion: {debian_version(version)}\nArchitecture: amd64\n'
+            'Section: utils\nPriority: optional\nMaintainer: RustTerm contributors\n'
+            'Homepage: https://github.com/oksyd/RustTerm\n'
+            'Bugs: https://github.com/oksyd/RustTerm/issues\n'
+            f'Installed-Size: {installed_size}\nDepends: {dependencies}\n'
+            'Suggests: lrzsz, gnome-keyring\n'
+            'Description: Native terminal, remote desktop, and database workspace\n'
+            ' RustTerm provides local and SSH terminals, SFTP, RDP, and database clients.\n',
+            encoding='utf-8')
+        (control / 'md5sums').write_text(''.join(
+            f'{hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()}  {path.relative_to(root).as_posix()}\n'
+            for path in files), encoding='utf-8')
+        for path in [root, *root.rglob('*')]:
+            if path.is_dir(): path.chmod(0o755)
+            elif path != root / 'usr/bin/rustterm': path.chmod(0o644)
+        environment = dict(os.environ)
+        environment.setdefault('SOURCE_DATE_EPOCH', '0')
+        staged = work / archive.name
+        subprocess.run(['dpkg-deb', '--root-owner-group', '-Zxz', '--build', str(root), str(staged)],
+                       check=True, env=environment)
+        shutil.copyfile(staged, archive)
+    archive.with_name(archive.name + '.sha256').write_text(
+        f'{digest(archive)}  {archive.name}\n', encoding='ascii')
+
+
+def verify_deb(archive, version, variant='release'):
+    verify_checksum(archive)
+    with tempfile.TemporaryFile() as data:
+        subprocess.run(['dpkg-deb', '--ctrl-tarfile', str(archive)], stdout=data, check=True)
+        data.seek(0)
+        with tarfile.open(fileobj=data, mode='r:') as package:
+            seen = set()
+            for entry in package:
+                relative = PurePosixPath(entry.name).as_posix()
+                if entry.isdir() and relative == '.': continue
+                if not entry.isfile() or relative not in {'control', 'md5sums'} or relative in seen:
+                    raise ValueError('Unexpected Debian control member')
+                seen.add(relative)
+            if seen != {'control', 'md5sums'}: raise ValueError('Incomplete Debian control data')
+    fields = subprocess.check_output(
+        ['dpkg-deb', '--field', str(archive), 'Package', 'Version', 'Architecture', 'Depends'], text=True)
+    control = dict(line.split(': ', 1) for line in fields.strip().splitlines())
+    if any(control.get(k) != v for k, v in {
+        'Package': 'rustterm', 'Version': debian_version(version), 'Architecture': 'amd64',
+    }.items()) or not control.get('Depends'):
+        raise ValueError('Debian package metadata mismatch')
+    expected = {'usr/' + path for path in LINUX_FILES} | {
+        'usr/share/doc/rustterm/build-info.json', 'usr/share/doc/rustterm/copyright',
     }
+    directories = {parent.as_posix() for path in expected for parent in PurePosixPath(path).parents}
+    with tempfile.TemporaryFile() as data:
+        subprocess.run(['dpkg-deb', '--fsys-tarfile', str(archive)], stdout=data, check=True)
+        data.seek(0)
+        with tarfile.open(fileobj=data, mode='r:') as package:
+            seen = {}
+            for entry in package:
+                path = PurePosixPath(entry.name)
+                relative = path.as_posix()
+                if path.is_absolute() or '..' in path.parts or '\\' in entry.name:
+                    raise ValueError('Unsafe Debian package path')
+                if entry.uid != 0 or entry.gid != 0:
+                    raise ValueError('Debian package files must be owned by root')
+                if entry.isdir() and relative in directories:
+                    if entry.mode != 0o755: raise ValueError('Invalid Debian directory permissions')
+                    continue
+                if not entry.isfile() or relative in seen or relative not in expected:
+                    raise ValueError('Unexpected/duplicate Debian package member')
+                if entry.mode != (0o755 if relative == 'usr/bin/rustterm' else 0o644):
+                    raise ValueError('Invalid Debian file permissions')
+                seen[relative] = entry
+            if set(seen) != expected: raise ValueError('Incomplete Debian package')
+            with package.extractfile(seen['usr/share/doc/rustterm/build-info.json']) as source:
+                manifest = json.load(source)
+            if any(manifest.get(k) != v for k, v in {
+                'version': version, 'platform': 'linux-x86_64', 'variant': variant, 'installation': 'deb',
+            }.items()):
+                raise ValueError('Debian package manifest mismatch')
+            with package.extractfile(seen['usr/bin/rustterm']) as source:
+                if hashlib.file_digest(source, 'sha256').hexdigest() != manifest.get('binary_sha256'):
+                    raise ValueError('Executable checksum mismatch')
+            with package.extractfile(seen['usr/bin/rustterm']) as source:
+                verify_binary_privacy(source)
+    return manifest
+
+
+def verify_archive(archive, version, platform_name):
+    name = f'rustterm-{version}-{platform_name}'
+    verify_checksum(archive)
+    windows = platform_name.startswith('windows-')
+    expected = ({'rustterm.exe', 'build-info.json', 'README.md', 'LICENSE', 'alacritty_terminal-LICENSE-APACHE'}
+                if windows else LINUX_FILES | {'build-info.json', 'install.py', 'install.sh'})
     with (zipfile.ZipFile(archive) if windows else tarfile.open(archive, 'r:gz')) as package:
         entries = package.infolist() if windows else package.getmembers()
         seen = set()
@@ -250,16 +384,23 @@ def verify_archive(archive, version, platform_name):
                 raise ValueError('Executable checksum mismatch')
         with read('rustterm.exe' if windows else 'bin/rustterm') as source:
             verify_binary_privacy(source)
+    return manifest
 
 
 def verify_release(directory, version):
     if not VERSION.fullmatch(version): raise ValueError('Invalid version')
     directory = Path(directory)
     expected = set()
+    manifests = {}
     for platform_name, extension in PLATFORMS.items():
         archive = directory / f'rustterm-{version}-{platform_name}.{extension}'
-        verify_archive(archive, version, platform_name)
+        manifests[platform_name] = verify_archive(archive, version, platform_name)
         expected.update({archive.name, archive.name+'.sha256'})
+    deb = directory / f'rustterm-{version}-linux-x86_64.deb'
+    manifest = verify_deb(deb, version)
+    if manifest['binary_sha256'] != manifests['linux-x86_64']['binary_sha256']:
+        raise ValueError('Linux packages contain different executables')
+    expected.update({deb.name, deb.name + '.sha256'})
     actual = {path.name for path in directory.iterdir() if path.is_file()} - {'SHA256SUMS'}
     if actual != expected: raise ValueError('Release contains missing or unexpected assets')
     (directory/'SHA256SUMS').write_text(''.join(f'{digest(directory/name)}  {name}\n' for name in sorted(expected)), encoding='ascii')

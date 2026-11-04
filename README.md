@@ -26,23 +26,21 @@ A native desktop workspace for terminals, remote desktops, and databases, built 
 
 Download your platform's x86_64 package from [Releases](https://github.com/oksyd/RustTerm/releases). Each package includes a SHA-256 checksum.
 
-**Ubuntu 24.04 / 26.04:** extract the `.tar.gz` archive and run:
+**Ubuntu 24.04 / 26.04:** download the `.deb` package and install it (replace `<version>` with the release version):
 
 ```sh
-./install.sh
+sudo apt install ./rustterm-<version>-linux-x86_64.deb
 ```
 
-The installer requires Python 3.11 or newer and installs to `~/.local` by default, without `sudo`. Launch **RustTerm** from your application menu, or run:
+Launch **RustTerm** from your application menu or run `rustterm`. Install a newer `.deb` the same way to update; uninstall with `sudo apt remove rustterm`.
 
-```sh
-~/.local/bin/rustterm
-```
+For installation without `sudo`, extract the `.tar.gz` and run `./install.sh` (Python 3.11+). This installs to `~/.local` and supports in-app updates.
 
 An X11 or Wayland desktop, a working graphics driver, and system font libraries are required. Saving passwords requires a Secret Service; ZMODEM additionally requires `lrzsz`.
 
 **Windows:** extract the portable `.zip` and launch `rustterm.exe`. Windows packages are preview builds; runtime validation is pending. RDP audio, file/folder redirection, exclusive keyboard capture, and SQL SSH tunnels currently require Linux.
 
-Manage update checks and an optional HTTP proxy in **Settings → Updates**. Ubuntu installations support in-app updates; replace the portable folder to update Windows.
+Manage update checks and an optional HTTP proxy in **Settings → Updates**. Replace the portable folder to update Windows.
 
 ## License
 

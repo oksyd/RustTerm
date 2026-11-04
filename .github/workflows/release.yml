@@ -87,7 +87,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential cmake ninja-build nasm pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-dpms0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xinput-dev libxcb-xkb-dev libasound2-dev libssl-dev
+          sudo apt-get install --no-install-recommends -y build-essential dpkg-dev xz-utils cmake ninja-build nasm pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-dpms0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xinput-dev libxcb-xkb-dev libasound2-dev libssl-dev
       - name: Check Rust formatting
         shell: bash
         run: cargo fmt --all --check
@@ -125,6 +125,7 @@ jobs:
         with:
           name: release-${{ matrix.platform }}
           path: |
+            dist/*.deb
             dist/*.tar.gz
             dist/*.zip
             dist/*.sha256

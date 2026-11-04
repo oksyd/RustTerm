@@ -299,6 +299,31 @@ fn archive_rejects_links_duplicate_files_wrong_root_and_manifest_mismatch() {
 }
 
 #[test]
+fn debian_installation_is_not_managed_by_the_user_prefix_updater() {
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path();
+    fs::create_dir(prefix.join("bin")).unwrap();
+    fs::create_dir_all(prefix.join("share/doc/rustterm")).unwrap();
+    fs::write(prefix.join("bin/rustterm"), b"installed binary").unwrap();
+    let marker = prefix.join("share/doc/rustterm/build-info.json");
+    fs::write(
+        &marker,
+        serde_json::to_vec(&serde_json::json!({
+            "platform": "linux-x86_64", "variant": "release",
+            "version": CURRENT_VERSION, "installation": "deb",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let error = Installation::at_executable(&prefix.join("bin/rustterm")).unwrap_err();
+    assert!(error.to_string().contains(".deb with APT"));
+    assert_eq!(
+        fs::read(prefix.join("bin/rustterm")).unwrap(),
+        b"installed binary"
+    );
+}
+
+#[test]
 fn verified_package_updates_custom_prefix_without_running_downloaded_scripts() {
     let dir = tempfile::tempdir().unwrap();
     let archive = archive(dir.path(), "release", "0.2.0", None);
