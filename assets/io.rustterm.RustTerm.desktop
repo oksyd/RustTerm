@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RustTerm
+Name[zh_CN]=RustTerm 终端
+Comment=Local and SSH terminal workspace
+Comment[zh_CN]=本地与 SSH 终端工作区
+Exec=rustterm
+Icon=io.rustterm.RustTerm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;ssh;
+StartupNotify=true
+StartupWMClass=io.rustterm.RustTerm

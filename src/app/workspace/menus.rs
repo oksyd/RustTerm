@@ -1,0 +1,743 @@
+use rustterm::i18n::messages as i18n_key;
+mod render;
+
+use super::{Modal, Workspace};
+use crate::app::forms::{Fields, ProfileKind, SettingsSection};
+use crate::app::layout::Axis;
+use crate::app::pane::{Pane, PaneEvent};
+use crate::app::ui;
+use gpui::{App, Bounds, Context, KeyDownEvent, Pixels, Window, px};
+use rustterm::config::{Connection, Profile, Uuid};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Menu {
+    File,
+    Edit,
+    View,
+    Session,
+    Help,
+    NewConnection,
+    Create,
+    Profile(Uuid),
+}
+pub(super) const APPLICATION_MENUS: [(Menu, &str); 5] = [
+    (Menu::File, i18n_key::COMMON_FILE),
+    (Menu::Edit, i18n_key::COMMON_EDIT),
+    (Menu::View, i18n_key::WORKSPACE_VIEW),
+    (Menu::Session, i18n_key::WORKSPACE_CONNECTIONS),
+    (Menu::Help, i18n_key::COMMON_HELP),
+];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MenuAction {
+    Palette,
+    Forwards,
+    NewTerminal,
+    NewConnection,
+    NewLocal,
+    NewSsh,
+    NewTelnet,
+    NewRedis,
+    NewMysql,
+    NewPostgres,
+    NewSqlite,
+    NewRdp,
+    NewGroup,
+    Settings,
+    Updates,
+    Lock,
+    Quit,
+    Copy,
+    Paste,
+    Search,
+    Files,
+    Filter,
+    SplitHorizontal,
+    SplitVertical,
+    NextPane,
+    NextTab,
+    Sidebar,
+    Zoom,
+    LineNumbers,
+    LineTimestamps,
+    Highlight,
+    Disconnect,
+    Close,
+    Trust,
+    Help,
+    EditProfile,
+    OpenProfile,
+    OpenProfileRight,
+    OpenProfileBelow,
+    DeleteProfile,
+}
+struct MenuItem {
+    label: &'static str,
+    shortcut: &'static str,
+    action: MenuAction,
+}
+impl MenuItem {
+    const fn new(label: &'static str, shortcut: &'static str, action: MenuAction) -> Self {
+        Self {
+            label,
+            shortcut,
+            action,
+        }
+    }
+}
+impl Menu {
+    pub(super) fn category(self) -> Option<Self> {
+        match self {
+            Self::File | Self::NewConnection => Some(Self::File),
+            Self::Edit | Self::View | Self::Session | Self::Help => Some(self),
+            Self::Create | Self::Profile(_) => None,
+        }
+    }
+
+    pub(super) fn category_index(self) -> Option<usize> {
+        let category = self.category()?;
+        APPLICATION_MENUS
+            .iter()
+            .position(|(menu, _)| *menu == category)
+    }
+
+    fn items(self) -> &'static [MenuItem] {
+        use MenuAction::*;
+        match self {
+            Self::File => {
+                const {
+                    &[
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_NEW_LOCAL_TERMINAL,
+                            "Ctrl+Shift+T",
+                            NewTerminal,
+                        ),
+                        MenuItem::new(i18n_key::COMMON_NEW_CONNECTION, "", NewConnection),
+                        MenuItem::new(i18n_key::WORKSPACE_NEW_GROUP, "", NewGroup),
+                        MenuItem::new(i18n_key::COMMON_SETTINGS_DIALOG, "Ctrl+,", Settings),
+                        MenuItem::new(i18n_key::WORKSPACE_COMMAND_PALETTE, "Ctrl+Shift+P", Palette),
+                        MenuItem::new(i18n_key::SETTINGS_LOCK_RUSTTERM, "Ctrl+Shift+L", Lock),
+                        MenuItem::new(i18n_key::WORKSPACE_QUIT, "", Quit),
+                    ]
+                }
+            }
+            Self::Edit => {
+                const {
+                    &[
+                        MenuItem::new(i18n_key::WORKSPACE_COPY_SELECTION, "Ctrl+Shift+C", Copy),
+                        MenuItem::new(i18n_key::COMMON_PASTE, "Ctrl+Shift+V", Paste),
+                        MenuItem::new(i18n_key::REDIS_SEARCH_CURRENT_PANE, "Ctrl+Shift+F", Search),
+                        MenuItem::new(i18n_key::WORKSPACE_FILTER_CONNECTION_PROFILES, "", Filter),
+                    ]
+                }
+            }
+            Self::View => {
+                const {
+                    &[
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_SHOW_CONNECTION_SIDEBAR,
+                            "Ctrl+Shift+B",
+                            Sidebar,
+                        ),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_ZOOM_CURRENT_PANE,
+                            "Ctrl+Shift+Enter",
+                            Zoom,
+                        ),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_DUPLICATE_CONNECTION_TO_THE_RIGHT,
+                            "Ctrl+Shift+D",
+                            SplitHorizontal,
+                        ),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_DUPLICATE_CONNECTION_BELOW,
+                            "Ctrl+Shift+E",
+                            SplitVertical,
+                        ),
+                        MenuItem::new(i18n_key::WORKSPACE_NEXT_PANE, "Ctrl+Shift+J", NextPane),
+                        MenuItem::new(i18n_key::WORKSPACE_NEXT_TAB, "Ctrl+Tab", NextTab),
+                        MenuItem::new(i18n_key::WORKSPACE_SHOW_LINE_NUMBERS, "", LineNumbers),
+                        MenuItem::new(
+                            i18n_key::SETTINGS_SHOW_OUTPUT_TIMESTAMPS,
+                            "",
+                            LineTimestamps,
+                        ),
+                        MenuItem::new(i18n_key::WORKSPACE_TERMINAL_HIGHLIGHTING, "", Highlight),
+                    ]
+                }
+            }
+            Self::Session => {
+                const {
+                    &[
+                        MenuItem::new(i18n_key::SFTP_FILE_MANAGER_DIALOG, "Ctrl+Shift+S", Files),
+                        MenuItem::new(i18n_key::CONNECTIONS_MANAGE_PORT_FORWARDS, "", Forwards),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_DISCONNECT_RECONNECT_CURRENT_PANE,
+                            "",
+                            Disconnect,
+                        ),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_CLOSE_CURRENT_PANE,
+                            "Ctrl+Shift+W",
+                            Close,
+                        ),
+                        MenuItem::new(i18n_key::WORKSPACE_MANAGE_TRUSTED_HOSTS, "", Trust),
+                        MenuItem::new(i18n_key::WORKSPACE_NEW_GROUP, "", NewGroup),
+                    ]
+                }
+            }
+            Self::Help => {
+                const {
+                    &[
+                        MenuItem::new(i18n_key::UPDATES_TITLE, "", Updates),
+                        MenuItem::new(i18n_key::WORKSPACE_SHORTCUTS_AND_ABOUT_RUSTTERM, "", Help),
+                    ]
+                }
+            }
+            Self::NewConnection => {
+                let items = Self::Create.items();
+                &items[..items.len() - 1]
+            }
+            Self::Create => {
+                const {
+                    &[
+                        MenuItem::new(i18n_key::WORKSPACE_ADD_SSH_PROFILE, "", NewSsh),
+                        MenuItem::new(i18n_key::CONNECTIONS_ADD_TELNET_CONNECTION, "", NewTelnet),
+                        MenuItem::new(i18n_key::REDIS_ADD_REDIS_CONNECTION, "", NewRedis),
+                        MenuItem::new(i18n_key::DATABASE_ADD_MYSQL_CONNECTION, "", NewMysql),
+                        MenuItem::new(
+                            i18n_key::DATABASE_ADD_POSTGRESQL_CONNECTION,
+                            "",
+                            NewPostgres,
+                        ),
+                        MenuItem::new(i18n_key::DATABASE_ADD_SQLITE_DATABASE, "", NewSqlite),
+                        MenuItem::new(i18n_key::RDP_ADD_RDP_CONNECTION, "", NewRdp),
+                        MenuItem::new(i18n_key::WORKSPACE_ADD_LOCAL_PROFILE, "", NewLocal),
+                        MenuItem::new(i18n_key::WORKSPACE_NEW_GROUP, "", NewGroup),
+                    ]
+                }
+            }
+            Self::Profile(_) => {
+                const {
+                    &[
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_EDIT_CONNECTION_PROFILE,
+                            "F2",
+                            EditProfile,
+                        ),
+                        MenuItem::new(i18n_key::WORKSPACE_OPEN_CONNECTION, "Enter", OpenProfile),
+                        MenuItem::new(i18n_key::WORKSPACE_OPEN_TO_THE_RIGHT, "", OpenProfileRight),
+                        MenuItem::new(i18n_key::WORKSPACE_OPEN_BELOW, "", OpenProfileBelow),
+                        MenuItem::new(
+                            i18n_key::WORKSPACE_DELETE_CONNECTION_PROFILE,
+                            "Delete",
+                            DeleteProfile,
+                        ),
+                    ]
+                }
+            }
+        }
+    }
+
+    fn profile(self, profiles: &[Profile]) -> Option<&Profile> {
+        let Self::Profile(id) = self else { return None };
+        profiles.iter().find(|profile| profile.id == id)
+    }
+}
+
+impl Workspace {
+    pub(super) fn application_menu(&self) -> Option<Menu> {
+        self.menu.and_then(Menu::category)
+    }
+
+    pub(super) fn record_application_menu_bounds(
+        &mut self,
+        menu: Menu,
+        bounds: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = menu.category_index() else {
+            return;
+        };
+        if self.application_menu_bounds[index] != Some(bounds) {
+            self.application_menu_bounds[index] = Some(bounds);
+            if self.application_menu() == menu.category() {
+                cx.notify();
+            }
+        }
+    }
+
+    pub(super) fn switch_application_menu(
+        &mut self,
+        menu: Menu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.application_menu().is_some()
+            && menu.category().is_some()
+            && self.application_menu() != menu.category()
+        {
+            self.toggle_menu(menu, window, cx);
+        }
+    }
+
+    pub(super) fn return_to_parent_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu != Some(Menu::NewConnection) {
+            return;
+        }
+        self.menu = Some(Menu::File);
+        self.menu_index = Menu::File
+            .items()
+            .iter()
+            .position(|item| item.action == MenuAction::NewConnection)
+            .expect("File contains the new connection submenu");
+        self.menu_scroll.scroll_to_item(self.menu_index);
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
+    pub(super) fn open_profile_menu(
+        &mut self,
+        id: Uuid,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+            || !self.config.profiles.iter().any(|profile| profile.id == id)
+        {
+            return;
+        }
+        if self.menu.take().is_some() {
+            self.restore_popup_focus(window, cx);
+        }
+        self.selected_profile = Some(id);
+        self.release_rdp_control(cx);
+        self.sidebar_focus.focus(window);
+        self.remember_popup_focus(window, cx);
+        self.menu = Some(Menu::Profile(id));
+        self.menu_anchor = position;
+        self.menu_index = 0;
+        self.menu_scroll.scroll_to_item(0);
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+    pub(super) fn toggle_menu(&mut self, menu: Menu, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+        {
+            return;
+        }
+        if self.menu == Some(menu)
+            || (menu.category().is_some() && self.application_menu() == menu.category())
+        {
+            self.menu = None;
+            self.restore_popup_focus(window, cx);
+        } else {
+            if self.menu.is_none() {
+                self.remember_popup_focus(window, cx);
+            }
+            self.release_rdp_control(cx);
+            if menu.category().is_some() {
+                if self.application_menu().is_none() {
+                    self.application_menu_bounds = [None; APPLICATION_MENUS.len()];
+                }
+            } else {
+                let title_bottom = crate::app::window_frame::WindowFrame::new(window)
+                    .content_bounds(window.viewport_size())
+                    .top()
+                    + px(ui::TITLE_HEIGHT);
+                self.menu_anchor = gpui::point(
+                    window.mouse_position().x,
+                    if matches!(menu, Menu::Create) || window.mouse_position().y > title_bottom {
+                        window.mouse_position().y + px(16.)
+                    } else {
+                        title_bottom
+                    },
+                );
+            }
+            self.menu = Some(menu);
+            self.menu_index = menu
+                .items()
+                .iter()
+                .position(|item| self.action_enabled(item.action, cx))
+                .unwrap_or(0);
+            self.menu_scroll.scroll_to_item(0);
+            self.menu_focus.focus(window);
+        }
+        cx.notify();
+    }
+    pub(super) fn menu_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(menu) = self.menu else { return false };
+        if !self.menu_focus.contains_focused(window, cx) {
+            return false;
+        }
+        let modifiers = event.keystroke.modifiers;
+        if modifiers.control || modifiers.alt || modifiers.platform {
+            return false;
+        }
+        self.menu_index = self.menu_index.min(menu.items().len() - 1);
+        let enabled: Vec<_> = menu
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| self.action_enabled(item.action, cx).then_some(index))
+            .collect();
+        match event.keystroke.key.as_str() {
+            "escape" | "left" if menu == Menu::NewConnection => {
+                self.return_to_parent_menu(window, cx);
+            }
+            "escape" => {
+                self.menu = None;
+                self.restore_popup_focus(window, cx);
+            }
+            "up" | "tab" if event.keystroke.key == "up" || event.keystroke.modifiers.shift => {
+                if let Some(index) = enabled
+                    .iter()
+                    .rev()
+                    .find(|index| **index < self.menu_index)
+                    .or(enabled.last())
+                {
+                    self.menu_index = *index;
+                }
+            }
+            "down" | "tab" => {
+                if let Some(index) = enabled
+                    .iter()
+                    .find(|index| **index > self.menu_index)
+                    .or(enabled.first())
+                {
+                    self.menu_index = *index;
+                }
+            }
+            "right" if menu.items()[self.menu_index].action == MenuAction::NewConnection => {
+                self.menu_action(MenuAction::NewConnection, window, cx);
+            }
+            "left" | "right" => {
+                if let Some(index) = menu.category_index() {
+                    let count = APPLICATION_MENUS.len();
+                    let next = if event.keystroke.key == "left" {
+                        (index + count - 1) % count
+                    } else {
+                        (index + 1) % count
+                    };
+                    self.switch_application_menu(APPLICATION_MENUS[next].0, window, cx);
+                }
+            }
+            "home" => {
+                if let Some(index) = enabled.first() {
+                    self.menu_index = *index;
+                }
+            }
+            "end" => {
+                if let Some(index) = enabled.last() {
+                    self.menu_index = *index;
+                }
+            }
+            "f2" if matches!(menu, Menu::Profile(_)) => {
+                self.menu_action(MenuAction::EditProfile, window, cx)
+            }
+            "delete" if matches!(menu, Menu::Profile(_)) => {
+                self.menu_action(MenuAction::DeleteProfile, window, cx)
+            }
+            "enter" | "return" | "space" => {
+                self.menu_action(menu.items()[self.menu_index].action, window, cx)
+            }
+            _ => {}
+        }
+        if let Some(menu) = self.menu {
+            if menu == Menu::NewConnection {
+                self.submenu_scroll.scroll_to_item(self.menu_index);
+            } else {
+                self.menu_scroll.scroll_to_item(self.menu_index);
+            }
+        }
+        cx.stop_propagation();
+        window.prevent_default();
+        cx.notify();
+        true
+    }
+    pub(super) fn action_enabled(&self, action: MenuAction, cx: &App) -> bool {
+        if self.lock_screen.locked {
+            return false;
+        }
+        use MenuAction::*;
+        if matches!(action, NewConnection) {
+            return self.application_menu() == Some(Menu::File);
+        }
+        if matches!(
+            action,
+            EditProfile | OpenProfile | OpenProfileRight | OpenProfileBelow | DeleteProfile
+        ) {
+            return self
+                .menu
+                .and_then(|menu| menu.profile(&self.config.profiles))
+                .is_some()
+                && (!matches!(action, OpenProfileRight | OpenProfileBelow)
+                    || (!self.utility_overlay && self.panes.contains_key(&self.focused)));
+        }
+        // Utility overlays cover pane content; workspace navigation stays available.
+        if self.utility_overlay
+            && matches!(
+                action,
+                Copy | Paste
+                    | Search
+                    | SplitHorizontal
+                    | SplitVertical
+                    | Zoom
+                    | LineNumbers
+                    | LineTimestamps
+                    | Highlight
+                    | Disconnect
+                    | Close
+            )
+        {
+            return false;
+        }
+        if matches!(action, Files) {
+            return self.files.contains_key(&self.focused)
+                || self.panes.get(&self.focused).is_some_and(
+                    |p| matches!(p, Pane::Terminal(view) if view.read(cx).sftp_client().is_some()),
+                );
+        }
+        if matches!(action, Forwards) {
+            return self.panes.get(&self.focused).is_some_and(
+                |pane| matches!(pane, Pane::Terminal(view) if view.read(cx).forwarding().is_some()),
+            );
+        }
+        if matches!(action, Copy | Paste) {
+            return match self.panes.get(&self.focused) {
+                Some(Pane::Terminal(view)) => {
+                    let view = view.read(cx);
+                    view.history_actions_allowed(cx)
+                        && (matches!(action, Copy)
+                            || view
+                                .history_run()
+                                .is_some_and(|run| view.can_insert_history_command(run)))
+                }
+                Some(Pane::Database(_)) => true,
+                _ => false,
+            };
+        }
+        if matches!(action, LineNumbers | LineTimestamps | Highlight) {
+            return matches!(self.panes.get(&self.focused), Some(Pane::Terminal(_)));
+        }
+        if matches!(action, Search) && matches!(self.panes.get(&self.focused), Some(Pane::Rdp(_))) {
+            return false;
+        }
+        if matches!(action, Zoom) {
+            return self.zoomed.is_some()
+                || self
+                    .tabs
+                    .get(self.active)
+                    .is_some_and(|tab| tab.layout.leaves().len() > 1);
+        }
+        !matches!(
+            action,
+            Copy | Paste
+                | Search
+                | SplitHorizontal
+                | SplitVertical
+                | NextPane
+                | Disconnect
+                | Close
+                | Zoom
+        ) || self.panes.contains_key(&self.focused)
+    }
+    pub(super) fn menu_action(
+        &mut self,
+        action: MenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+            || !self.action_enabled(action, cx)
+        {
+            cx.notify();
+            return;
+        }
+        if matches!(action, MenuAction::NewConnection) {
+            if self.menu != Some(Menu::NewConnection) {
+                self.menu = Some(Menu::NewConnection);
+                self.menu_index = 0;
+                self.submenu_scroll.scroll_to_item(0);
+                self.menu_focus.focus(window);
+                cx.notify();
+            }
+            return;
+        }
+        let profile = self
+            .menu
+            .take()
+            .and_then(|menu| menu.profile(&self.config.profiles))
+            .cloned();
+        self.restore_popup_focus(window, cx);
+        use MenuAction::*;
+        if matches!(
+            action,
+            Copy | Paste
+                | Search
+                | Disconnect
+                | SplitHorizontal
+                | SplitVertical
+                | NextPane
+                | NextTab
+                | Close
+                | Zoom
+        ) {
+            self.restore_focus(window, cx);
+        }
+        match action {
+            NewConnection => unreachable!("submenu navigation is handled before command dispatch"),
+            Palette => self.toggle_palette(window, cx),
+            Forwards => self.open_tunnels(window, cx),
+            EditProfile | OpenProfile | OpenProfileRight | OpenProfileBelow | DeleteProfile => {
+                let Some(profile) = profile else { return };
+                match action {
+                    EditProfile => {
+                        let kind = match &profile.connection {
+                            Connection::Local(_) => ProfileKind::Local,
+                            Connection::Ssh(_) => ProfileKind::Ssh,
+                            Connection::Telnet(_) => ProfileKind::Telnet,
+                            Connection::Redis(_) => ProfileKind::Redis,
+                            Connection::Mysql(_) => ProfileKind::Mysql,
+                            Connection::Postgres(_) => ProfileKind::Postgres,
+                            Connection::Sqlite(_) => ProfileKind::Sqlite,
+                            Connection::Rdp(_) => ProfileKind::Rdp,
+                        };
+                        self.edit_profile(Some(profile), kind, window, cx);
+                    }
+                    OpenProfile => self.open_or_focus_profile(profile, window, cx),
+                    OpenProfileRight => {
+                        self.connect_profile(profile, Some(Axis::Horizontal), window, cx)
+                    }
+                    OpenProfileBelow => {
+                        self.connect_profile(profile, Some(Axis::Vertical), window, cx)
+                    }
+                    DeleteProfile => self.delete_profile(profile.id, window, cx),
+                    _ => unreachable!(),
+                }
+            }
+            NewTerminal => self.pane_event(&PaneEvent::NewTab, window, cx),
+            NewLocal => self.edit_profile(None, ProfileKind::Local, window, cx),
+            NewSsh => self.edit_profile(None, ProfileKind::Ssh, window, cx),
+            NewTelnet => self.edit_profile(None, ProfileKind::Telnet, window, cx),
+            NewRedis => self.edit_profile(None, ProfileKind::Redis, window, cx),
+            NewMysql => self.edit_profile(None, ProfileKind::Mysql, window, cx),
+            NewPostgres => self.edit_profile(None, ProfileKind::Postgres, window, cx),
+            NewSqlite => self.edit_profile(None, ProfileKind::Sqlite, window, cx),
+            NewRdp => self.edit_profile(None, ProfileKind::Rdp, window, cx),
+            NewGroup => {
+                self.remember_popup_focus(window, cx);
+                let fields = Fields::new(vec![(i18n_key::WORKSPACE_GROUP_NAME, String::new())], cx);
+                fields.focus(window, cx);
+                self.modal = Some(Modal::Group {
+                    editing: None,
+                    fields,
+                });
+            }
+            Settings => self.open_settings(SettingsSection::General, window, cx),
+            Updates => self.open_settings(SettingsSection::Updates, window, cx),
+            Lock => self.lock_workspace(window, cx),
+            Quit => {
+                self.request_exit(window, cx);
+            }
+            Files => self.open_files(window, cx),
+            Copy | Paste | Search | Disconnect => match self.panes.get(&self.focused) {
+                Some(Pane::Terminal(pane)) => pane.update(cx, |p, cx| match action {
+                    Copy => p.copy_selection(cx),
+                    Paste => p.paste(window, cx),
+                    Search => p.open_search(window, cx),
+                    _ => p.disconnect_or_reconnect(cx),
+                }),
+                Some(Pane::Redis(pane)) => pane.update(cx, |p, cx| match action {
+                    Search => p.open_search(window, cx),
+                    Disconnect => p.disconnect_or_reconnect(cx),
+                    _ => {}
+                }),
+                Some(Pane::Database(pane)) => pane.update(cx, |p, cx| match action {
+                    Copy => p.copy_selection(window, cx),
+                    Paste => p.paste_sql(window, cx),
+                    Search => p.open_search(window, cx),
+                    _ => p.disconnect_or_reconnect(window, cx),
+                }),
+                Some(Pane::Rdp(pane)) => {
+                    if matches!(action, Disconnect) {
+                        pane.update(cx, |p, cx| p.disconnect_or_reconnect(cx));
+                    }
+                }
+                None => {}
+            },
+            Filter => {
+                if !self.sidebar_visible {
+                    self.toggle_sidebar(window, cx);
+                }
+                self.session_filter.read(cx).focus(window);
+            }
+            Sidebar => self.toggle_sidebar(window, cx),
+            Zoom => self.toggle_zoom(window, cx),
+            SplitHorizontal => self.split(Axis::Horizontal, window, cx),
+            SplitVertical => self.split(Axis::Vertical, window, cx),
+            NextPane => self.pane_event(&PaneEvent::NextPane, window, cx),
+            NextTab => self.pane_event(&PaneEvent::NextTab, window, cx),
+            LineNumbers | LineTimestamps | Highlight => {
+                if matches!(action, LineNumbers) {
+                    self.config.settings.line_numbers = !self.config.settings.line_numbers;
+                } else if matches!(action, LineTimestamps) {
+                    self.config.settings.line_timestamps = !self.config.settings.line_timestamps;
+                } else {
+                    self.config.settings.highlight = !self.config.settings.highlight;
+                }
+                for pane in self.panes.values() {
+                    pane.apply_settings(&self.config.settings, cx);
+                }
+                self.save(cx);
+            }
+            Close => self.confirm_close(vec![self.focused], window, cx),
+            Trust => self.open_trust(window, cx),
+            Help => {
+                self.remember_popup_focus(window, cx);
+                self.modal = Some(Modal::Help);
+            }
+        }
+        cx.notify();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::config::LocalConfig;
+
+    #[test]
+    fn profile_menu_keeps_its_target_across_reordering_and_never_substitutes_another_profile() {
+        let target = Profile::local("target", LocalConfig::default());
+        let other = Profile::local("other", LocalConfig::default());
+        let menu = Menu::Profile(target.id);
+        let mut profiles = vec![target.clone(), other];
+        profiles.reverse();
+        assert_eq!(menu.profile(&profiles).unwrap().id, target.id);
+
+        profiles
+            .iter_mut()
+            .find(|profile| profile.id == target.id)
+            .unwrap()
+            .name = "updated".into();
+        assert_eq!(menu.profile(&profiles).unwrap().name, "updated");
+
+        profiles.retain(|profile| profile.id != target.id);
+        assert!(menu.profile(&profiles).is_none());
+        assert!(Menu::File.profile(&profiles).is_none());
+    }
+}

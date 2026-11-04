@@ -1,0 +1,124 @@
+[package]
+name = "rustterm"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.99.1"
+publish = false
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "build.rs",
+    "src/**",
+    "assets/**",
+    "tests/**",
+    "README.md",
+    "LICENSE",
+]
+
+[dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["x11", "wayland", "windows-manifest"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "bmp"] }
+unicode-segmentation = { version = "1.13.3", default-features = false }
+
+alacritty_terminal = { version = "0.26.0", default-features = false }
+portable-pty = { version = "0.9.0", default-features = false }
+regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+
+russh = { version = "0.65.0", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = { version = "3.0.1", default-features = false }
+ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["alloc", "ecdsa"] }
+
+redis = { version = "1.8.0", default-features = false, features = ["tokio-comp"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "mysql", "mysql-rsa", "postgres"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "hooks", "limits"] }
+
+rustrdp = { version = "0.1.0", default-features = false, features = ["graphics"] }
+rtc-dtls = { version = "0.21.1", default-features = false, features = ["crypto-ring"] }
+rtc-shared = { version = "0.21.1", default-features = false }
+
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash", "zeroize"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-native-certs = { version = "0.8.5", default-features = false }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12"] }
+sha2 = { version = "0.10.9", default-features = false }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+url = { version = "2.5.8", default-features = false, features = ["std"] }
+semver = { version = "1.0.28", default-features = false, features = ["std"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4.46", default-features = false }
+sspi = { version = "0.23.0", default-features = false }
+x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
+zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
+
+tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "process", "fs"] }
+tokio-util = { version = "0.7.20", default-features = false, features = ["codec"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
+
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+toml = { version = "1.1.8", default-features = false, features = ["serde", "parse", "display"] }
+uuid = { version = "1.26.1", default-features = false, features = ["v4", "serde"] }
+
+fluent-bundle = { version = "0.16.0", default-features = false }
+unic-langid = { version = "0.9.6", default-features = false, features = ["likelysubtags"] }
+
+anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
+tempfile = { version = "3.27.0", default-features = false, features = ["getrandom"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2.186", default-features = false }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "process", "event", "net"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustrdp = { version = "0.1.0", default-features = false, features = ["audio-codecs"] }
+x11rb = { version = "0.13.2", default-features = false, features = ["xfixes"] }
+raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-backend = { version = "0.3.17", default-features = false, features = ["client_system"] }
+wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
+libloading = { version = "0.8.9", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.10.3", default-features = false, features = ["thread_rng"] }
+
+[build-dependencies]
+fluent-syntax = { version = "0.12.0", default-features = false }
+unic-langid = { version = "0.9.6", default-features = false }
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+syn = { version = "2.0.119", default-features = false, features = ["full", "parsing"] }
+proc-macro2 = { version = "1.0.107", default-features = false }
+
+[patch.crates-io]
+rustrdp = { path = "crates/rustrdp" }
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package]
+rustrdp = { opt-level = 2 }
+fdk-aac-sys = { opt-level = 2 }
+openh264-sys2 = { opt-level = 2 }
+symphonia-codec-aac = { opt-level = 2 }
+symphonia-codec-adpcm = { opt-level = 2 }
+symphonia-core = { opt-level = 2 }
+
+[profile.test]
+debug = 0
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+
+[package.metadata.release]
+tag-prefix = ""
+tag-name = "{{prefix}}{{version}}"
+pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
+tag-message = "chore: release {{crate_name}} version {{version}}"
+pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]

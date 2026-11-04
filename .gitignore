@@ -1,0 +1,10 @@
+target/
+*.log
+/dist/
+/.docs/
+/.agents/
+/.codex/
+/.aws/
+/.env
+/.env.*
+__pycache__/
