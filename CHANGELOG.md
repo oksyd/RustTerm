@@ -9,6 +9,10 @@
 ### 🐛 Bug Fixes
 
 - *(rdp)* Restore remote IME input
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.6
 ## [0.1.5] - 2026-11-04
 
 ### ⚙️ Miscellaneous Tasks
