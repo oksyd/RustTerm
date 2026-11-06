@@ -212,9 +212,9 @@ impl TerminalView {
                 .items_center()
                 .gap(px(4.))
                 .px(px(8.))
-                .bg(rgb(ui::RAISED))
+                .bg(rgb(ui::colors().raised))
                 .border_b_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .child(
                     div()
                         .flex_1()
@@ -222,9 +222,9 @@ impl TerminalView {
                         .truncate()
                         .text_size(px(11.))
                         .text_color(rgb(if status.phase == ZmodemPhase::Failed {
-                            ui::DANGER
+                            ui::colors().danger
                         } else {
-                            ui::ACCENT
+                            ui::colors().accent
                         }))
                         .child(label),
                 )

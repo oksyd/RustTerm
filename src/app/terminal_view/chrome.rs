@@ -408,7 +408,7 @@ impl TerminalView {
                     },
                     terminal_visible,
                 )
-                .when(self.menu_open, |d| d.bg(rgb(ui::SELECTED)))
+                .when(self.menu_open, |d| d.bg(rgb(ui::colors().selected)))
                 .on_click(cx.listener(|this, _, window, cx| {
                     if this.visible && !this.chrome_blocked(cx) {
                         this.toggle_menu(window, cx);
@@ -482,7 +482,9 @@ impl TerminalView {
                     .child(tr(label))
             })
             .when(self.active_tool == Some(tool), |button| {
-                button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::TEXT))
+                button
+                    .bg(rgb(ui::colors().selected))
+                    .text_color(rgb(ui::colors().text))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.tool_unavailable_reason(tool, cx).is_some() {
@@ -513,9 +515,9 @@ impl TerminalView {
             .w(px((width - 8.).min(320.)))
             .max_h(px((height - 8.).max(28.)))
             .py(px(4.))
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(3.))
             .shadow_md()
             .occlude()
@@ -538,10 +540,17 @@ impl TerminalView {
                         .items_center()
                         .gap(px(6.))
                         .text_size(px(11.))
-                        .text_color(rgb(if enabled { ui::TEXT } else { ui::FAINT }))
-                        .when(index == self.menu_index, |d| d.bg(rgb(ui::SELECTED)))
+                        .text_color(rgb(if enabled {
+                            ui::colors().text
+                        } else {
+                            ui::colors().faint
+                        }))
+                        .when(index == self.menu_index, |d| {
+                            d.bg(rgb(ui::colors().selected))
+                        })
                         .when(enabled, |d| {
-                            d.cursor_pointer().hover(|s| s.bg(rgb(ui::SELECTED)))
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(rgb(ui::colors().selected)))
                         })
                         .child(ui::icon(item.icon))
                         .child(div().flex_1().min_w_0().truncate().child(tr(item.label)))
@@ -550,7 +559,7 @@ impl TerminalView {
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(9.))
-                                    .text_color(rgb(ui::MUTED))
+                                    .text_color(rgb(ui::colors().muted))
                                     .child(item.shortcut),
                             )
                         })

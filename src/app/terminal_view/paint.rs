@@ -190,7 +190,7 @@ pub(super) fn paint_terminal(
                 point(bounds.left() + view.gutter_width() - px(1.), bounds.top()),
                 size(px(1.), bounds.size.height),
             ),
-            rgb(ui::BORDER),
+            rgb(ui::colors().border),
         ));
     }
     if (view.settings.line_numbers || view.settings.line_timestamps) && !snapshot.alternate_screen {
@@ -416,8 +416,8 @@ pub(super) fn paint_terminal(
         let run = TextRun {
             len: text.len(),
             font,
-            color: rgb(ui::TEXT).into(),
-            background_color: Some(rgb(ui::RAISED).into()),
+            color: rgb(ui::colors().text).into(),
+            background_color: Some(rgb(ui::colors().raised).into()),
             underline: Some(UnderlineStyle {
                 thickness: px(1.),
                 color: None,

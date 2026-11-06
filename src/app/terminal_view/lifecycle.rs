@@ -311,13 +311,13 @@ impl TerminalView {
                 .get(self.viewed_run)
                 .is_some_and(|run| matches!(run.state(), SessionState::Failed { .. }))
         {
-            ui::DANGER
+            ui::colors().danger
         } else if self
             .snapshot
             .as_ref()
             .is_some_and(|s| s.viewport_evicted || s.selection_invalidated || s.display_offset > 0)
         {
-            ui::WARNING
+            ui::colors().warning
         } else if self.show_final_alternate
             || self
                 .runs
@@ -325,16 +325,16 @@ impl TerminalView {
                 .is_some_and(Session::is_read_only)
             || self.snapshot.as_ref().is_some_and(|s| s.alternate_screen)
         {
-            ui::ACCENT
+            ui::colors().accent
         } else {
             match self.runs.get(self.viewed_run).map(Session::state) {
-                Some(SessionState::Connected) => ui::SUCCESS,
+                Some(SessionState::Connected) => ui::colors().success,
                 Some(
                     SessionState::Connecting
                     | SessionState::WaitingHostKey { .. }
                     | SessionState::WaitingAuthentication,
-                ) => ui::WARNING,
-                _ => ui::MUTED,
+                ) => ui::colors().warning,
+                _ => ui::colors().muted,
             }
         }
     }

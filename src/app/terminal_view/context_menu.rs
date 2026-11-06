@@ -169,9 +169,9 @@ impl TerminalView {
             .flex()
             .flex_col()
             .py(px(4.))
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(3.))
             .shadow_md()
             .occlude()
@@ -192,13 +192,17 @@ impl TerminalView {
                     .items_center()
                     .gap(px(8.))
                     .text_size(px(11.))
-                    .text_color(rgb(if enabled { ui::TEXT } else { ui::FAINT }))
+                    .text_color(rgb(if enabled {
+                        ui::colors().text
+                    } else {
+                        ui::colors().faint
+                    }))
                     .when(enabled && index == self.menu_index, |d| {
-                        d.bg(rgb(ui::SELECTED))
+                        d.bg(rgb(ui::colors().selected))
                     })
                     .when(enabled, |d| {
                         d.cursor_pointer()
-                            .hover(|s| s.bg(rgb(ui::SELECTED)))
+                            .hover(|s| s.bg(rgb(ui::colors().selected)))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                                 if this.menu_index != index {
                                     this.menu_index = index;
@@ -212,7 +216,7 @@ impl TerminalView {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(9.))
-                                .text_color(rgb(ui::MUTED))
+                                .text_color(rgb(ui::colors().muted))
                                 .child(shortcut),
                         )
                     })

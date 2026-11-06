@@ -133,9 +133,9 @@ impl TerminalView {
             .items_center()
             .gap(px(8.))
             .px(px(8.))
-            .bg(rgb(ui::CHROME))
+            .bg(rgb(ui::colors().chrome))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 ui::connection_address(
                     ("terminal-address", pane_index),
@@ -185,7 +185,7 @@ impl TerminalView {
                         .top_0()
                         .bottom_0()
                         .w(px(2.))
-                        .bg(rgb(ui::ACCENT)),
+                        .bg(rgb(ui::colors().accent)),
                 )
             })
             .on_mouse_down(
@@ -396,7 +396,7 @@ impl Render for TerminalView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .text_size(px(12.))
                 .child(tr(
                     i18n_key::TERMINAL_THE_TERMINAL_IS_RUNNING_IN_THE_BACKGROUND,
@@ -412,7 +412,7 @@ impl Render for TerminalView {
             .size_full()
             .overflow_hidden()
             .bg(rgb(self.settings.theme.background))
-            .text_color(rgb(ui::TEXT))
+            .text_color(rgb(ui::colors().text))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::search_key))
             .on_key_down(cx.listener(Self::key_down))
@@ -429,20 +429,20 @@ impl Render for TerminalView {
                         .items_center()
                         .gap(px(4.))
                         .px(px(8.))
-                        .bg(rgb(ui::RAISED))
+                        .bg(rgb(ui::colors().raised))
                         .border_b_1()
-                        .border_color(rgb(ui::BORDER))
+                        .border_color(rgb(ui::colors().border))
                         .child(
                             ui::icon(Icon::Search)
                                 .size(px(14.))
-                                .text_color(rgb(ui::MUTED)),
+                                .text_color(rgb(ui::colors().muted)),
                         )
                         .child(div().flex_1().min_w_0().child(self.search_input.clone()))
                         .child(
                             div()
                                 .max_w(px(150.))
                                 .truncate()
-                                .text_color(rgb(ui::MUTED))
+                                .text_color(rgb(ui::colors().muted))
                                 .text_size(px(10.))
                                 .child(self.search_status_label()),
                         )
@@ -459,12 +459,15 @@ impl Render for TerminalView {
                                 .cursor_pointer()
                                 .text_size(px(11.))
                                 .text_color(rgb(if self.search_case {
-                                    ui::ACCENT
+                                    ui::colors().accent
                                 } else {
-                                    ui::MUTED
+                                    ui::colors().muted
                                 }))
-                                .when(self.search_case, |d| d.bg(rgb(ui::SURFACE)))
-                                .hover(|s| s.bg(rgb(ui::SURFACE)).text_color(rgb(ui::TEXT)))
+                                .when(self.search_case, |d| d.bg(rgb(ui::colors().surface)))
+                                .hover(|s| {
+                                    s.bg(rgb(ui::colors().surface))
+                                        .text_color(rgb(ui::colors().text))
+                                })
                                 .tooltip(|_, cx| {
                                     cx.new(|_| {
                                         ui::Tooltip(tr(i18n_key::TERMINAL_MATCH_CASE).to_owned())
@@ -537,9 +540,9 @@ impl Render for TerminalView {
                     .items_center()
                     .gap(px(8.))
                     .px(px(8.))
-                    .bg(rgb(ui::SURFACE))
+                    .bg(rgb(ui::colors().surface))
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .text_size(px(10.))
                     .text_color(rgb(self.status_color()))
                     .child(

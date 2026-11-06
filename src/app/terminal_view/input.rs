@@ -40,6 +40,7 @@ enum WheelTarget {
     History,
     Mouse,
     Alternate,
+    Font,
 }
 
 #[derive(Default)]
@@ -49,6 +50,21 @@ pub(super) struct WheelState {
 }
 
 impl WheelState {
+    fn zoom(&mut self, delta: ScrollDelta, font_size: f32) -> f32 {
+        // Keep touchpad sensitivity independent of the current font metrics.
+        // A mouse wheel event can contain several lines; change one point at
+        // a time instead of multiplying by the system's scroll-line setting.
+        let steps = self.steps(
+            delta,
+            Point {
+                x: px(40.),
+                y: px(40.),
+            },
+            WheelTarget::Font,
+        );
+        (font_size + steps.y.signum() as f32).clamp(8., 40.)
+    }
+
     fn steps(
         &mut self,
         delta: ScrollDelta,
@@ -551,6 +567,16 @@ impl TerminalView {
         // Even sub-cell deltas belong to this canvas; a parent must not consume
         // the same gesture while it is being accumulated here.
         cx.stop_propagation();
+        if event.modifiers.control && !event.modifiers.alt && !event.modifiers.platform {
+            let size = self.wheel.zoom(event.delta, self.font_size);
+            if size != self.font_size {
+                self.font_size = size;
+                cx.notify();
+            }
+            // Zoom belongs to the pane, including when a remote application
+            // has enabled mouse reporting or alternate-screen scrolling.
+            return;
+        }
         let reporting = !event.modifiers.shift
             && self
                 .snapshot
@@ -879,6 +905,48 @@ mod tests {
             wheel.steps(fractional, cell, WheelTarget::History),
             Point { x: 0, y: 0 }
         );
+    }
+
+    #[test]
+    fn wheel_zoom_handles_mouse_touchpad_and_font_limits() {
+        let mut wheel = WheelState::default();
+        let lines = |y| ScrollDelta::Lines(Point { x: 0., y });
+        assert_eq!(wheel.zoom(lines(3.), 13.), 14.);
+        assert_eq!(wheel.zoom(lines(-3.), 13.), 12.);
+        assert_eq!(wheel.zoom(lines(3.), 40.), 40.);
+        assert_eq!(wheel.zoom(lines(-3.), 8.), 8.);
+        assert_eq!(
+            wheel.zoom(ScrollDelta::Lines(Point { x: 3., y: 0. }), 13.),
+            13.
+        );
+        let pixels = ScrollDelta::Pixels(Point {
+            x: px(0.),
+            y: px(10.),
+        });
+        for _ in 0..3 {
+            assert_eq!(wheel.zoom(pixels, 13.), 13.);
+        }
+        assert_eq!(wheel.zoom(pixels, 13.), 14.);
+    }
+
+    #[test]
+    fn wheel_zoom_does_not_share_partial_gestures_with_terminal_scrolling() {
+        let cell = Point {
+            x: px(8.),
+            y: px(16.),
+        };
+        let delta = ScrollDelta::Lines(Point { x: 0., y: 0.75 });
+        for target in [
+            WheelTarget::History,
+            WheelTarget::Mouse,
+            WheelTarget::Alternate,
+        ] {
+            let mut wheel = WheelState::default();
+            assert_eq!(wheel.steps(delta, cell, target).y, 0);
+            assert_eq!(wheel.zoom(delta, 13.), 13.);
+            assert_eq!(wheel.steps(delta, cell, target).y, 0);
+            assert_eq!(wheel.steps(delta, cell, target).y, 1);
+        }
     }
 
     #[test]
