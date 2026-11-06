@@ -92,6 +92,7 @@ impl Workspace {
                         ProfileKind::Telnet => tr(i18n_key::CONNECTIONS_ADD_TELNET_CONNECTION),
                         ProfileKind::Local => tr(i18n_key::WORKSPACE_ADD_LOCAL_PROFILE),
                         ProfileKind::Redis => tr(i18n_key::REDIS_ADD_REDIS_CONNECTION),
+                        ProfileKind::Elasticsearch => tr(i18n_key::ES_ADD_CONNECTION),
                         ProfileKind::Mysql => tr(i18n_key::DATABASE_ADD_MYSQL_CONNECTION),
                         ProfileKind::Postgres => tr(i18n_key::DATABASE_ADD_POSTGRESQL_CONNECTION),
                         ProfileKind::Sqlite => tr(i18n_key::DATABASE_ADD_SQLITE_DATABASE),
@@ -136,6 +137,7 @@ impl Workspace {
                     Connection::Redis(s) => {
                         format!("Redis · {}:{} · DB {}", s.host, s.port, s.database)
                     }
+                    Connection::Elasticsearch(s) => format!("Elasticsearch · {}", s.endpoint),
                     Connection::Rdp(s) => format!("RDP · {}@{}:{}", s.username, s.host, s.port),
                     Connection::Mysql(s) | Connection::Postgres(s) => format!(
                         "{} · {}@{}:{} / {}",
@@ -159,6 +161,7 @@ impl Workspace {
                         .child(secret.clone())
                         .when_some(sentinel_secret.as_ref(), |body, secret| body.child(tr(i18n_key::WORKSPACE_SENTINEL_PASSWORD_THIS_CONNECTION_ONLY)).child(secret.clone()))
                         .child(tr(match profile.connection {
+                            Connection::Elasticsearch(_) => i18n_key::ES_AUTH_HELP,
                             Connection::Redis(_) => i18n_key::REDIS_AUTHENTICATION_IS_SKIPPED_ONLY_WHEN_BOTH_USERNAME_AND_PASSWORD_ARE,
                             Connection::Mysql(_) | Connection::Postgres(_) => i18n_key::DATABASE_ENTER_THE_DATABASE_PASSWORD_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND,
                             Connection::Rdp(_) => i18n_key::RDP_RDP_USES_TLS_AND_NETWORK_LEVEL_AUTHENTICATION_NLA_CREDENTIALS_ARE,

@@ -1,6 +1,6 @@
 use super::{
-    AuthMethod, CredentialRef, DatabaseConfig, LocalConfig, RdpConfig, RedisConfig, SqlConfig,
-    SqlEngine, SqliteConfig, SshConfig, TelnetConfig,
+    AuthMethod, CredentialRef, DatabaseConfig, ElasticsearchConfig, LocalConfig, RdpConfig,
+    RedisConfig, SqlConfig, SqlEngine, SqliteConfig, SshConfig, TelnetConfig,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -34,6 +34,14 @@ pub struct Profile {
 }
 
 impl Profile {
+    pub fn elasticsearch(name: impl Into<String>, config: ElasticsearchConfig) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            group: None,
+            connection: Connection::Elasticsearch(config),
+        }
+    }
     pub fn local(name: impl Into<String>, config: LocalConfig) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -112,6 +120,7 @@ pub enum Connection {
     Ssh(SshConfig),
     Telnet(TelnetConfig),
     Redis(RedisConfig),
+    Elasticsearch(ElasticsearchConfig),
     Mysql(SqlConfig),
     Postgres(SqlConfig),
     Sqlite(SqliteConfig),
@@ -127,6 +136,7 @@ impl Connection {
                 AuthMethod::Agent { .. } | AuthMethod::KeyboardInteractive => None,
             },
             Self::Redis(config) => config.credential,
+            Self::Elasticsearch(config) => config.credential,
             Self::Mysql(config) | Self::Postgres(config) => config.credential,
             Self::Rdp(config) => config.credential,
             Self::Local(_) | Self::Telnet(_) | Self::Sqlite(_) => None,
@@ -141,6 +151,7 @@ impl Connection {
                 AuthMethod::Agent { .. } | AuthMethod::KeyboardInteractive => return false,
             },
             Self::Redis(config) => &mut config.credential,
+            Self::Elasticsearch(config) => &mut config.credential,
             Self::Mysql(config) | Self::Postgres(config) => &mut config.credential,
             Self::Rdp(config) => &mut config.credential,
             Self::Local(_) | Self::Telnet(_) | Self::Sqlite(_) => return false,
@@ -169,6 +180,7 @@ impl Connection {
     pub fn ssh_profile(&self) -> Option<Uuid> {
         match self {
             Self::Redis(config) => config.ssh_profile,
+            Self::Elasticsearch(config) => config.ssh_profile,
             Self::Mysql(config) | Self::Postgres(config) => config.ssh_profile,
             _ => None,
         }

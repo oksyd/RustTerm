@@ -55,6 +55,9 @@ impl CredentialEditor {
 
 impl ProfileForm {
     fn supports_credential(&self) -> bool {
+        if self.kind == ProfileKind::Elasticsearch {
+            return self.es_auth != rustterm::config::ElasticsearchAuth::None;
+        }
         matches!(
             self.kind,
             ProfileKind::Redis | ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::Rdp
@@ -164,12 +167,13 @@ impl ProfileForm {
             return div().into_any_element();
         }
         let saved = self.saved_credential(cx).is_some();
-        let label =
-            if self.kind == ProfileKind::Ssh && self.ssh_auth == SshAuthentication::PrivateKey {
-                i18n_key::CONNECTIONS_PRIVATE_KEY_PASSPHRASE
-            } else {
-                i18n_key::WORKSPACE_PASSWORD
-            };
+        let label = if self.kind == ProfileKind::Elasticsearch {
+            i18n_key::ES_SECRET
+        } else if self.kind == ProfileKind::Ssh && self.ssh_auth == SshAuthentication::PrivateKey {
+            i18n_key::CONNECTIONS_PRIVATE_KEY_PASSPHRASE
+        } else {
+            i18n_key::WORKSPACE_PASSWORD
+        };
         let mut body = column();
         match self.credentials.mode {
             Mode::Keep

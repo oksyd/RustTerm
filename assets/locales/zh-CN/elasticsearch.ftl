@@ -1,0 +1,47 @@
+es-title = Elasticsearch
+es-endpoint = 服务地址 URL
+es-invalid-endpoint = 请输入 HTTP 或 HTTPS 地址，不要包含账号密码、查询参数或片段。
+es-invalid-username = 用户名不能包含冒号。
+es-ca-file = CA 证书文件（可选）
+es-invalid-ca = 无法加载 CA 证书，请选择 PEM 格式的证书文件。
+es-auth = 认证方式
+es-auth-none = 无需认证
+es-auth-basic = 用户名和密码
+es-auth-api-key = API Key
+es-secret = 密码或编码后的 API Key
+es-auth-help = API Key 认证使用 Elasticsearch 返回的 encoded 值。选择保存的密码和密钥使用系统凭据存储。
+es-endpoint-help = HTTPS 会验证服务器证书及主机名。私有集群可以指定自定义 CA 证书。
+es-invalid-config = Elasticsearch 连接配置无效。
+es-network = 无法连接 Elasticsearch，请检查地址、网络和 TLS 证书。
+es-unauthorized = Elasticsearch 拒绝了凭据或权限不足（HTTP 401/403）。
+es-protocol = Elasticsearch 返回了无效或不支持的响应。
+es-http-status = Elasticsearch 拒绝了请求（HTTP { $status }）。
+es-timeout = Elasticsearch 请求超时。
+es-cancelled = Elasticsearch 请求已取消。
+es-too-large = 响应过大，无法显示。请减少查询数量或返回字段。
+es-invalid-query = 请输入不超过 64 KiB 的 JSON 对象。
+es-indices = 索引
+es-filter = 筛选索引
+es-refresh = 刷新索引
+es-no-indices = 没有匹配的索引。
+es-all-indices = 所有索引
+es-query = Query DSL
+es-run = 执行查询
+es-mapping = Mapping
+es-history = 查询历史
+es-history-empty = 当前标签中执行的查询会显示在这里，选择一条即可恢复。
+es-clear-history = 清空历史
+es-copy = 复制 JSON
+es-result = 响应结果
+es-idle = 选择索引或执行查询以查看响应。
+es-querying = 正在查询…
+es-loading = 正在加载…
+es-index-limit = 仅显示前 2,000 个索引。
+es-response-status = HTTP { $status } · { $milliseconds } 毫秒
+es-connect-ok = Elasticsearch 连接及认证成功。
+es-tunnel-fingerprint = SSH 主机：{ $host }:{ $port }
+    算法：{ $algorithm }
+    指纹：{ $fingerprint }
+    此 SSH 连接用于传输 Elasticsearch 请求。
+es-add-connection = 添加 Elasticsearch 连接
+es-paste = 粘贴到 DSL 编辑器

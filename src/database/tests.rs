@@ -23,8 +23,11 @@ fn pg_message(output: &mut Vec<u8>, tag: u8, body: &[u8]) {
     output.extend_from_slice(body);
 }
 fn pg_columns(output: &mut Vec<u8>) {
-    let mut body = 2_i16.to_be_bytes().to_vec();
-    for name in ["value", "nullable"] {
+    pg_named_columns(output, &["value", "nullable"]);
+}
+fn pg_named_columns(output: &mut Vec<u8>, names: &[&str]) {
+    let mut body = (names.len() as i16).to_be_bytes().to_vec();
+    for name in names {
         body.extend_from_slice(name.as_bytes());
         body.push(0);
         body.extend_from_slice(&0_u32.to_be_bytes());
@@ -232,8 +235,11 @@ fn mysql_ok(output: &mut Vec<u8>, sequence: &mut u8, affected: u8, more: bool) {
     );
 }
 fn mysql_columns(output: &mut Vec<u8>, sequence: &mut u8, binary: bool) {
-    mysql_packet(output, sequence, &[2]);
-    for name in ["value", "nullable"] {
+    mysql_named_columns(output, sequence, binary, &["value", "nullable"]);
+}
+fn mysql_named_columns(output: &mut Vec<u8>, sequence: &mut u8, binary: bool, names: &[&str]) {
+    mysql_packet(output, sequence, &[names.len() as u8]);
+    for &name in names {
         let mut body = Vec::new();
         for field in ["def", "", "", "", name, ""] {
             body.push(field.len() as u8);
@@ -549,4 +555,113 @@ async fn mysql_raw_script_bytes_survive_session_quote_mode_changes() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn connection_probes_read_database_versions_without_requiring_metadata_permissions() {
+    use crate::{
+        config::Profile,
+        connection_probe::{self, ProbeKind, ProbeRequest},
+    };
+    for engine in [SqlEngine::Mysql, SqlEngine::Postgres] {
+        for allow_version in [true, false] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let config = config(engine, listener.local_addr().unwrap().port());
+                let version = if engine == SqlEngine::Mysql {
+                    "8.0.36"
+                } else {
+                    "16.2"
+                };
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    if engine == SqlEngine::Mysql {
+                        mysql_start(&mut stream).await;
+                    } else {
+                        pg_start(&mut stream).await;
+                    }
+                    for (query, value) in [
+                        ("SELECT 1", "1"),
+                        (
+                            if engine == SqlEngine::Mysql {
+                                "SELECT VERSION()"
+                            } else {
+                                "SHOW server_version"
+                            },
+                            version,
+                        ),
+                    ] {
+                        let denied = value == version && !allow_version;
+                        let mut response = Vec::new();
+                        if engine == SqlEngine::Mysql {
+                            assert_eq!(&mysql_read(&mut stream).await[1..], query.as_bytes());
+                            let mut sequence = 1;
+                            if denied {
+                                let mut error = vec![0xff];
+                                error.extend_from_slice(&1370_u16.to_le_bytes());
+                                error.extend_from_slice(b"#42000version function denied");
+                                mysql_packet(&mut response, &mut sequence, &error);
+                            } else {
+                                mysql_named_columns(
+                                    &mut response,
+                                    &mut sequence,
+                                    false,
+                                    &["value"],
+                                );
+                                let mut row = vec![value.len() as u8];
+                                row.extend_from_slice(value.as_bytes());
+                                mysql_packet(&mut response, &mut sequence, &row);
+                                mysql_eof(&mut response, &mut sequence, false);
+                            }
+                        } else {
+                            assert_eq!(pg_query(&mut stream).await, query);
+                            if denied {
+                                pg_message(
+                                    &mut response,
+                                    b'E',
+                                    b"SERROR\0C42501\0Mversion query denied\0\0",
+                                );
+                            } else {
+                                pg_named_columns(&mut response, &["value"]);
+                                let mut row = 1_i16.to_be_bytes().to_vec();
+                                row.extend_from_slice(&(value.len() as i32).to_be_bytes());
+                                row.extend_from_slice(value.as_bytes());
+                                pg_message(&mut response, b'D', &row);
+                                pg_message(&mut response, b'C', b"SELECT 1\0");
+                            }
+                            pg_message(&mut response, b'Z', b"I");
+                        }
+                        stream.write_all(&response).await.unwrap();
+                    }
+                });
+                let profile = if engine == SqlEngine::Mysql {
+                    Profile::mysql("MySQL", config)
+                } else {
+                    Profile::postgres("PostgreSQL", config)
+                };
+                let (hosts, _) = mpsc::channel(1);
+                let (certificates, _) = mpsc::channel(1);
+                let outcome = connection_probe::test(
+                    ProbeRequest {
+                        profile,
+                        secret: Secret::new(String::new()),
+                        sentinel_secret: None,
+                        ssh: None,
+                    },
+                    hosts,
+                    certificates,
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome.kind, ProbeKind::DatabaseReady);
+                let info = outcome.server.unwrap();
+                assert_eq!(info.product, engine.label());
+                assert_eq!(info.version.as_deref(), allow_version.then_some(version));
+                server.await.unwrap();
+            })
+            .await
+            .unwrap();
+        }
+    }
 }

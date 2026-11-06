@@ -197,6 +197,7 @@ pub(super) async fn run(
         if !tail.is_empty() {
             terminal.feed(&tail);
             publish_shell_state(&terminal, &shared);
+            shared.output_received(&tail);
         }
         drop(transfer);
         match transport
@@ -293,7 +294,7 @@ fn feed_output(
     }
     let replies = terminal.feed(bytes);
     publish_shell_state(terminal, shared);
-    shared.changed();
+    shared.output_received(bytes);
     for reply in replies {
         outbox.reply(reply)?;
     }
@@ -829,6 +830,77 @@ mod tests {
         *session.shared.shell_state.lock().unwrap() = super::super::state::ShellState::default();
         publish_shell_state(&terminal, &session.shared);
         assert!(session.current_directory().is_none());
+    }
+
+    #[test]
+    fn focus_and_view_commands_do_not_count_as_terminal_output() {
+        let (session, mut terminal, mut commands) = Session::create(80, 24, 10).unwrap();
+        let mut outbox = Outbox::default();
+        assert_eq!(session.output_revision(), 0);
+        feed_output(b"ready", &mut terminal, &session.shared, &mut outbox).unwrap();
+        assert_eq!(session.output_revision(), 1);
+        let revision = session.revision();
+
+        for focus_reporting in [false, true] {
+            if focus_reporting {
+                terminal.feed(b"\x1b[?1004h");
+            }
+            for focused in [false, true] {
+                let write = command_effect(
+                    ActorCommand::User(Command::Focus(focused)),
+                    &mut terminal,
+                    &session.shared,
+                    true,
+                );
+                assert_eq!(write.is_some(), focus_reporting);
+                assert_eq!(session.output_revision(), 1);
+            }
+        }
+        for command in [
+            Command::ClearSelection,
+            Command::Scroll(1),
+            Command::SetHighlight(false),
+            Command::SetTheme(crate::config::Theme::default()),
+            Command::Search {
+                query: "ready".into(),
+                case_sensitive: false,
+            },
+            Command::CancelSearch,
+        ] {
+            command_effect(
+                ActorCommand::User(command),
+                &mut terminal,
+                &session.shared,
+                true,
+            );
+            assert_eq!(session.output_revision(), 1);
+        }
+        session.resize(90, 26).unwrap();
+        command_effect(
+            commands.try_recv().unwrap(),
+            &mut terminal,
+            &session.shared,
+            true,
+        );
+        apply_budget(&mut terminal, &session.shared);
+        session.shared.state(SessionState::Connected);
+        publish_snapshot(&mut terminal, &session.shared);
+        feed_output(b"", &mut terminal, &session.shared, &mut outbox).unwrap();
+        assert_eq!(session.output_revision(), 1);
+        assert_ne!(
+            session.revision(),
+            revision,
+            "view and state updates must still wake the UI"
+        );
+
+        feed_output(
+            b"\r\nnew output",
+            &mut terminal,
+            &session.shared,
+            &mut outbox,
+        )
+        .unwrap();
+        assert_eq!(session.output_revision(), 2);
     }
 
     #[test]

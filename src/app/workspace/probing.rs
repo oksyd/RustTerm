@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui::{Task, Timer};
 use rustterm::{
-    connection_probe::{self, ProbeOutcome, ProbeRequest},
+    connection_probe::{self, ProbeKind, ProbeOutcome, ProbeRequest},
     rdp::{CertificateDecision, RdpEvent},
     session::HostKeyChallenge,
 };
@@ -48,20 +48,75 @@ impl ProfileTest {
         match &self.status {
             TestStatus::Running => tr(i18n_key::DATABASE_TESTING_CONNECTION).into(),
             TestStatus::Failed(error) => error.render(),
-            TestStatus::Success(outcome, elapsed) => rustterm::trf!(
-                i18n_key::CONNECTIONS_RESULT_ELAPSED_MS,
-                result = tr(match outcome {
-                    ProbeOutcome::Authenticated =>
-                        i18n_key::CONNECTIONS_SSH_HOST_VERIFICATION_AND_AUTHENTICATION_SUCCEEDED,
-                    ProbeOutcome::DatabaseReady => i18n_key::CONNECTIONS_DATABASE_AUTHENTICATION_AND_QUERY_SUCCEEDED,
-                    ProbeOutcome::SqliteReady => i18n_key::DATABASE_DATABASE_ACCESS_CHECK_SUCCEEDED,
-                    ProbeOutcome::TelnetReachable =>
-                        i18n_key::CONNECTIONS_TELNET_PORT_IS_REACHABLE_LOGIN_WAS_NOT_TESTED,
-                    ProbeOutcome::RdpAuthenticated =>
-                        i18n_key::CONNECTIONS_RDP_TLS_AND_NLA_AUTHENTICATION_SUCCEEDED_DESKTOP_ACTIVATION_WAS_NOT,
-                }),
-                elapsed = elapsed.as_millis(),
-            ),
+            TestStatus::Success(outcome, elapsed) => success_message(outcome, *elapsed),
+        }
+    }
+}
+
+fn success_message(outcome: &ProbeOutcome, elapsed: Duration) -> String {
+    let result_key = match outcome.kind {
+        ProbeKind::Authenticated => i18n_key::CONNECTIONS_SSH_HOST_VERIFICATION_AND_AUTHENTICATION_SUCCEEDED,
+        ProbeKind::DatabaseReady => i18n_key::CONNECTIONS_DATABASE_AUTHENTICATION_AND_QUERY_SUCCEEDED,
+        ProbeKind::ElasticsearchReady => i18n_key::ES_CONNECT_OK,
+        ProbeKind::SqliteReady => i18n_key::DATABASE_DATABASE_ACCESS_CHECK_SUCCEEDED,
+        ProbeKind::TelnetReachable => i18n_key::CONNECTIONS_TELNET_PORT_IS_REACHABLE_LOGIN_WAS_NOT_TESTED,
+        ProbeKind::RdpAuthenticated => i18n_key::CONNECTIONS_RDP_TLS_AND_NLA_AUTHENTICATION_SUCCEEDED_DESKTOP_ACTIVATION_WAS_NOT,
+    };
+    let result = tr(result_key);
+    if let Some(server) = &outcome.server {
+        rustterm::trf!(
+            i18n_key::CONNECTIONS_RESULT_VERSION_ELAPSED_MS,
+            result = result,
+            product = server.product,
+            version = server
+                .version
+                .as_deref()
+                .unwrap_or_else(|| tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)),
+            elapsed = elapsed.as_millis(),
+        )
+    } else {
+        rustterm::trf!(
+            i18n_key::CONNECTIONS_RESULT_ELAPSED_MS,
+            result = result,
+            elapsed = elapsed.as_millis(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::connection_probe::ServerVersion;
+
+    #[test]
+    fn test_feedback_preserves_success_version_and_elapsed_time() {
+        let mut outcome = ProbeOutcome {
+            kind: ProbeKind::ElasticsearchReady,
+            server: Some(ServerVersion {
+                product: "Elasticsearch",
+                version: Some("7.4.2".into()),
+            }),
+        };
+        let text = success_message(&outcome, Duration::from_millis(42));
+        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
+        assert!(text.contains("Elasticsearch 7.4.2"));
+        assert!(text.contains("42"));
+        outcome.server.as_mut().unwrap().version = None;
+        let text = success_message(&outcome, Duration::from_millis(42));
+        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
+        assert!(text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
+        assert!(!text.contains("7.4.2"));
+    }
+
+    #[test]
+    fn telnet_and_rdp_keep_their_actual_test_scope() {
+        for (kind, message) in [
+            (ProbeKind::TelnetReachable, i18n_key::CONNECTIONS_TELNET_PORT_IS_REACHABLE_LOGIN_WAS_NOT_TESTED),
+            (ProbeKind::RdpAuthenticated, i18n_key::CONNECTIONS_RDP_TLS_AND_NLA_AUTHENTICATION_SUCCEEDED_DESKTOP_ACTIVATION_WAS_NOT),
+        ] {
+            let text = success_message(&ProbeOutcome { kind, server: None }, Duration::from_millis(42));
+            assert!(text.contains(tr(message)));
+            assert!(!text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
         }
     }
 }

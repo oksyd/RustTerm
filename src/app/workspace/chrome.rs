@@ -17,6 +17,7 @@ use super::menus::APPLICATION_MENUS;
 fn pane_icon(pane: Option<&Pane>, cx: &App) -> Icon {
     match pane {
         Some(Pane::Redis(_)) => Icon::Redis,
+        Some(Pane::Elasticsearch(_)) => Icon::Elasticsearch,
         Some(Pane::Database(view)) => Icon::for_sql_engine(view.read(cx).engine()),
         Some(Pane::Rdp(_)) => Icon::Desktop,
         Some(Pane::Terminal(_)) | None => Icon::Terminal,
@@ -733,6 +734,7 @@ impl Workspace {
             .map(|profile| match &profile.connection {
                 Connection::Ssh(ssh) => format!("SSH  {}@{}:{}", ssh.username, ssh.host, ssh.port),
                 Connection::Local(_) => tr(i18n_key::COMMON_LOCAL_TERMINAL).into(),
+                Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
                 Connection::Redis(redis) => format!("Redis  {}:{}", redis.host, redis.port),
                 Connection::Mysql(sql) => {
                     format!("MySQL  {}:{} / {}", sql.host, sql.port, sql.database)
@@ -754,6 +756,7 @@ impl Workspace {
             Connection::Telnet(_) => "Telnet",
             Connection::Local(_) => tr(i18n_key::TERMINAL_LOCAL),
             Connection::Redis(_) => "Redis",
+            Connection::Elasticsearch(_) => "Elasticsearch",
             Connection::Mysql(_) => "MySQL",
             Connection::Postgres(_) => "PostgreSQL",
             Connection::Sqlite(_) => "SQLite",

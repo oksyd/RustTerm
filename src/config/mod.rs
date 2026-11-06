@@ -4,6 +4,7 @@ use crate::i18n::{Message, messages as i18n_key};
 
 mod credential_process;
 pub mod credentials;
+mod elasticsearch;
 mod groups;
 pub mod known_hosts;
 mod local;
@@ -19,6 +20,7 @@ mod workspace;
 
 pub use credential_process::{ProcessCredentialStore, run_credential_worker};
 pub use credentials::{CredentialRef, CredentialStore, Secret, SystemCredentialStore};
+pub use elasticsearch::{ElasticsearchAuth, ElasticsearchConfig};
 pub use groups::GroupNode;
 pub use known_hosts::{HostKey, HostKeyStatus, KnownHosts};
 pub use local::{LocalConfig, LocalProfile};
@@ -257,6 +259,15 @@ impl AppConfig {
                 Connection::Telnet(telnet) => telnet.validate()?,
                 Connection::Rdp(rdp) => rdp.validate()?,
                 Connection::Sqlite(sqlite) => sqlite.validate()?,
+                Connection::Elasticsearch(config) => {
+                    config.validate()?;
+                    if config
+                        .ssh_profile
+                        .is_some_and(|id| id == profile.id || !ssh_ids.contains(&id))
+                    {
+                        return Err(invalid(i18n_key::DATABASE_A_DATABASE_SSH_TUNNEL_MUST_REFERENCE_AN_EXISTING_SSH_PROFILE));
+                    }
+                }
                 Connection::Mysql(sql) | Connection::Postgres(sql) => {
                     sql.validate()?;
                     if sql

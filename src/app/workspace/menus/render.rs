@@ -193,6 +193,8 @@ impl Workspace {
                 (MenuAction::Paste, Some(Pane::Database(_))) => {
                     i18n_key::WORKSPACE_PASTE_INTO_SQL_EDITOR
                 }
+                (MenuAction::Copy, Some(Pane::Elasticsearch(_))) => i18n_key::ES_COPY,
+                (MenuAction::Paste, Some(Pane::Elasticsearch(_))) => i18n_key::ES_PASTE,
                 _ => item.label,
             };
             let checked = match action {

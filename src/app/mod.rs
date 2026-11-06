@@ -3,6 +3,7 @@ mod auth_prompt;
 mod command_view;
 mod database_view;
 mod diagnostics;
+mod elasticsearch_view;
 mod file_transfer;
 mod forms;
 mod input_capture;

@@ -27,6 +27,7 @@ struct Events {
     connections: AtomicUsize,
     destinations: Mutex<Vec<(String, u32)>>,
     redis_commands: Mutex<Vec<Vec<Vec<u8>>>>,
+    http_requests: Mutex<Vec<String>>,
 }
 struct Active(Arc<Events>);
 impl Drop for Active {
@@ -105,6 +106,40 @@ impl server::Handler for Handler {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.pending.extend(data);
+        if self.pending.starts_with(b"GET ") || self.pending.starts_with(b"POST ") {
+            let Some(end) = self
+                .pending
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            else {
+                return Ok(());
+            };
+            let header = String::from_utf8_lossy(&self.pending[..end]);
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if self.pending.len() < end + 4 + length {
+                return Ok(());
+            }
+            let request = String::from_utf8(std::mem::take(&mut self.pending)).unwrap();
+            let body = if request.starts_with("GET / HTTP/") {
+                r#"{"cluster_name":"via-ssh","version":{"number":"8.19.0"}}"#
+            } else {
+                r#"{"hits":{"hits":[{"_source":{"route":"ssh"}}]}}"#
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            self.events.http_requests.lock().unwrap().push(request);
+            session.data(channel, response.into_bytes())?;
+            return Ok(());
+        }
         let Ok(redis::Value::Array(values)) = redis::parse_redis_value(&self.pending) else {
             return Ok(());
         };
@@ -156,6 +191,7 @@ impl Fixture {
             reject_forward,
         };
         let config = Arc::new(server::Config {
+            server_id: russh::SshId::Standard("SSH-2.0-RustTermTest_1.2".into()),
             keys: vec![host_key.clone()],
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
@@ -222,6 +258,57 @@ impl Fixture {
         .unwrap();
     }
 }
+
+#[tokio::test]
+async fn ssh_connection_probe_reports_server_identification_without_opening_a_shell() {
+    use rustterm::{
+        config::{Profile, SshConfig},
+        connection_probe::{self, ProbeKind, ProbeRequest},
+    };
+    let fixture = Fixture::new(None, false).await;
+    let directory = private_directory();
+    let options = fixture.ssh(
+        &directory.path().join("known_hosts"),
+        SshAuth::Password("ssh-secret".into()),
+    );
+    let profile = Profile::ssh(
+        "SSH",
+        SshConfig {
+            host: "127.0.0.1".into(),
+            port: fixture.port,
+            username: "ssh-user".into(),
+            ..Default::default()
+        },
+    );
+    let (hosts, mut challenges) = mpsc::channel(1);
+    let (certificates, _) = mpsc::channel(1);
+    let probe = tokio::spawn(connection_probe::test(
+        ProbeRequest {
+            profile,
+            secret: Secret::new("ssh-secret".into()),
+            sentinel_secret: None,
+            ssh: Some(options),
+        },
+        hosts,
+        certificates,
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    let trust = challenge(&mut challenges).await;
+    assert_eq!(fixture.events.authentications.load(Ordering::SeqCst), 0);
+    trust.reply.send(true).unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(3), probe)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.kind, ProbeKind::Authenticated);
+    let info = outcome.server.unwrap();
+    assert_eq!(info.product, "SSH");
+    assert_eq!(info.version.as_deref(), Some("RustTermTest_1.2"));
+    assert_eq!(fixture.events.shell_channels.load(Ordering::SeqCst), 0);
+    assert!(fixture.events.destinations.lock().unwrap().is_empty());
+    disconnected(&fixture.events).await;
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.task.abort();
@@ -250,6 +337,63 @@ async fn disconnected(events: &Events) {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn elasticsearch_uses_ssh_dns_and_preserves_http_authentication_without_a_pty() {
+    use rustterm::{
+        config::{ElasticsearchAuth, ElasticsearchConfig},
+        elasticsearch::{ElasticsearchClient, Request},
+    };
+    let fixture = Fixture::new(None, false).await;
+    let directory = private_directory();
+    let path = directory.path().join("hosts.toml");
+    let (trust, mut prompts) = mpsc::channel(1);
+    let ssh = fixture.ssh(&path, SshAuth::Password("ssh-secret".into()));
+    let config = ElasticsearchConfig {
+        endpoint: "http://elastic.internal.invalid:9200".into(),
+        auth: ElasticsearchAuth::ApiKey,
+        ssh_profile: Some(Uuid::new_v4()),
+        ..Default::default()
+    };
+    let pending = tokio::spawn(ElasticsearchClient::connect(
+        config,
+        Secret::new("a2V5OnNlY3JldA==".into()),
+        Some((ssh, trust)),
+    ));
+    challenge(&mut prompts).await.reply.send(true).unwrap();
+    let client = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let response = client
+        .request(Request::Search {
+            index: Some("logs".into()),
+            body: "{}".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.json["hits"]["hits"][0]["_source"]["route"], "ssh");
+    assert_eq!(
+        *fixture.events.destinations.lock().unwrap(),
+        [
+            ("elastic.internal.invalid".into(), 9200),
+            ("elastic.internal.invalid".into(), 9200)
+        ]
+    );
+    assert_eq!(fixture.events.shell_channels.load(Ordering::SeqCst), 0);
+    assert!(
+        fixture
+            .events
+            .http_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.contains("ApiKey a2V5OnNlY3JldA=="))
+    );
+    client.close();
+    disconnected(&fixture.events).await;
 }
 
 #[tokio::test]

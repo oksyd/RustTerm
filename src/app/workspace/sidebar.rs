@@ -39,6 +39,7 @@ fn profile_matches(profile: &Profile, group: &str, query: &str) -> bool {
         Connection::Local(s) => s.shell.clone(),
         Connection::Ssh(s) => format!("{} {} {}", s.host, s.username, s.port),
         Connection::Telnet(s) => format!("Telnet {} {}", s.host, s.port),
+        Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
         Connection::Redis(s) => format!(
             "Redis {} {} {}",
             s.host,
@@ -304,6 +305,7 @@ impl Workspace {
                             Connection::Ssh(_) => ProfileKind::Ssh,
                             Connection::Telnet(_) => ProfileKind::Telnet,
                             Connection::Redis(_) => ProfileKind::Redis,
+                            Connection::Elasticsearch(_) => ProfileKind::Elasticsearch,
                             Connection::Mysql(_) => ProfileKind::Mysql,
                             Connection::Postgres(_) => ProfileKind::Postgres,
                             Connection::Sqlite(_) => ProfileKind::Sqlite,
@@ -679,6 +681,9 @@ impl Workspace {
                     Connection::Local(local) => local.shell.clone(),
                     Connection::Ssh(ssh) => {
                         format!("SSH  {}@{}:{}", ssh.username, ssh.host, ssh.port)
+                    }
+                    Connection::Elasticsearch(config) => {
+                        format!("Elasticsearch {}", config.endpoint)
                     }
                     Connection::Redis(redis) => format!("Redis  {}:{}", redis.host, redis.port),
                     Connection::Mysql(sql) => {

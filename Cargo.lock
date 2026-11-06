@@ -6392,6 +6392,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "argon2",
+ "base64 0.22.1",
  "chrono",
  "flate2",
  "fluent-bundle",

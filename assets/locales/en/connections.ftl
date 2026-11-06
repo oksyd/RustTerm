@@ -354,6 +354,10 @@ connections-replace = Replace…
 
 connections-result-elapsed-ms = { $result } · { $elapsed } ms
 
+connections-result-version-elapsed-ms = { $result } · { $product } { $version } · { $elapsed } ms
+
+connections-version-unavailable = version unavailable
+
 connections-save-a-password-in-the-ssh-tunnel-profile-before-testing = Save a password in the SSH tunnel profile before testing this connection, or use an SSH key or agent.
 
 connections-saved-credential-will-be-kept = Saved credential will be kept.

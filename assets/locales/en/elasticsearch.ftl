@@ -1,0 +1,47 @@
+es-title = Elasticsearch
+es-endpoint = Endpoint URL
+es-invalid-endpoint = Enter an HTTP or HTTPS URL without credentials, query parameters, or a fragment.
+es-invalid-username = The username must not contain a colon.
+es-ca-file = CA certificate file (optional)
+es-invalid-ca = Could not load the CA certificate. Choose a PEM certificate file.
+es-auth = Authentication
+es-auth-none = No authentication
+es-auth-basic = Username and password
+es-auth-api-key = API key
+es-secret = Password or encoded API key
+es-auth-help = API key authentication uses the encoded value returned by Elasticsearch. Saved secrets use the system credential store.
+es-endpoint-help = Use HTTPS to verify the server certificate and hostname. A custom CA file can be supplied for private clusters.
+es-invalid-config = Invalid Elasticsearch connection settings.
+es-network = Could not reach Elasticsearch. Check the endpoint, network, and TLS certificate.
+es-unauthorized = Elasticsearch rejected the credentials or permissions (HTTP 401/403).
+es-protocol = Elasticsearch returned an invalid or unsupported response.
+es-http-status = Elasticsearch rejected the request (HTTP { $status }).
+es-timeout = The Elasticsearch request timed out.
+es-cancelled = The Elasticsearch request was cancelled.
+es-too-large = The response is too large to display. Reduce the query size or returned fields.
+es-invalid-query = Enter a JSON object of at most 64 KiB.
+es-indices = Indices
+es-filter = Filter indices
+es-refresh = Refresh indices
+es-no-indices = No matching indices.
+es-all-indices = All indices
+es-query = Query DSL
+es-run = Run query
+es-mapping = Mapping
+es-history = Query history
+es-history-empty = Queries run in this tab appear here. Select one to restore it.
+es-clear-history = Clear history
+es-copy = Copy JSON
+es-result = Response
+es-idle = Select an index or run a query to view its response.
+es-querying = Running query…
+es-loading = Loading…
+es-index-limit = Showing the first 2,000 indices.
+es-response-status = HTTP { $status } · { $milliseconds } ms
+es-connect-ok = Elasticsearch is reachable and authenticated.
+es-tunnel-fingerprint = SSH host: { $host }:{ $port }
+    Algorithm: { $algorithm }
+    Fingerprint: { $fingerprint }
+    This SSH connection carries Elasticsearch requests.
+es-add-connection = Add Elasticsearch connection
+es-paste = Paste into DSL editor

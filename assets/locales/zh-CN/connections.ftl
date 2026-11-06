@@ -354,6 +354,10 @@ connections-replace = 更换…
 
 connections-result-elapsed-ms = { $result } · { $elapsed } 毫秒
 
+connections-result-version-elapsed-ms = { $result } · { $product } { $version } · { $elapsed } 毫秒
+
+connections-version-unavailable = 版本未获取
+
 connections-save-a-password-in-the-ssh-tunnel-profile-before-testing = 请先在 SSH 隧道连接中保存密码，或使用 SSH 密钥或代理，再测试此连接。
 
 connections-saved-credential-will-be-kept = 将保留已保存的凭据。

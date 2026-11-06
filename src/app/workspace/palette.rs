@@ -254,6 +254,7 @@ impl Workspace {
             let target = match &profile.connection {
                 Connection::Ssh(s) => format!("SSH {}@{}:{}", s.username, s.host, s.port),
                 Connection::Telnet(s) => format!("Telnet {}:{}", s.host, s.port),
+                Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
                 Connection::Redis(s) => format!("Redis {}:{}", s.host, s.port),
                 Connection::Mysql(s) => format!("MySQL {}:{} {}", s.host, s.port, s.database),
                 Connection::Postgres(s) => {

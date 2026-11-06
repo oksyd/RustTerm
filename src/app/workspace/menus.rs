@@ -38,6 +38,7 @@ pub(super) enum MenuAction {
     NewSsh,
     NewTelnet,
     NewRedis,
+    NewElasticsearch,
     NewMysql,
     NewPostgres,
     NewSqlite,
@@ -208,6 +209,7 @@ impl Menu {
                         MenuItem::new(i18n_key::WORKSPACE_ADD_SSH_PROFILE, "", NewSsh),
                         MenuItem::new(i18n_key::CONNECTIONS_ADD_TELNET_CONNECTION, "", NewTelnet),
                         MenuItem::new(i18n_key::REDIS_ADD_REDIS_CONNECTION, "", NewRedis),
+                        MenuItem::new(i18n_key::ES_ADD_CONNECTION, "", NewElasticsearch),
                         MenuItem::new(i18n_key::DATABASE_ADD_MYSQL_CONNECTION, "", NewMysql),
                         MenuItem::new(
                             i18n_key::DATABASE_ADD_POSTGRESQL_CONNECTION,
@@ -615,7 +617,7 @@ impl Workspace {
                                 .history_run()
                                 .is_some_and(|run| view.can_insert_history_command(run)))
                 }
-                Some(Pane::Database(_)) => true,
+                Some(Pane::Database(_) | Pane::Elasticsearch(_)) => true,
                 _ => false,
             };
         }
@@ -706,6 +708,7 @@ impl Workspace {
                             Connection::Ssh(_) => ProfileKind::Ssh,
                             Connection::Telnet(_) => ProfileKind::Telnet,
                             Connection::Redis(_) => ProfileKind::Redis,
+                            Connection::Elasticsearch(_) => ProfileKind::Elasticsearch,
                             Connection::Mysql(_) => ProfileKind::Mysql,
                             Connection::Postgres(_) => ProfileKind::Postgres,
                             Connection::Sqlite(_) => ProfileKind::Sqlite,
@@ -728,6 +731,7 @@ impl Workspace {
             NewLocal => self.edit_profile(None, ProfileKind::Local, window, cx),
             NewSsh => self.edit_profile(None, ProfileKind::Ssh, window, cx),
             NewTelnet => self.edit_profile(None, ProfileKind::Telnet, window, cx),
+            NewElasticsearch => self.edit_profile(None, ProfileKind::Elasticsearch, window, cx),
             NewRedis => self.edit_profile(None, ProfileKind::Redis, window, cx),
             NewMysql => self.edit_profile(None, ProfileKind::Mysql, window, cx),
             NewPostgres => self.edit_profile(None, ProfileKind::Postgres, window, cx),
@@ -760,6 +764,12 @@ impl Workspace {
                     Copy => p.copy_selection(cx),
                     Paste => p.paste(window, cx),
                     Search => p.open_search(window, cx),
+                    _ => p.disconnect_or_reconnect(cx),
+                }),
+                Some(Pane::Elasticsearch(pane)) => pane.update(cx, |p, cx| match action {
+                    Copy => p.copy_json(cx),
+                    Paste => p.paste_query(window, cx),
+                    Search => p.focus_filter(window, cx),
                     _ => p.disconnect_or_reconnect(cx),
                 }),
                 Some(Pane::Redis(pane)) => pane.update(cx, |p, cx| match action {

@@ -610,6 +610,7 @@ fn apply_profile(config: &mut AppConfig, profile: Profile) {
             if dependent.connection.ssh_profile() == Some(profile.id) {
                 match &mut dependent.connection {
                     Connection::Redis(config) => config.credential = None,
+                    Connection::Elasticsearch(config) => config.credential = None,
                     Connection::Mysql(config) | Connection::Postgres(config) => {
                         config.credential = None
                     }

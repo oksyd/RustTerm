@@ -22,7 +22,7 @@ use std::{
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -63,6 +63,7 @@ pub(super) enum Ui {
     Tunnel {
         trust: mpsc::Sender<HostKeyChallenge>,
         closed: CancellationToken,
+        server_identification: Arc<OnceLock<String>>,
     },
     Forwarding {
         controller: ForwardController,
@@ -138,6 +139,22 @@ pub(super) struct HostVerifier {
 }
 impl client::Handler for HostVerifier {
     type Error = anyhow::Error;
+    async fn kex_done(
+        &mut self,
+        _: Option<&[u8]>,
+        _: &russh::Names,
+        session: &mut client::Session,
+    ) -> Result<()> {
+        if let Ui::Tunnel {
+            server_identification,
+            ..
+        } = &self.verification.ui
+            && let Ok(id) = std::str::from_utf8(session.remote_sshid())
+        {
+            let _ = server_identification.set(id.chars().take(255).collect());
+        }
+        Ok(())
+    }
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
         channel: russh::Channel<client::Msg>,
@@ -352,17 +369,17 @@ pub(super) async fn connect_authenticated(
             forwards: Vec::new(),
             authentication: options.authentication.clone(),
         };
-        parents.push(
-            connect_one(
-                hop_options,
-                ui.clone(),
-                stop.clone(),
-                stream,
-                Vec::new(),
-                None,
-            )
-            .await?,
-        );
+        let mut hop_ui = ui.clone();
+        if let Ui::Tunnel {
+            server_identification,
+            ..
+        } = &mut hop_ui
+        {
+            // Only the destination server's identification belongs in the result.
+            *server_identification = Arc::new(OnceLock::new());
+        }
+        parents
+            .push(connect_one(hop_options, hop_ui, stop.clone(), stream, Vec::new(), None).await?);
     }
     let stream = if let Some(parent) = parents.last() {
         let channel = stage(
@@ -609,6 +626,7 @@ pub(crate) struct TunnelConnector(Arc<TunnelConnection>);
 struct TunnelConnection {
     requests: mpsc::Sender<TcpRequest>,
     stop: CancellationToken,
+    server_identification: Arc<OnceLock<String>>,
 }
 impl Drop for TunnelConnection {
     fn drop(&mut self) {
@@ -616,6 +634,9 @@ impl Drop for TunnelConnection {
     }
 }
 impl TunnelConnector {
+    pub(crate) fn server_identification(&self) -> Option<&str> {
+        self.0.server_identification.get().map(String::as_str)
+    }
     pub(crate) async fn open(&self, host: String, port: u16) -> SshResult<DirectTcpStream> {
         let host = crate::config::known_hosts::normalize_host(&host)
             .map_err(|e| (FailureKind::Dns, e.to_string()))?;
@@ -669,11 +690,13 @@ pub(crate) async fn connect_tunnel(
 ) -> SshResult<TunnelConnector> {
     let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
     let closed = stop.child_token();
+    let server_identification = Arc::new(OnceLock::new());
     let mut handle = connect_authenticated(
         options,
         Ui::Tunnel {
             trust,
             closed: closed.clone(),
+            server_identification: server_identification.clone(),
         },
         stop.clone(),
     )
@@ -682,6 +705,7 @@ pub(crate) async fn connect_tunnel(
     let connection = TunnelConnector(Arc::new(TunnelConnection {
         requests,
         stop: stop.clone(),
+        server_identification,
     }));
     tokio::spawn(async move {
         let _guard = CancelOnDrop(Some(stop.clone()));
@@ -1085,6 +1109,7 @@ mod tests {
             Ui::Tunnel {
                 trust,
                 closed: stop.child_token(),
+                server_identification: Arc::new(OnceLock::new()),
             },
             stop.clone(),
         )

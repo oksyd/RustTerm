@@ -3,6 +3,7 @@
 use super::persistence::profile_reference;
 use super::{Modal, TunnelAuth, Workspace};
 use crate::app::database_view::DatabaseLaunch;
+use crate::app::elasticsearch_view::ElasticsearchLaunch;
 use crate::app::layout::Axis;
 use crate::app::rdp_view::RdpLaunch;
 use crate::app::redis_view::RedisLaunch;
@@ -129,6 +130,14 @@ impl Workspace {
                     Session::spawn_ssh(options, 80, 24, self.config.settings.history_lines);
                 self.add_session(profile, session, Some(id), None, window, cx);
             }
+            Connection::Elasticsearch(config) => {
+                let launch = ElasticsearchLaunch {
+                    config: config.clone(),
+                    secret,
+                    ssh,
+                };
+                self.add_elasticsearch(profile, launch, Some(id), None, window, cx);
+            }
             Connection::Redis(config) => {
                 let launch = RedisLaunch {
                     config: config.clone(),
@@ -253,6 +262,7 @@ impl Workspace {
             TextInput::new(
                 match profile.connection {
                     Connection::Redis(_) => i18n_key::REDIS_REDIS_PASSWORD,
+                    Connection::Elasticsearch(_) => i18n_key::ES_SECRET,
                     Connection::Mysql(_) | Connection::Postgres(_) => {
                         i18n_key::DATABASE_DATABASE_PASSWORD
                     }
@@ -289,6 +299,7 @@ impl Workspace {
                 self.load_credential(reference, field, window, cx);
             }
         }
+        self.try_saved_authentication(window, cx);
         self.restore_focus(window, cx);
         cx.notify();
     }
@@ -441,6 +452,14 @@ impl Workspace {
                 let session =
                     Session::spawn_ssh(options, 80, 24, self.config.settings.history_lines);
                 self.add_session(profile, session, reconnect, split, window, cx);
+            }
+            Connection::Elasticsearch(config) => {
+                let launch = ElasticsearchLaunch {
+                    config: config.clone(),
+                    secret: value,
+                    ssh,
+                };
+                self.add_elasticsearch(profile, launch, reconnect, split, window, cx);
             }
             Connection::Redis(config) => {
                 let launch = RedisLaunch {
@@ -603,6 +622,9 @@ fn attach_credential(
         | (Connection::Postgres(current), Connection::Postgres(before)) => {
             current.same_auth_identity(before)
         }
+        (Connection::Elasticsearch(current), Connection::Elasticsearch(before)) => {
+            current.same_auth_identity(before)
+        }
         (Connection::Redis(current), Connection::Redis(before)) => {
             current.host == before.host
                 && current.port == before.port
@@ -622,6 +644,7 @@ fn attach_credential(
             AuthMethod::Agent { .. } | AuthMethod::KeyboardInteractive => return false,
         },
         Connection::Redis(config) => config.credential = Some(reference),
+        Connection::Elasticsearch(config) => config.credential = Some(reference),
         Connection::Mysql(config) | Connection::Postgres(config) => {
             config.credential = Some(reference)
         }
@@ -650,10 +673,11 @@ fn trust_rdp_certificate(original: &Profile, current: &mut Profile, fingerprint:
 pub(super) fn needs_password(profile: &Profile) -> bool {
     matches!(&profile.connection, Connection::Ssh(config) if matches!(config.auth, AuthMethod::Password { .. }))
         || matches!(profile.connection, Connection::Rdp(_))
+        || matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth != rustterm::config::ElasticsearchAuth::None)
 }
 
 fn can_connect_with_saved_credentials(profile: &Profile, tunnel: Option<&Profile>) -> bool {
-    profile_reference(profile).is_some()
+    (profile_reference(profile).is_some() || matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None))
         // Sentinel has a separate, session-only password that the user may need
         // to supply even when the Redis data-node password is saved.
         && !matches!(&profile.connection, Connection::Redis(config)
@@ -664,21 +688,22 @@ fn can_connect_with_saved_credentials(profile: &Profile, tunnel: Option<&Profile
 }
 
 pub(super) fn credential_optional(profile: &Profile) -> bool {
-    matches!(
-        &profile.connection,
-        Connection::Ssh(SshConfig {
-            auth: AuthMethod::PrivateKey {
-                passphrase: None,
+    matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None)
+        || matches!(
+            &profile.connection,
+            Connection::Ssh(SshConfig {
+                auth: AuthMethod::PrivateKey {
+                    passphrase: None,
+                    ..
+                } | AuthMethod::Agent { .. }
+                    | AuthMethod::KeyboardInteractive,
                 ..
-            } | AuthMethod::Agent { .. }
-                | AuthMethod::KeyboardInteractive,
-            ..
-        }) | Connection::Redis(rustterm::config::RedisConfig {
-            username: None,
-            credential: None,
-            ..
-        })
-    )
+            }) | Connection::Redis(rustterm::config::RedisConfig {
+                username: None,
+                credential: None,
+                ..
+            })
+        )
 }
 
 pub(super) fn ssh_options(
@@ -814,7 +839,9 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustterm::config::{RdpConfig, RedisConfig, RedisTopology, SqlConfig};
+    use rustterm::config::{
+        ElasticsearchAuth, ElasticsearchConfig, RdpConfig, RedisConfig, RedisTopology, SqlConfig,
+    };
 
     #[test]
     fn saved_passwords_start_connections_without_an_extra_authentication_form() {
@@ -830,6 +857,13 @@ mod tests {
             Profile::redis("Redis", RedisConfig::default()),
             Profile::mysql("MySQL", SqlConfig::mysql()),
             Profile::postgres("PostgreSQL", SqlConfig::postgres()),
+            Profile::elasticsearch(
+                "Elasticsearch",
+                ElasticsearchConfig {
+                    auth: ElasticsearchAuth::ApiKey,
+                    ..Default::default()
+                },
+            ),
         ];
         for profile in &mut profiles {
             assert!(
@@ -853,6 +887,37 @@ mod tests {
                 "{}",
                 profile.name
             );
+        }
+    }
+
+    #[test]
+    fn unauthenticated_elasticsearch_skips_its_own_prompt_but_requires_tunnel_auth() {
+        let profile = Profile::elasticsearch("ES", ElasticsearchConfig::default());
+        assert!(can_connect_with_saved_credentials(&profile, None));
+        assert!(credential_optional(&profile));
+        assert!(!needs_password(&profile));
+        let mut tunnel = Profile::ssh(
+            "Gateway",
+            SshConfig {
+                auth: AuthMethod::Password { credential: None },
+                ..Default::default()
+            },
+        );
+        assert!(!can_connect_with_saved_credentials(&profile, Some(&tunnel)));
+        tunnel.connection.set_credential(Some(CredentialRef::new()));
+        assert!(can_connect_with_saved_credentials(&profile, Some(&tunnel)));
+        for auth in [ElasticsearchAuth::Basic, ElasticsearchAuth::ApiKey] {
+            let profile = Profile::elasticsearch(
+                "ES",
+                ElasticsearchConfig {
+                    auth,
+                    username: "operator".into(),
+                    ..Default::default()
+                },
+            );
+            assert!(!credential_optional(&profile));
+            assert!(needs_password(&profile));
+            assert!(!can_connect_with_saved_credentials(&profile, None));
         }
     }
 
@@ -934,6 +999,14 @@ mod tests {
     fn latest_credential_submission_wins_in_either_completion_order() {
         let previous = CredentialRef::new();
         let originals = [
+            Profile::elasticsearch(
+                "Elasticsearch",
+                ElasticsearchConfig {
+                    auth: ElasticsearchAuth::ApiKey,
+                    credential: Some(previous),
+                    ..Default::default()
+                },
+            ),
             Profile::ssh(
                 "SSH",
                 SshConfig {

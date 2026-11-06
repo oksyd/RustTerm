@@ -1,6 +1,7 @@
 //! Dedicated terminal canvas: GPUI entities are panes, never individual cells.
 //! The actor supplies an immutable visible snapshot; paint never locks the grid.
 
+mod activity;
 mod chrome;
 mod clipboard;
 mod completion;
@@ -44,7 +45,7 @@ pub struct TerminalView {
     generation: usize,
     settings: Settings,
     unread: bool,
-    observed_revision: u64,
+    output_activity: activity::OutputActivity,
     observed_view_revision: u64,
     observed_insert_ready: bool,
     observed_directory: Option<(rustterm::config::Uuid, String)>,
@@ -187,7 +188,8 @@ impl TerminalView {
                 self.local_shell = Some(local.shell.clone());
                 self.shell = profile.name.clone();
             }
-            Connection::Redis(_)
+            Connection::Elasticsearch(_)
+            | Connection::Redis(_)
             | Connection::Rdp(_)
             | Connection::Mysql(_)
             | Connection::Postgres(_)

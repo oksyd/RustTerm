@@ -599,6 +599,10 @@ impl Session {
     pub fn revision(&self) -> u64 {
         *self.shared.revision.borrow()
     }
+    /// Received terminal output batches, excluding focus, resize and other UI changes.
+    pub fn output_revision(&self) -> u64 {
+        self.shared.output_revision.load(Ordering::Acquire)
+    }
     /// Observe output, connection and transfer changes without requesting snapshots.
     /// Subscribe before reading session state so a concurrent change remains pending.
     pub fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {

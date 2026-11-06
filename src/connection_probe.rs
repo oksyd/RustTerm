@@ -1,8 +1,8 @@
 use crate::i18n::messages as i18n_key;
 
 use crate::{
-    config::{Connection, Profile, Secret},
-    database::{DatabaseClient, DatabaseError},
+    config::{Connection, Profile, Secret, SqlEngine},
+    database::{DatabaseClient, DatabaseError, QueryOutput},
     rdp::{RdpError, RdpEvent},
     redis::{RedisClient, RedisError, RedisValue},
     session::{FailureKind, HostKeyChallenge, SshOptions},
@@ -23,12 +23,77 @@ pub struct ProbeRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProbeOutcome {
+pub enum ProbeKind {
     Authenticated,
     DatabaseReady,
+    ElasticsearchReady,
     SqliteReady,
     TelnetReachable,
     RdpAuthenticated,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeOutcome {
+    pub kind: ProbeKind,
+    pub server: Option<ServerVersion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServerVersion {
+    pub product: &'static str,
+    pub version: Option<String>,
+}
+
+impl ProbeOutcome {
+    fn new(kind: ProbeKind) -> Self {
+        Self { kind, server: None }
+    }
+
+    fn with_server(kind: ProbeKind, product: &'static str, version: Option<&str>) -> Self {
+        Self {
+            kind,
+            server: Some(ServerVersion {
+                product,
+                version: version.and_then(display_version),
+            }),
+        }
+    }
+}
+
+// Version lookup is optional metadata: it must not turn an authenticated,
+// queryable connection into a failed test or add a full query-timeout delay.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn display_version(value: &str) -> Option<String> {
+    let value: String = value.trim().chars()
+        .filter(|c| !c.is_control() && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .take(160)
+        .collect();
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn scalar(output: &QueryOutput) -> Option<&str> {
+    let [set] = output.results.as_slice() else {
+        return None;
+    };
+    let [row] = set.rows.as_slice() else {
+        return None;
+    };
+    let [Some(value)] = row.as_slice() else {
+        return None;
+    };
+    (!set.truncated).then_some(value.as_str())
+}
+
+fn redis_version(reply: &RedisValue) -> Option<&str> {
+    let RedisValue::Bytes(bytes) = reply else {
+        return None;
+    };
+    std::str::from_utf8(bytes).ok()?.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key == "redis_version").then_some(value.trim())
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +132,8 @@ pub enum ProbeError {
     Database(#[from] DatabaseError),
     #[error(transparent)]
     Rdp(#[from] RdpError),
+    #[error(transparent)]
+    Elasticsearch(#[from] crate::elasticsearch::ElasticsearchError),
 }
 
 /// Tests an unsaved connection draft without storing credentials or starting a
@@ -106,6 +173,7 @@ async fn run(
     let expects_ssh = match &profile.connection {
         Connection::Ssh(_) => true,
         Connection::Redis(config) => config.ssh_profile.is_some(),
+        Connection::Elasticsearch(config) => config.ssh_profile.is_some(),
         Connection::Mysql(config) | Connection::Postgres(config) => config.ssh_profile.is_some(),
         _ => false,
     };
@@ -120,8 +188,14 @@ async fn run(
             let connection = crate::session::connect_tunnel(options, host_keys, stop.child_token())
                 .await
                 .map_err(|(kind, message)| ProbeError::Ssh { kind, message })?;
+            let version = connection.server_identification().map(|id| {
+                id.strip_prefix("SSH-2.0-")
+                    .or_else(|| id.strip_prefix("SSH-1.99-"))
+                    .unwrap_or(id)
+            });
+            let outcome = ProbeOutcome::with_server(ProbeKind::Authenticated, "SSH", version);
             drop(connection);
-            Ok(ProbeOutcome::Authenticated)
+            Ok(outcome)
         }
         Connection::Telnet(config) => {
             config.validate().map_err(|_| ProbeError::InvalidConfig)?;
@@ -135,11 +209,11 @@ async fn run(
             .map_err(|_| ProbeError::Timeout)?
             .map_err(|_| ProbeError::Network)?;
             drop(socket);
-            Ok(ProbeOutcome::TelnetReachable)
+            Ok(ProbeOutcome::new(ProbeKind::TelnetReachable))
         }
         Connection::Rdp(config) => {
             crate::rdp::probe(config, secret, &certificate_events).await?;
-            Ok(ProbeOutcome::RdpAuthenticated)
+            Ok(ProbeOutcome::new(ProbeKind::RdpAuthenticated))
         }
         Connection::Redis(config) => {
             let database = config.database;
@@ -153,30 +227,73 @@ async fn run(
             )
             .await?;
             let result = client.command(database, vec![b"PING".to_vec()]).await;
-            client.close();
-            if result? != RedisValue::Bytes(b"PONG".to_vec()) {
+            if result.as_ref() != Ok(&RedisValue::Bytes(b"PONG".to_vec())) {
+                client.close();
+                result?;
                 return Err(RedisError::Protocol.into());
             }
-            Ok(ProbeOutcome::DatabaseReady)
+            let info = tokio::time::timeout(
+                VERSION_TIMEOUT,
+                client.command(database, vec![b"INFO".to_vec(), b"server".to_vec()]),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok);
+            let outcome = ProbeOutcome::with_server(
+                ProbeKind::DatabaseReady,
+                "Redis",
+                info.as_ref().and_then(redis_version),
+            );
+            client.close();
+            Ok(outcome)
+        }
+        Connection::Elasticsearch(config) => {
+            let client = crate::elasticsearch::ElasticsearchClient::connect(
+                config,
+                secret,
+                ssh.map(|options| (options, host_keys)),
+            )
+            .await?;
+            let outcome = ProbeOutcome::with_server(
+                ProbeKind::ElasticsearchReady,
+                "Elasticsearch",
+                Some(client.server_version()),
+            );
+            client.close();
+            Ok(outcome)
         }
         connection @ (Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_)) => {
             let local = matches!(connection, Connection::Sqlite(_));
             let config = connection.database().expect("database connection");
+            let engine = config.engine();
             let client =
                 DatabaseClient::connect(config, secret, ssh.map(|ssh| (ssh, host_keys))).await?;
             let result = client.execute("SELECT 1".into(), 1).await;
-            client.close();
-            let result = result?;
-            if !matches!(result.results.as_slice(), [set]
-                if !set.truncated && set.rows == [vec![Some("1".to_owned())]])
-            {
+            if result.as_ref().ok().and_then(scalar) != Some("1") {
+                client.close();
+                result?;
                 return Err(DatabaseError::Protocol.into());
             }
-            Ok(if local {
-                ProbeOutcome::SqliteReady
-            } else {
-                ProbeOutcome::DatabaseReady
-            })
+            let query = match engine {
+                SqlEngine::Mysql => "SELECT VERSION()",
+                SqlEngine::Postgres => "SHOW server_version",
+                SqlEngine::Sqlite => "SELECT sqlite_version()",
+            };
+            let version = tokio::time::timeout(VERSION_TIMEOUT, client.execute(query.into(), 1))
+                .await
+                .ok()
+                .and_then(Result::ok);
+            let outcome = ProbeOutcome::with_server(
+                if local {
+                    ProbeKind::SqliteReady
+                } else {
+                    ProbeKind::DatabaseReady
+                },
+                engine.label(),
+                version.as_ref().and_then(scalar),
+            );
+            client.close();
+            Ok(outcome)
         }
     }
 }
@@ -208,7 +325,92 @@ mod tests {
     use crate::config::{RdpConfig, RedisConfig, TelnetConfig, Uuid};
     use tokio::{io::AsyncReadExt, net::TcpListener};
 
-    async fn probe(
+    #[test]
+    fn displayed_versions_are_bounded_and_cannot_inject_control_text() {
+        assert_eq!(
+            display_version(" 8.0.36-ubuntu "),
+            Some("8.0.36-ubuntu".into())
+        );
+        assert_eq!(
+            display_version("\r\n\u{202e}7.4.2\u{2069}\0"),
+            Some("7.4.2".into())
+        );
+        assert_eq!(display_version("\r\n \t"), None);
+        assert_eq!(
+            display_version(&"界".repeat(1000)).unwrap().chars().count(),
+            160
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_probe_reports_version_and_keeps_success_if_info_is_denied_or_stalls() {
+        use std::io::Write;
+        for reply in [
+            Some("# Server\r\nredis_version:7.2.4\r\n"),
+            Some("NOPERM"),
+            Some("# Server\r\nother_field:unknown\r\n"),
+            None,
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let profile = Profile::redis(
+                "Redis",
+                RedisConfig {
+                    host: "127.0.0.1".into(),
+                    port: listener.local_addr().unwrap().port(),
+                    timeout_secs: 10,
+                    ..Default::default()
+                },
+            );
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut parser = redis::Parser::new();
+                for name in [b"PING".as_slice(), b"INFO"] {
+                    let redis::Value::Array(args) = parser.parse_value(&mut stream).unwrap() else {
+                        panic!("expected array")
+                    };
+                    assert_eq!(args[0], redis::Value::BulkString(name.to_vec()));
+                    if name == b"PING" {
+                        stream.write_all(b"+PONG\r\n").unwrap();
+                    } else {
+                        assert_eq!(args[1], redis::Value::BulkString(b"server".to_vec()));
+                        match reply {
+                            Some("NOPERM") => stream
+                                .write_all(b"-NOPERM INFO is not allowed\r\n")
+                                .unwrap(),
+                            Some(body) => stream
+                                .write_all(format!("${}\r\n{body}\r\n", body.len()).as_bytes())
+                                .unwrap(),
+                            None => {}
+                        }
+                    }
+                }
+                let mut byte = [0];
+                assert_eq!(std::io::Read::read(&mut stream, &mut byte).unwrap(), 0);
+            });
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(4),
+                probe(profile, CancellationToken::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(outcome.kind, ProbeKind::DatabaseReady);
+            let server_version = outcome.server.unwrap();
+            assert_eq!(server_version.product, "Redis");
+            assert_eq!(
+                server_version.version.as_deref(),
+                reply
+                    .filter(|value| value.contains("redis_version:"))
+                    .map(|_| "7.2.4")
+            );
+            server.join().unwrap();
+        }
+    }
+
+    pub(super) async fn probe(
         profile: Profile,
         cancel: CancellationToken,
     ) -> Result<ProbeOutcome, ProbeError> {
@@ -247,7 +449,11 @@ mod tests {
             let profile = Profile::sqlite("Local database", config.clone());
             assert_eq!(
                 probe(profile, CancellationToken::new()).await.unwrap(),
-                ProbeOutcome::SqliteReady,
+                ProbeOutcome::with_server(
+                    ProbeKind::SqliteReady,
+                    "SQLite",
+                    Some(rusqlite::version())
+                ),
             );
         }
     }
@@ -265,7 +471,7 @@ mod tests {
                 },
             );
             let outcome = probe(profile, CancellationToken::new()).await.unwrap();
-            assert_eq!(outcome, ProbeOutcome::TelnetReachable);
+            assert_eq!(outcome, ProbeOutcome::new(ProbeKind::TelnetReachable));
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut received = [0; 1];
             assert_eq!(socket.read(&mut received).await.unwrap(), 0);

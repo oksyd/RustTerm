@@ -1,6 +1,7 @@
 use rustterm::i18n::Message;
 use rustterm::i18n::messages as i18n_key;
 mod credentials;
+mod elasticsearch;
 mod group;
 mod local;
 mod rdp;
@@ -33,6 +34,7 @@ pub enum ProfileKind {
     Ssh,
     Telnet,
     Redis,
+    Elasticsearch,
     Mysql,
     Postgres,
     Sqlite,
@@ -66,6 +68,7 @@ struct ProfileDraft {
     ssh_auth: SshAuthentication,
     shell_integration: bool,
     database_tls: bool,
+    es_auth: rustterm::config::ElasticsearchAuth,
     sqlite_read_only: bool,
     redis_topology: rustterm::config::RedisTopology,
     ssh_profile: Option<Uuid>,
@@ -87,6 +90,7 @@ pub struct ProfileForm {
     ssh_auth: SshAuthentication,
     shell_integration: bool,
     database_tls: bool,
+    es_auth: rustterm::config::ElasticsearchAuth,
     sqlite_read_only: bool,
     sqlite_error: Option<Message>,
     sqlite_notice: Option<Message>,
@@ -144,6 +148,7 @@ impl ProfileForm {
             })
             .unwrap_or(true);
         let mut database_tls = false;
+        let mut es_auth = rustterm::config::ElasticsearchAuth::None;
         let mut sqlite_read_only = true;
         let mut redis_topology = rustterm::config::RedisTopology::Standalone;
         let mut ssh_profile = None;
@@ -205,6 +210,10 @@ impl ProfileForm {
                     });
                     next_row += 1;
                 }
+            }
+            ProfileKind::Elasticsearch => {
+                (es_auth, ssh_profile) =
+                    elasticsearch::initial_fields(profile.as_ref(), &mut values);
             }
             ProfileKind::Redis => {
                 let settings = profile
@@ -331,6 +340,7 @@ impl ProfileForm {
             ssh_auth,
             shell_integration,
             database_tls,
+            es_auth,
             sqlite_read_only,
             sqlite_error: None,
             sqlite_notice: None,
@@ -385,6 +395,7 @@ impl ProfileForm {
             ssh_auth: self.ssh_auth,
             shell_integration: self.shell_integration,
             database_tls: self.database_tls,
+            es_auth: self.es_auth,
             sqlite_read_only: self.sqlite_read_only,
             redis_topology: self.redis_topology,
             ssh_profile: self.ssh_profile,
@@ -461,6 +472,9 @@ impl ProfileForm {
             ProfileKind::Mysql | ProfileKind::Postgres => {
                 inputs.extend(self.fields.selected_inputs(sql::FIELDS))
             }
+            ProfileKind::Elasticsearch => {
+                inputs.extend(self.fields.selected_inputs(&self.es_fields()))
+            }
             ProfileKind::Sqlite => inputs.extend(self.fields.selected_inputs(sqlite::FIELDS)),
             ProfileKind::Telnet => inputs.extend(self.fields.selected_inputs(TELNET_FIELDS)),
             ProfileKind::Rdp => inputs.extend(self.rdp_inputs(cx)),
@@ -495,6 +509,9 @@ impl ProfileForm {
                 Connection::Telnet(config)
             }
             ProfileKind::Local => Connection::Local(self.local_config(cx)?),
+            ProfileKind::Elasticsearch => {
+                Connection::Elasticsearch(self.elasticsearch_config(current_profiles, cx)?)
+            }
             ProfileKind::Redis => Connection::Redis(self.redis_config(current_profiles, cx)?),
             ProfileKind::Mysql => {
                 Connection::Mysql(self.sql_config(SqlEngine::Mysql, current_profiles, cx)?)
@@ -526,6 +543,7 @@ impl Render for ProfileForm {
                     .child(hint(i18n_key::CONNECTIONS_TELNET_IS_UNENCRYPTED_ENTER_LOGIN_CREDENTIALS_IN_THE_TERMINAL_WHEN))
                     .into_any_element(),
                 ProfileKind::Redis => self.redis_body(cx),
+                ProfileKind::Elasticsearch => self.elasticsearch_body(cx),
                 ProfileKind::Mysql | ProfileKind::Postgres => self.sql_body(cx),
                 ProfileKind::Sqlite => self.sqlite_body(cx),
                 ProfileKind::Rdp => self.rdp_body(cx),

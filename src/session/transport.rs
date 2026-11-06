@@ -137,7 +137,7 @@ impl Transport {
                     break Err((FailureKind::Timeout, crate::i18n::tr(i18n_key::CONNECTIONS_SESSION_CLEANUP_TIMED_OUT_PROCESS_CLEANUP_MAY_STILL_BE_RUNNING)));
                 }
                 message = output.recv(), if output_open => match message {
-                    Some(Output::Data(bytes)) if !discard_protocol => { terminal.feed(&bytes); shared.changed(); },
+                    Some(Output::Data(bytes)) if !discard_protocol => { terminal.feed(&bytes); shared.output_received(&bytes); },
                     None => output_open = false,
                     _ => {},
                 }
@@ -148,7 +148,7 @@ impl Transport {
                 && !discard_protocol
             {
                 terminal.feed(&bytes);
-                shared.changed();
+                shared.output_received(&bytes);
             }
         }
         result?;
@@ -381,5 +381,11 @@ mod tests {
             .map(|cell| cell.text.as_str())
             .collect();
         assert!(text.contains("retained-tail"));
+        assert_eq!(
+            shared
+                .output_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
     }
 }

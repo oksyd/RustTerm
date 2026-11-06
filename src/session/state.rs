@@ -40,6 +40,7 @@ pub(super) struct Shared {
     pub(super) command_history: Mutex<Arc<[ShellCommand]>>,
     pub(super) shell_state: Mutex<ShellState>,
     pub(super) revision: watch::Sender<u64>,
+    pub(super) output_revision: AtomicU64,
     pub(super) snapshot_count: AtomicU64,
     pub(super) snapshot_pending: AtomicBool,
     pub(super) snapshot_notify: Notify,
@@ -80,6 +81,7 @@ impl Shared {
                 can_insert_command: terminal.can_insert_command(),
             }),
             revision: watch::Sender::new(1),
+            output_revision: AtomicU64::new(0),
             snapshot_count: AtomicU64::new(1),
             snapshot_pending: AtomicBool::new(false),
             snapshot_notify: Notify::new(),
@@ -140,6 +142,12 @@ impl Shared {
         self.revision.send_modify(|revision| {
             *revision = revision.wrapping_add(1);
         });
+    }
+    pub(super) fn output_received(&self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.output_revision.fetch_add(1, Ordering::Release);
+            self.changed();
+        }
     }
     pub(super) fn state(&self, value: SessionState) {
         *self.state.lock().unwrap_or_else(|e| e.into_inner()) = value;

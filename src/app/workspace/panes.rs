@@ -1,6 +1,7 @@
 use super::{Tab, Workspace};
 use crate::app::database_view::{DatabaseLaunch, DatabaseView};
 use crate::app::diagnostics;
+use crate::app::elasticsearch_view::{ElasticsearchLaunch, ElasticsearchView};
 use crate::app::file_transfer::{FileTransferEvent, FileTransferView};
 use crate::app::layout::{Axis, PaneNode};
 use crate::app::pane::{Pane, PaneEvent, SessionTool};
@@ -174,6 +175,7 @@ impl Workspace {
                     Connection::Local(_) | Connection::Ssh(_) | Connection::Telnet(_),
                     Some(Pane::Terminal(_))
                 ) | (Connection::Redis(_), Some(Pane::Redis(_)))
+                    | (Connection::Elasticsearch(_), Some(Pane::Elasticsearch(_)))
                     | (Connection::Rdp(_), Some(Pane::Rdp(_)))
                     | (
                         Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_),
@@ -218,6 +220,7 @@ impl Workspace {
         let title = match &profile.connection {
             Connection::Local(_)
             | Connection::Redis(_)
+            | Connection::Elasticsearch(_)
             | Connection::Rdp(_)
             | Connection::Mysql(_)
             | Connection::Postgres(_)
@@ -328,6 +331,55 @@ impl Workspace {
             this.pane_event(event, window, cx)
         });
         if let Some(previous) = self.panes.insert(id, Pane::Redis(view)) {
+            self.files.remove(&id);
+            self.files_subscriptions.remove(&id);
+            self.command_views.remove(&id);
+            self.command_subscriptions.remove(&id);
+            self.tools.remove(&id);
+            previous.close(cx);
+        }
+        self.subscriptions.insert(id, subscription);
+        if reconnect.is_some() {
+            self.finish_reconnect(id, profile, refocus, window, cx);
+        } else {
+            self.place_pane(id, profile, split, window, cx);
+        }
+    }
+    pub(super) fn add_elasticsearch(
+        &mut self,
+        profile: Profile,
+        launch: ElasticsearchLaunch,
+        reconnect: Option<usize>,
+        split: Option<(usize, Axis)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if reconnect.is_some_and(|id| !self.panes.contains_key(&id)) {
+            return;
+        }
+        let id = reconnect.unwrap_or_else(|| self.id());
+        let refocus = self.replacement_has_focus(id, window, cx);
+        let draft = self.panes.get(&id).and_then(|pane| match pane {
+            Pane::Elasticsearch(view) => Some(view.read(cx).draft(cx)),
+            _ => None,
+        });
+        let view = cx.new(|cx| {
+            ElasticsearchView::new(
+                id,
+                profile.name.clone(),
+                launch,
+                self.window_state.clone(),
+                window,
+                cx,
+            )
+        });
+        if let Some(draft) = draft {
+            view.update(cx, |view, cx| view.restore_draft(draft, cx));
+        }
+        let subscription = cx.subscribe_in(&view, window, |this, _, event, window, cx| {
+            this.pane_event(event, window, cx)
+        });
+        if let Some(previous) = self.panes.insert(id, Pane::Elasticsearch(view)) {
             self.files.remove(&id);
             self.files_subscriptions.remove(&id);
             self.command_views.remove(&id);

@@ -64,6 +64,7 @@ icons! {
     Terminal => "terminal",
     Database => "database",
     Redis => "redis",
+    Elasticsearch => "elasticsearch",
     Mysql => "mysql",
     Postgres => "postgres",
     Sqlite => "sqlite",
@@ -111,6 +112,7 @@ impl Icon {
     pub fn for_connection(connection: &Connection) -> Self {
         match connection {
             Connection::Redis(_) => Self::Redis,
+            Connection::Elasticsearch(_) => Self::Elasticsearch,
             Connection::Mysql(_) => Self::Mysql,
             Connection::Postgres(_) => Self::Postgres,
             Connection::Sqlite(_) => Self::Sqlite,

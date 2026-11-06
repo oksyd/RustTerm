@@ -1,8 +1,8 @@
 //! Workspace lifecycle shared by terminal, database and remote desktop panes. Data operations
 //! remain on their concrete views rather than pretending every connection is a PTY.
 use super::{
-    database_view::DatabaseView, layout::Axis, rdp_view::RdpView, redis_view::RedisView,
-    terminal_view::TerminalView,
+    database_view::DatabaseView, elasticsearch_view::ElasticsearchView, layout::Axis,
+    rdp_view::RdpView, redis_view::RedisView, terminal_view::TerminalView,
 };
 use gpui::{AnyElement, App, Entity, FocusHandle, IntoElement};
 use rustterm::config::Settings;
@@ -47,6 +47,7 @@ pub enum PaneEvent {
 pub enum Pane {
     Terminal(Entity<TerminalView>),
     Redis(Entity<RedisView>),
+    Elasticsearch(Entity<ElasticsearchView>),
     Database(Entity<DatabaseView>),
     Rdp(Entity<RdpView>),
 }
@@ -56,6 +57,9 @@ impl Pane {
         match self {
             Self::Terminal(_) => {}
             Self::Redis(view) => {
+                view.update(cx, |view, cx| view.set_pane_close_visible(visible, cx));
+            }
+            Self::Elasticsearch(view) => {
                 view.update(cx, |view, cx| view.set_pane_close_visible(visible, cx));
             }
             Self::Database(view) => {
@@ -78,6 +82,10 @@ impl Pane {
                 view.update(cx, |view, cx| view.set_layout_size(size, cx));
                 view.clone().into_any_element()
             }
+            Self::Elasticsearch(view) => {
+                view.update(cx, |view, cx| view.set_layout_size(size, cx));
+                view.clone().into_any_element()
+            }
             Self::Database(view) => {
                 view.update(cx, |view, cx| view.set_layout_size(size, cx));
                 view.clone().into_any_element()
@@ -89,6 +97,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).focus_handle(),
             Self::Redis(view) => view.read(cx).focus_handle(),
+            Self::Elasticsearch(view) => view.read(cx).focus_handle(),
             Self::Database(view) => view.read(cx).focus_handle(),
             Self::Rdp(view) => view.read(cx).focus_handle(),
         }
@@ -98,6 +107,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).is_running(),
             Self::Redis(view) => view.read(cx).is_running(),
+            Self::Elasticsearch(view) => view.read(cx).is_running(),
             Self::Database(view) => view.read(cx).is_running(),
             Self::Rdp(view) => view.read(cx).is_running(),
         }
@@ -107,6 +117,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).has_unread(),
             Self::Redis(view) => view.read(cx).has_unread(),
+            Self::Elasticsearch(view) => view.read(cx).has_unread(),
             Self::Database(view) => view.read(cx).has_unread(),
             Self::Rdp(view) => view.read(cx).has_unread(),
         }
@@ -115,6 +126,7 @@ impl Pane {
     pub fn has_unsaved_changes(&self, cx: &App) -> bool {
         match self {
             Self::Redis(view) => view.read(cx).has_unsaved_changes(),
+            Self::Elasticsearch(view) => view.read(cx).has_unsaved_changes(cx),
             Self::Database(view) => view.read(cx).has_unsaved_changes(),
             _ => false,
         }
@@ -124,6 +136,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).status_text(),
             Self::Redis(view) => view.read(cx).status_text(),
+            Self::Elasticsearch(view) => view.read(cx).status_text(),
             Self::Database(view) => view.read(cx).status_text(),
             Self::Rdp(view) => view.read(cx).status_text(),
         }
@@ -133,6 +146,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).status_color(),
             Self::Redis(view) => view.read(cx).status_color(),
+            Self::Elasticsearch(view) => view.read(cx).status_color(),
             Self::Database(view) => view.read(cx).status_color(),
             Self::Rdp(view) => view.read(cx).status_color(),
         }
@@ -142,6 +156,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).status_details(),
             Self::Redis(view) => view.read(cx).status_details(),
+            Self::Elasticsearch(view) => view.read(cx).status_details(),
             Self::Database(view) => view.read(cx).status_details(),
             Self::Rdp(view) => view.read(cx).status_details(),
         }
@@ -151,6 +166,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).diagnostic_state(),
             Self::Redis(view) => view.read(cx).diagnostic_state(),
+            Self::Elasticsearch(view) => view.read(cx).diagnostic_state(),
             Self::Database(view) => view.read(cx).diagnostic_state(),
             Self::Rdp(view) => view.read(cx).diagnostic_state(),
         }
@@ -160,6 +176,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).input_composing(cx),
             Self::Redis(view) => view.read(cx).input_composing(cx),
+            Self::Elasticsearch(view) => view.read(cx).input_composing(cx),
             Self::Database(view) => view.read(cx).input_composing(cx),
             Self::Rdp(view) => view.read(cx).input_composing(cx),
         }
@@ -169,6 +186,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).minimum_size(),
             Self::Redis(view) => view.read(cx).minimum_size(),
+            Self::Elasticsearch(view) => view.read(cx).minimum_size(),
             Self::Database(view) => view.read(cx).minimum_size(),
             Self::Rdp(view) => view.read(cx).minimum_size(),
         }
@@ -180,6 +198,7 @@ impl Pane {
         let minimum = self.minimum_size(cx);
         match self {
             Self::Redis(_) => (super::redis_view::BROWSER_MIN_WIDTH, minimum.1),
+            Self::Elasticsearch(_) => (760., minimum.1),
             Self::Database(_) => (super::database_view::BROWSER_MIN_WIDTH, minimum.1),
             Self::Terminal(_) | Self::Rdp(_) => minimum,
         }
@@ -189,6 +208,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.read(cx).can_split(axis),
             Self::Redis(view) => view.read(cx).can_split(axis),
+            Self::Elasticsearch(view) => view.read(cx).can_split(axis),
             Self::Database(view) => view.read(cx).can_split(axis),
             Self::Rdp(view) => view.read(cx).can_split(axis),
         }
@@ -198,6 +218,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.update(cx, |view, cx| view.set_visible(visible, cx)),
             Self::Redis(view) => view.update(cx, |view, cx| view.set_visible(visible, cx)),
+            Self::Elasticsearch(view) => view.update(cx, |view, cx| view.set_visible(visible, cx)),
             Self::Database(view) => view.update(cx, |view, cx| view.set_visible(visible, cx)),
             Self::Rdp(view) => view.update(cx, |view, cx| view.set_visible(visible, cx)),
         }
@@ -213,6 +234,9 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.update(cx, |view, cx| view.apply_settings(settings, cx)),
             Self::Redis(view) => view.update(cx, |view, cx| view.apply_settings(settings, cx)),
+            Self::Elasticsearch(view) => {
+                view.update(cx, |view, cx| view.apply_settings(settings, cx))
+            }
             Self::Database(view) => view.update(cx, |view, cx| view.apply_settings(settings, cx)),
             Self::Rdp(view) => view.update(cx, |view, cx| view.apply_settings(settings, cx)),
         }
@@ -222,6 +246,7 @@ impl Pane {
         match self {
             Self::Terminal(view) => view.update(cx, |view, cx| view.close(cx)),
             Self::Redis(view) => view.update(cx, |view, cx| view.close(cx)),
+            Self::Elasticsearch(view) => view.update(cx, |view, cx| view.close(cx)),
             Self::Database(view) => view.update(cx, |view, cx| view.close(cx)),
             Self::Rdp(view) => view.update(cx, |view, cx| view.close(cx)),
         }

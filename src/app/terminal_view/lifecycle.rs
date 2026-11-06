@@ -185,13 +185,19 @@ impl TerminalView {
                 Timer::after(next_frame.saturating_duration_since(Instant::now())).await;
             }
         });
+        let output_activity = super::activity::OutputActivity::new(
+            session
+                .as_ref()
+                .map(|run| (run.id(), run.output_revision())),
+            true,
+        );
         let mut view = Self {
             runs: session.into_iter().collect(),
             viewed_run: 0,
             generation: 0,
             settings: settings.clone(),
             unread: false,
-            observed_revision: 0,
+            output_activity,
             observed_view_revision: 0,
             observed_insert_ready: false,
             observed_directory: None,
@@ -521,6 +527,7 @@ impl TerminalView {
         }
         self.surface_visible =
             visible && self.window_state.visibility.is_visible() && !self.window_state.is_locked();
+        self.observe_output(cx);
         for (i, run) in self.runs.iter().enumerate() {
             run.set_visible(self.surface_visible && i == self.viewed_run);
         }
@@ -589,6 +596,7 @@ impl TerminalView {
         ));
         let _ = session.send(Command::SetTheme(self.settings.theme.clone()));
         self.runs.push(session);
+        self.observe_output(cx);
         self.viewed_run = self.runs.len() - 1;
         self.snapshot = Some(self.runs[self.viewed_run].snapshot());
         self.requested_revision = 0;
@@ -650,6 +658,17 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn observe_output(&mut self, cx: &mut Context<Self>) {
+        let output = self
+            .runs
+            .last()
+            .map(|run| (run.id(), run.output_revision()));
+        if self.output_activity.observe(output, self.surface_visible) && !self.unread {
+            self.unread = true;
+            cx.emit(PaneEvent::Activity);
+        }
+    }
+
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.window_state.is_locked() {
             self.copy_task.take();
@@ -677,17 +696,12 @@ impl TerminalView {
             }
         }
         self.poll_transfer(window, cx);
+        self.observe_output(cx);
         let Some(session) = self.runs.get(self.viewed_run) else {
             return;
         };
         let session_state = session.state();
         let previous_status = self.status_text();
-        let live_revision = self.runs.last().map(Session::revision).unwrap_or(0);
-        if !surface_visible && live_revision != self.observed_revision && !self.unread {
-            self.unread = true;
-            cx.emit(PaneEvent::Activity);
-        }
-        self.observed_revision = live_revision;
         let state = state_label(session_state.clone());
         let state_changed = state != self.state;
         let insert_ready = self.can_insert_history_command(session.id());

@@ -70,6 +70,11 @@ fn reconnect_credential(connection: &Connection) -> Option<ReconnectCredential> 
         })
         | Connection::Telnet(_)
         | Connection::Sqlite(_) => Some(ReconnectCredential::Empty),
+        Connection::Elasticsearch(config)
+            if config.auth == rustterm::config::ElasticsearchAuth::None =>
+        {
+            Some(ReconnectCredential::Empty)
+        }
         Connection::Redis(config) if config.username.is_none() => Some(ReconnectCredential::Empty),
         _ => None,
     }
@@ -708,6 +713,7 @@ impl Workspace {
             let retryable = match pane {
                 Pane::Terminal(view) => view.read(cx).may_auto_reconnect(),
                 Pane::Redis(view) => view.read(cx).may_auto_reconnect(),
+                Pane::Elasticsearch(_) => false,
                 Pane::Database(view) => view.read(cx).may_auto_reconnect(),
                 Pane::Rdp(view) => view.read(cx).may_auto_reconnect(),
             };

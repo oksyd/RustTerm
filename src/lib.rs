@@ -7,6 +7,7 @@ pub mod app_lock;
 pub mod config;
 pub mod connection_probe;
 pub mod database;
+pub mod elasticsearch;
 pub mod i18n;
 pub mod rdp;
 pub mod redis;

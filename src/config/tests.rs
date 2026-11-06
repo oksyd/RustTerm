@@ -1,6 +1,54 @@
 use super::*;
 
 #[test]
+fn elasticsearch_profiles_preserve_authentication_and_ssh_routes_without_secrets() {
+    let ssh = Profile::ssh(
+        "Gateway",
+        SshConfig {
+            host: "gateway.example.invalid".into(),
+            username: "operator".into(),
+            ..Default::default()
+        },
+    );
+    let reference = CredentialRef::new();
+    let options = ElasticsearchConfig {
+        endpoint: "https://elastic.internal.invalid:9200/".into(),
+        auth: ElasticsearchAuth::ApiKey,
+        credential: Some(reference),
+        ssh_profile: Some(ssh.id),
+        ..Default::default()
+    };
+    let config = AppConfig {
+        profiles: vec![
+            ssh.clone(),
+            Profile::elasticsearch("Search", options.clone()),
+        ],
+        ..Default::default()
+    };
+    config.validate().unwrap();
+    assert!(config.uses_ssh_profile(ssh.id));
+    assert!(config.uses_credential(reference));
+    let text = toml::to_string(&config).unwrap();
+    assert!(text.contains("type = \"elasticsearch\""));
+    let mut decoded: AppConfig = toml::from_str(&text).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(
+        decoded.profiles[1].connection,
+        Connection::Elasticsearch(options)
+    );
+    decoded.profiles.remove(0);
+    assert!(decoded.validate().is_err());
+    for field in ["password", "api_key", "secret"] {
+        assert!(
+            toml::from_str::<ElasticsearchConfig>(&format!(
+                "{field} = 'never-store-a-secret-here'"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn sql_profiles_preserve_engine_routes_and_credential_references() {
     let ssh = Profile::ssh(
         "Gateway",

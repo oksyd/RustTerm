@@ -19,7 +19,7 @@ A native desktop workspace for terminals, remote desktops, and databases, built 
 - **Organized workspaces** — draggable tabs, automatic SSH tab groups, and split panes.
 - **File transfers** — an integrated SFTP browser and ZMODEM (`sz` / `rz`, Linux).
 - **Remote desktops** — embedded RDP with TLS/NLA, clipboard integration, and display controls.
-- **Data tools** — native Redis, MySQL, PostgreSQL, and SQLite clients alongside your terminals.
+- **Data tools** — native Redis, Elasticsearch, MySQL, PostgreSQL, and SQLite clients alongside your terminals.
 - **Desktop integration** — saved connection profiles, system credential storage, and English / Simplified Chinese interfaces.
 
 ## Installation
