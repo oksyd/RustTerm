@@ -149,7 +149,7 @@ impl gpui::Render for Workspace {
                     .items_center()
                     .justify_center()
                     .p_4()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(
                         i18n_key::WORKSPACE_SELECT_A_CONNECTION_PROFILE_OR_CREATE_A_LOCAL_TERMINAL,
                     ))
@@ -218,9 +218,9 @@ impl gpui::Render for Workspace {
                         .right_0()
                         .w(px(layout.files_width.min(width)))
                         .max_w_full()
-                        .bg(rgb(ui::SURFACE))
+                        .bg(rgb(ui::colors().surface))
                         .border_l_1()
-                        .border_color(rgb(ui::BORDER))
+                        .border_color(rgb(ui::colors().border))
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(panel),
@@ -253,10 +253,10 @@ impl gpui::Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(self.config.settings.theme.background))
+            .bg(rgb(ui::colors().bg))
             .map(|d| frame.rounded(d))
             .overflow_hidden()
-            .text_color(rgb(ui::TEXT))
+            .text_color(rgb(ui::colors().text))
             .font_family(".SystemUIFont")
             .text_size(px(13.))
             .on_mouse_move(
@@ -411,8 +411,8 @@ impl gpui::Render for Workspace {
                     .map(ui::preserve_scroll_axes)
                     .px_3()
                     .py_2()
-                    .bg(rgb(0x3c2b30))
-                    .text_color(rgb(ui::DANGER))
+                    .bg(rgb(ui::colors().danger_bg))
+                    .text_color(rgb(ui::colors().danger))
                     .child(error.render())
                     .child(
                         canvas(
@@ -481,7 +481,7 @@ impl gpui::Render for Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x202124dd))
+                    .bg(rgba((ui::colors().bg << 8) | 0xdd))
                     .map(|d| frame.rounded(d))
                     .child(tr(i18n_key::WORKSPACE_SAVING_CHANGES)),
             );
@@ -496,7 +496,7 @@ impl gpui::Render for Workspace {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x202124ee))
+                    .bg(rgba((ui::colors().bg << 8) | 0xee))
                     .map(|d| frame.rounded(d))
                     .child(tr(
                         i18n_key::WORKSPACE_CLOSING_CONNECTIONS_AND_SAVING_SETTINGS,
@@ -518,9 +518,9 @@ impl gpui::Render for Workspace {
                     .gap_2()
                     .px_3()
                     .py_2()
-                    .bg(rgb(ui::RAISED))
+                    .bg(rgb(ui::colors().raised))
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(status)
                     .child(
                         ui::text_button(

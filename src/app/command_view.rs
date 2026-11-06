@@ -223,9 +223,9 @@ impl CommandHistoryView {
         let id = command.id;
         let selected = self.selected == Some(id);
         let status = match command.exit_status {
-            Some(0) => (ui::SUCCESS, "0".into()),
-            Some(code) => (ui::DANGER, code.to_string()),
-            None => (ui::MUTED, "—".into()),
+            Some(0) => (ui::colors().success, "0".into()),
+            Some(code) => (ui::colors().danger, code.to_string()),
+            None => (ui::colors().muted, "—".into()),
         };
         div()
             .id(("history-command", id))
@@ -235,10 +235,18 @@ impl CommandHistoryView {
             .flex_col()
             .gap_1()
             .border_l_2()
-            .border_color(rgb(if selected { ui::ACCENT } else { ui::SURFACE }))
-            .bg(rgb(if selected { ui::SELECTED } else { ui::SURFACE }))
+            .border_color(rgb(if selected {
+                ui::colors().accent
+            } else {
+                ui::colors().surface
+            }))
+            .bg(rgb(if selected {
+                ui::colors().selected
+            } else {
+                ui::colors().surface
+            }))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(ui::HOVER)))
+            .hover(|style| style.bg(rgb(ui::colors().hover)))
             .on_click(cx.listener(move |this, _, _, cx| this.select(run, id, cx)))
             .on_mouse_down(
                 MouseButton::Right,
@@ -261,7 +269,7 @@ impl CommandHistoryView {
                     .gap_2()
                     .items_center()
                     .text_size(px(10.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(
                         div()
                             .flex_1()
@@ -284,14 +292,14 @@ impl CommandHistoryView {
             .flex_shrink_0()
             .p_3()
             .border_t_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .flex()
             .flex_col()
             .gap_2()
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::TERMINAL_SELECTED_COMMAND_OUTPUT)),
             )
             .child(
@@ -321,7 +329,7 @@ impl CommandHistoryView {
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(
                         i18n_key::TERMINAL_COMMAND_CONTEXT_MENU_HINT,
                     )),
@@ -370,7 +378,7 @@ impl Render for CommandHistoryView {
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.scroll);
         if self.records.is_empty() {
-            list = list.child(div().p_4().flex().flex_col().gap_3().text_color(rgb(ui::MUTED))
+            list = list.child(div().p_4().flex().flex_col().gap_3().text_color(rgb(ui::colors().muted))
                 .child(ui::icon(Icon::Terminal).size(px(24.)))
                 .child(tr(i18n_key::TERMINAL_NO_COMMANDS_RECORDED_YET))
                 .child(div().text_size(px(12.)).child(tr(if self.integration_enabled {
@@ -401,8 +409,8 @@ impl Render for CommandHistoryView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui::SURFACE))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().surface))
+            .text_color(rgb(ui::colors().text))
             .text_size(px(12.))
             .track_focus(&self.focus)
             .tab_index(0)
@@ -439,7 +447,7 @@ impl Render for CommandHistoryView {
             }, |_, _, _, _| {}).absolute().inset_0())
             .children(self.render_menu(cx))
             .when(self.selection_expired, |d| {
-                d.child(div().p_3().text_color(rgb(ui::MUTED)).child(tr(
+                d.child(div().p_3().text_color(rgb(ui::colors().muted)).child(tr(
                     i18n_key::TERMINAL_THE_SELECTED_COMMAND_IS_NO_LONGER_RETAINED_SELECT_ANOTHER_COMMAND,
                 )))
             })

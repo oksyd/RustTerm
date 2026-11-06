@@ -272,12 +272,12 @@ impl TextInput {
                     let mut run = base.clone();
                     run.len = end - start;
                     run.color = rgb(match token.kind {
-                        Kind::Keyword => ui::ACCENT,
-                        Kind::String => ui::SUCCESS,
-                        Kind::Number => ui::BRAND,
-                        Kind::Comment => ui::FAINT,
-                        Kind::Operator => ui::MUTED,
-                        _ => ui::TEXT,
+                        Kind::Keyword => ui::colors().accent,
+                        Kind::String => ui::colors().success,
+                        Kind::Number => ui::colors().brand,
+                        Kind::Comment => ui::colors().faint,
+                        Kind::Operator => ui::colors().muted,
+                        _ => ui::colors().text,
                     })
                     .into();
                     run
@@ -308,9 +308,9 @@ impl TextInput {
                 .w(px(260.))
                 .max_w_full()
                 .py(px(4.))
-                .bg(rgb(ui::RAISED))
+                .bg(rgb(ui::colors().raised))
                 .border_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .rounded(px(4.))
                 .shadow_md()
                 .occlude()
@@ -328,12 +328,12 @@ impl TextInput {
                             .flex()
                             .items_center()
                             .text_size(px(12.))
-                            .text_color(rgb(ui::TEXT))
+                            .text_color(rgb(ui::colors().text))
                             .cursor_pointer()
                             .when(index == completion.selected, |row| {
-                                row.bg(rgb(ui::SELECTED))
+                                row.bg(rgb(ui::colors().selected))
                             })
-                            .hover(|style| style.bg(rgb(ui::HOVER)))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
                             .child(div().min_w_0().truncate().child(label.clone()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.accept_sql_completion(index, cx)

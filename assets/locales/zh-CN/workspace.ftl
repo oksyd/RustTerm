@@ -471,3 +471,9 @@ workspace-zoom-current-pane = 放大当前分屏
 workspace-zoom-current-pane-ctrl-shift-enter = 放大当前分屏 · Ctrl+Shift+Enter
 
 workspace-zoom-restore-pane = 放大 / 还原分屏
+
+workspace-new-subgroup = 新建子组…
+workspace-move-group-to-root = 移至顶层
+workspace-group-parent = 上级分组
+workspace-group-root = 顶层
+workspace-delete-group-keep-children = 连接和子组将移至上一级；若没有上级分组，则移至顶层。组内内容不会被删除。

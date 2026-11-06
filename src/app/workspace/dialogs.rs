@@ -45,7 +45,7 @@ impl Workspace {
                                         i18n_key::WORKSPACE_RUSTTERM_VERSION_LINUX_DESKTOP_TERMINAL,
                                         version = env!("CARGO_PKG_VERSION")
                                     ))
-                                    .child(div().text_color(rgb(ui::MUTED)).child(tr(
+                                    .child(div().text_color(rgb(ui::colors().muted)).child(tr(
                                         i18n_key::WORKSPACE_LOCAL_PTY_SSH_SFTP_SZ_RZ_TABS_AND_SPLIT_PANES,
                                     ))),
                             ),
@@ -77,7 +77,7 @@ impl Workspace {
                                 .flex()
                                 .justify_between()
                                 .child(label)
-                                .child(div().text_color(rgb(ui::MUTED)).child(key))
+                                .child(div().text_color(rgb(ui::colors().muted)).child(key))
                         }),
                     )
                     .into_any_element(),
@@ -110,7 +110,14 @@ impl Workspace {
                     i18n_key::COMMON_SAVE
                 })),
             ),
-            Modal::Group { fields, .. } => (tr(i18n_key::WORKSPACE_GROUP), fields.rows(), Some(tr(i18n_key::COMMON_SAVE))),
+            Modal::Group { fields, parent, .. } => {
+                let path = rustterm::config::Group::tree(&self.config.groups).into_iter()
+                    .find(|node| Some(node.group.id) == *parent).map(|node| node.path)
+                    .unwrap_or_else(|| tr(i18n_key::WORKSPACE_GROUP_ROOT).to_owned());
+                (tr(i18n_key::WORKSPACE_GROUP), div().flex().flex_col().gap_3()
+                    .child(div().text_color(rgb(ui::colors().muted)).child(format!("{}: {path}", tr(i18n_key::WORKSPACE_GROUP_PARENT))))
+                    .child(fields.rows()).into_any_element(), Some(tr(i18n_key::COMMON_SAVE)))
+            },
             Modal::Auth { auto_connect: true, .. } => (
                 tr(i18n_key::WORKSPACE_CONNECTION_AUTHENTICATION),
                 div().child(tr(i18n_key::COMMON_LOADING)).into_any_element(),
@@ -162,7 +169,7 @@ impl Workspace {
                                 .id("remember-secret")
                                 .cursor_pointer()
                                 .tab_index(0)
-                                .focus(|style| style.bg(rgb(ui::SELECTED)))
+                                .focus(|style| style.bg(rgb(ui::colors().selected)))
                                 .child(rustterm::trf!(
                                     i18n_key::WORKSPACE_MARK_SAVE_IN_THE_SYSTEM_CREDENTIAL_STORE_USE_ONCE_IF,
                                     mark = if *remember { "✓" } else { " " }
@@ -180,14 +187,14 @@ impl Workspace {
                         )))
                         .when_some(tunnel.as_ref(), |content, tunnel| {
                             let Connection::Ssh(ssh) = &tunnel.profile.connection else { unreachable!("validated SSH route") };
-                            content.child(div().w_full().min_w_0().border_t_1().border_color(rgb(ui::BORDER)).pt_3()
+                            content.child(div().w_full().min_w_0().border_t_1().border_color(rgb(ui::colors().border)).pt_3()
                                 .flex().flex_col().gap_3()
                                 .child(rustterm::trf!(i18n_key::REDIS_SSH_TUNNEL_VIA_NAME_USER_HOST_PORT,
                                     name = &tunnel.profile.name, user = &ssh.username, host = &ssh.host, port = ssh.port))
                                 .child(tunnel.secret.clone())
                                 .child(tr(i18n_key::WORKSPACE_LEAVE_BLANK_FOR_AN_UNENCRYPTED_PRIVATE_KEY_AUTHENTICATION_CREDENTIALS_ARE))
                                 .child(div().id("remember-tunnel-secret").cursor_pointer().tab_index(0)
-                                    .focus(|style| style.bg(rgb(ui::SELECTED)))
+                                    .focus(|style| style.bg(rgb(ui::colors().selected)))
                                     .child(rustterm::trf!(i18n_key::REDIS_MARK_SAVE_THE_SSH_CREDENTIAL_IN_THE_SYSTEM_CREDENTIAL_STORE,
                                         mark = if tunnel.remember { "✓" } else { " " }))
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -228,13 +235,13 @@ impl Workspace {
                     content = content.child(
                         div()
                             .p_2()
-                            .bg(rgb(ui::RAISED))
+                            .bg(rgb(ui::colors().raised))
                             .child(format!("{}:{}\n{}", record.host, port, keys))
                             .child(
                                 div()
                                     .id(("forget-host", index))
                                     .cursor_pointer()
-                                    .text_color(rgb(ui::DANGER))
+                                    .text_color(rgb(ui::colors().danger))
                                     .child(tr(i18n_key::WORKSPACE_DELETE_THIS_TRUST_RECORD))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.forget_host(
@@ -286,9 +293,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .when(!settings, |card| card.p_4().gap_4())
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(4.))
             .child(
                 div()
@@ -298,7 +305,7 @@ impl Workspace {
                             .px_4()
                             .py_3()
                             .border_b_1()
-                            .border_color(rgb(ui::BORDER))
+                            .border_color(rgb(ui::colors().border))
                     })
                     .text_size(px(15.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -309,7 +316,7 @@ impl Workspace {
             card = card.child(
                 div()
                     .when(settings, |error| error.flex_shrink_0().px_4().py_2())
-                    .text_color(rgb(ui::DANGER))
+                    .text_color(rgb(ui::colors().danger))
                     .child(error.render()),
             );
         }
@@ -328,12 +335,12 @@ impl Workspace {
                         .px_4()
                         .py_3()
                         .border_t_1()
-                        .border_color(rgb(ui::BORDER))
+                        .border_color(rgb(ui::colors().border))
                         .child(
                             div()
                                 .flex_1()
                                 .text_size(px(11.))
-                                .text_color(rgb(ui::MUTED))
+                                .text_color(rgb(ui::colors().muted))
                                 .when(settings_dirty, |status| status.child(tr(i18n_key::CONNECTIONS_UNSAVED_CHANGES))),
                         )
                 })
@@ -363,7 +370,7 @@ impl Workspace {
                     )
                     .track_focus(&self.modal_cancel_focus)
                     .tab_index(0)
-                    .focus(|style| style.bg(rgb(ui::SELECTED)).border_color(rgb(ui::ACCENT)))
+                    .focus(|style| style.bg(rgb(ui::colors().selected)).border_color(rgb(ui::colors().accent)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.request_leave_modal(LeaveAction::CloseModal, window, cx);
                         cx.notify();
@@ -374,7 +381,7 @@ impl Workspace {
                         ui::text_button_enabled("save-modal", label, ui::ButtonStyle::Primary, save_enabled)
                             .track_focus(&self.modal_save_focus)
                             .tab_index(0)
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if matches!(this.modal, Some(Modal::Auth { .. })) {
                                     this.authenticate(window, cx);

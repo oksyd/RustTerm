@@ -262,10 +262,10 @@ impl DatabaseView {
     }
     pub fn status_color(&self) -> u32 {
         match self.state {
-            State::Connecting | State::WaitingHostKey => ui::WARNING,
-            State::Connected => ui::SUCCESS,
-            State::Disconnected => ui::MUTED,
-            State::Failed => ui::DANGER,
+            State::Connecting | State::WaitingHostKey => ui::colors().warning,
+            State::Connected => ui::colors().success,
+            State::Disconnected => ui::colors().muted,
+            State::Failed => ui::colors().danger,
         }
     }
     pub fn status_details(&self) -> String {

@@ -13,14 +13,7 @@ pub(super) struct TabGroup {
     pub tabs: Vec<usize>,
 }
 
-const GROUP_COLORS: [u32; 6] = [
-    ui::ACCENT,
-    0x8bb6ca,
-    ui::SUCCESS,
-    ui::WARNING,
-    0xd197b3,
-    ui::BRAND,
-];
+const GROUP_COLOR_COUNT: usize = 6;
 
 #[derive(Default)]
 pub(super) struct TabGroupColors {
@@ -31,14 +24,14 @@ pub(super) struct TabGroupColors {
 
 fn preferred_color(profile: Uuid) -> usize {
     profile.as_bytes().iter().fold(0, |hash, byte| {
-        (hash * 31 + usize::from(*byte)) % GROUP_COLORS.len()
+        (hash * 31 + usize::from(*byte)) % GROUP_COLOR_COUNT
     })
 }
 
-fn least_used_color(profile: Uuid, usage: &[usize; GROUP_COLORS.len()]) -> usize {
+fn least_used_color(profile: Uuid, usage: &[usize; GROUP_COLOR_COUNT]) -> usize {
     let preferred = preferred_color(profile);
-    (0..GROUP_COLORS.len())
-        .map(|offset| (preferred + offset) % GROUP_COLORS.len())
+    (0..GROUP_COLOR_COUNT)
+        .map(|offset| (preferred + offset) % GROUP_COLOR_COUNT)
         .min_by_key(|index| usage[*index])
         .unwrap()
 }
@@ -48,7 +41,7 @@ impl TabGroupColors {
         let active: HashSet<_> = groups.iter().filter_map(|group| group.profile).collect();
         self.assignments
             .retain(|(profile, _)| active.contains(profile));
-        let mut usage = [0; GROUP_COLORS.len()];
+        let mut usage = [0; GROUP_COLOR_COUNT];
         for &(_, index) in &self.assignments {
             usage[index] += 1;
         }
@@ -80,7 +73,7 @@ impl TabGroupColors {
             .iter()
             .find_map(|(id, index)| (*id == profile).then_some(*index))
             .unwrap_or_else(|| preferred_color(profile));
-        GROUP_COLORS[index]
+        ui::colors().group_colors()[index]
     }
 }
 

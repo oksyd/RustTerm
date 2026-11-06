@@ -10,7 +10,7 @@ impl SettingsForm {
             .gap_1()
             .p_1()
             .rounded(px(4.))
-            .bg(rgb(ui::INPUT))
+            .bg(rgb(ui::colors().input))
             .children(Language::available().map(|language| {
                 let selected = self.values.language == language;
                 div()
@@ -22,11 +22,23 @@ impl SettingsForm {
                     .tab_index(0)
                     .whitespace_nowrap()
                     .border_1()
-                    .border_color(rgb(if selected { ui::ACCENT } else { ui::INPUT }))
-                    .bg(rgb(if selected { ui::SELECTED } else { ui::INPUT }))
-                    .text_color(rgb(if selected { ui::ACCENT } else { ui::MUTED }))
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
-                    .focus(|style| style.border_color(rgb(ui::TEXT)))
+                    .border_color(rgb(if selected {
+                        ui::colors().accent
+                    } else {
+                        ui::colors().input
+                    }))
+                    .bg(rgb(if selected {
+                        ui::colors().selected
+                    } else {
+                        ui::colors().input
+                    }))
+                    .text_color(rgb(if selected {
+                        ui::colors().accent
+                    } else {
+                        ui::colors().muted
+                    }))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
+                    .focus(|style| style.border_color(rgb(ui::colors().text)))
                     .child(language.native_name())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.values.language = language;
@@ -66,6 +78,9 @@ impl SettingsForm {
 
     pub(super) fn appearance(&self, cx: &Context<Self>) -> Div {
         let mut body = column()
+            .child(section_heading(i18n_key::SETTINGS_APPLICATION_THEME))
+            .child(hint(i18n_key::SETTINGS_APPLICATION_THEME_HELP))
+            .child(self.theme_picker(cx))
             .child(section_heading(i18n_key::CONNECTIONS_TERMINAL_FONT))
             .child(setting_row(
                 i18n_key::WORKSPACE_MONOSPACE_FONT,
@@ -123,7 +138,7 @@ impl SettingsForm {
                         .flex_shrink_0()
                         .rounded(px(3.))
                         .border_1()
-                        .border_color(rgb(ui::BORDER))
+                        .border_color(rgb(ui::colors().border))
                         .bg(rgb(color)),
                 )
                 .child(
@@ -135,6 +150,99 @@ impl SettingsForm {
             body = body.child(setting_row(label, None, control));
         }
         body
+    }
+
+    fn theme_picker(&self, cx: &Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(AppTheme::ALL.into_iter().enumerate().map(|(index, theme)| {
+                let palette = ui::Colors::for_theme(theme);
+                let selected = self.values.app_theme == theme;
+                div()
+                    .id(("application-theme", index))
+                    .w(px(136.))
+                    .p_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(rgb(if selected {
+                        ui::colors().accent
+                    } else {
+                        ui::colors().border
+                    }))
+                    .bg(rgb(if selected {
+                        ui::colors().selected
+                    } else {
+                        ui::colors().surface
+                    }))
+                    .cursor_pointer()
+                    .tab_index(0)
+                    .hover(|s| s.border_color(rgb(ui::colors().accent)))
+                    .focus(|s| s.border_color(rgb(ui::colors().text)))
+                    .child(
+                        div()
+                            .h(px(64.))
+                            .w_full()
+                            .rounded(px(3.))
+                            .overflow_hidden()
+                            .bg(rgb(palette.bg))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(px(13.))
+                                    .bg(rgb(palette.chrome))
+                                    .border_b_1()
+                                    .border_color(rgb(palette.border)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .flex()
+                                    .child(
+                                        div()
+                                            .w(px(26.))
+                                            .bg(rgb(palette.surface))
+                                            .border_r_1()
+                                            .border_color(rgb(palette.border)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .p_2()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div().h(px(4.)).w(px(24.)).bg(rgb(palette.accent)),
+                                            )
+                                            .child(div().h(px(3.)).w(px(42.)).bg(rgb(palette.text)))
+                                            .child(
+                                                div().h(px(3.)).w(px(30.)).bg(rgb(palette.muted)),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(tr(theme.label()))
+                            .when(selected, |d| {
+                                d.child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
+                            }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.values.app_theme = theme;
+                        ui::set_theme(theme, cx);
+                        cx.notify();
+                    }))
+            }))
     }
 
     pub(super) fn terminal(&self, cx: &Context<Self>) -> Div {
@@ -219,7 +327,7 @@ impl SettingsForm {
                 div()
                     .w(px(32.))
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(unit)),
             )
     }
@@ -255,7 +363,7 @@ impl SettingsForm {
             .p_3()
             .rounded(px(4.))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .bg(rgb(color(
                 i18n_key::WORKSPACE_BACKGROUND_COLOR_RGB,
                 self.values.theme.background,

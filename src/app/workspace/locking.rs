@@ -463,9 +463,9 @@ impl Workspace {
             .justify_center()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(ui::ACCENT))
-            .bg(rgb(ui::ACCENT))
-            .text_color(rgb(ui::BG))
+            .border_color(rgb(ui::colors().accent))
+            .bg(rgb(ui::colors().accent))
+            .text_color(rgb(ui::colors().on_accent))
             .text_size(px(14.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .tab_index(0)
@@ -477,8 +477,8 @@ impl Workspace {
             .when(enabled, |button| {
                 button
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(0xc3c6ed)))
-                    .focus(|style| style.border_color(rgb(ui::TEXT)))
+                    .hover(|style| style.bg(rgb(ui::colors().accent_hover)))
+                    .focus(|style| style.border_color(rgb(ui::colors().text)))
                     .on_click(cx.listener(|this, _, window, cx| this.unlock_workspace(window, cx)))
             })
             .when(!enabled, |button| button.opacity(0.45))
@@ -489,7 +489,7 @@ impl Workspace {
                         .absolute()
                         .right(px(14.))
                         .size(px(20.))
-                        .text_color(rgb(0x42445e)),
+                        .text_color(rgb(ui::colors().on_accent)),
                 )
             });
         let form = div()
@@ -503,7 +503,7 @@ impl Workspace {
                 ui::icon(ui::Icon::Logo)
                     .size(px(48.))
                     .mb(px(22.))
-                    .text_color(rgb(ui::BRAND)),
+                    .text_color(rgb(ui::colors().brand)),
             )
             .child(
                 div()
@@ -521,7 +521,7 @@ impl Workspace {
                     .mb(px(12.))
                     .text_size(px(12.))
                     .line_height(px(16.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::SETTINGS_LOCK_PASSWORD)),
             )
             .child(self.lock_screen.password.clone())
@@ -533,7 +533,7 @@ impl Workspace {
                     .items_center()
                     .text_size(px(12.))
                     .line_height(px(16.))
-                    .text_color(rgb(ui::DANGER))
+                    .text_color(rgb(ui::colors().danger))
                     .children(self.lock_screen.error.as_ref().map(Message::render)),
             )
             .child(action);
@@ -544,11 +544,11 @@ impl Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(ui::BG))
+            .bg(rgb(ui::colors().bg))
             .map(|d| frame.rounded(d))
             .overflow_hidden()
             .pb(frame.corners.bottom_left.max(frame.corners.bottom_right))
-            .text_color(rgb(ui::TEXT))
+            .text_color(rgb(ui::colors().text))
             .font_family(".SystemUIFont")
             .text_size(px(13.))
             .track_focus(&self.workspace_focus)

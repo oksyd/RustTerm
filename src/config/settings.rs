@@ -1,7 +1,7 @@
 use crate::i18n::messages as i18n_key;
 
 mod theme;
-pub use theme::Theme;
+pub use theme::{AppTheme, Theme};
 
 use super::{Result, invalid, validate_text};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,7 @@ pub struct Settings {
     pub check_updates: bool,
     pub update_proxy: String,
     pub language: crate::i18n::Language,
+    pub app_theme: AppTheme,
     pub font_family: String,
     pub font_size: f32,
     /// Cell height multiplier, shared by rendering and pointer/IME positioning.
@@ -60,6 +61,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             language: crate::i18n::Language::System,
+            app_theme: AppTheme::default(),
             restore_workspace: true,
             auto_reconnect: true,
             check_updates: true,
@@ -125,7 +127,25 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{AppTheme, Settings};
+
+    #[test]
+    fn application_theme_defaults_and_round_trips_without_changing_terminal_colors() {
+        let mut settings: Settings =
+            toml::from_str("font_size = 15.0\n[theme]\nbackground = 1193046").unwrap();
+        assert_eq!(settings.app_theme, AppTheme::Dark);
+        let terminal = settings.theme.clone();
+        for theme in AppTheme::ALL {
+            settings.app_theme = theme;
+            let saved = toml::to_string(&settings).unwrap();
+            let restored: Settings = toml::from_str(&saved).unwrap();
+            restored.validate().unwrap();
+            assert_eq!(restored.app_theme, theme);
+            assert_eq!(restored.theme, terminal);
+            assert_eq!(restored.font_size, 15.);
+        }
+        assert!(toml::from_str::<Settings>("app_theme = 'unknown'").is_err());
+    }
 
     #[test]
     fn command_output_cache_defaults_on_and_saves_disabled_preference() {

@@ -361,10 +361,10 @@ impl RdpView {
 
     pub fn status_color(&self) -> u32 {
         match self.state {
-            State::Connected => ui::SUCCESS,
-            State::Connecting | State::WaitingCertificate => ui::WARNING,
-            State::Failed => ui::DANGER,
-            State::Disconnected => ui::MUTED,
+            State::Connected => ui::colors().success,
+            State::Connecting | State::WaitingCertificate => ui::colors().warning,
+            State::Failed => ui::colors().danger,
+            State::Disconnected => ui::colors().muted,
         }
     }
 

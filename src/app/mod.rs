@@ -200,6 +200,7 @@ pub(crate) fn run() -> Result<()> {
     Application::new()
         .with_assets(ui::Assets)
         .run(move |cx: &mut App| {
+            ui::set_theme(config.settings.app_theme, cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit()

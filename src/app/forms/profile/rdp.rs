@@ -176,8 +176,8 @@ impl ProfileForm {
                 .gap_1()
                 .tab_index(0)
                 .border_1()
-                .border_color(rgb(ui::BORDER))
-                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                .border_color(rgb(ui::colors().border))
+                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                 .child(ui::icon(if self.advanced {
                     Icon::ChevronDown
                 } else {
@@ -245,11 +245,11 @@ impl ProfileForm {
                             .whitespace_nowrap()
                             .border_1()
                             .border_color(rgb(if selected == value {
-                                ui::ACCENT
+                                ui::colors().accent
                             } else {
-                                ui::BORDER
+                                ui::colors().border
                             }))
-                            .focus(|style| style.border_color(rgb(ui::TEXT)))
+                            .focus(|style| style.border_color(rgb(ui::colors().text)))
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
                                     if this.native_pending || this.prompts.is_blocked() {
@@ -281,10 +281,10 @@ impl ProfileForm {
             .py_1()
             .px_2()
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .cursor_pointer()
             .tab_index(0)
-            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+            .focus(|style| style.border_color(rgb(ui::colors().accent)))
             .child(
                 div()
                     .size(px(14.))
@@ -294,9 +294,13 @@ impl ProfileForm {
                     .justify_center()
                     .border_1()
                     .rounded(px(2.))
-                    .border_color(rgb(if checked { ui::ACCENT } else { ui::BORDER }))
+                    .border_color(rgb(if checked {
+                        ui::colors().accent
+                    } else {
+                        ui::colors().border
+                    }))
                     .when(checked, |checkbox| {
-                        checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::ACCENT)))
+                        checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
                     }),
             )
             .child(div().flex_1().min_w_0().child(tr(label)))

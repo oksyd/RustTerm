@@ -1,13 +1,14 @@
+use super::Workspace;
 use super::menus::Menu;
-use super::{Modal, Workspace};
-use crate::app::forms::{Fields, ProfileKind};
+use crate::app::forms::ProfileKind;
 use crate::app::ui;
 use crate::app::ui::{Icon, icon, icon_button};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, FontWeight, KeyDownEvent, MouseButton, Window, div, px, rgb};
-use rustterm::config::{Connection, Profile, Uuid};
+use rustterm::config::{AppConfig, Connection, Group, Profile, Uuid};
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
+use std::collections::{HashMap, HashSet};
 
 use super::menus::MenuAction;
 
@@ -24,8 +25,8 @@ impl gpui::Render for LibraryDrag {
             .px_3()
             .py_2()
             .rounded(px(4.))
-            .bg(rgb(ui::SELECTED))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().selected))
+            .text_color(rgb(ui::colors().text))
             .child(self.name.clone())
     }
 }
@@ -66,31 +67,126 @@ fn profile_matches(profile: &Profile, group: &str, query: &str) -> bool {
         .any(|value| value.to_lowercase().contains(query))
 }
 
+struct LibrarySection<'a> {
+    id: Option<Uuid>,
+    parent: Option<Uuid>,
+    name: String,
+    path: String,
+    depth: usize,
+    profiles: Vec<(usize, &'a Profile)>,
+    count: usize,
+    matched: bool,
+    collapsed: bool,
+}
+
+// Rendering and keyboard navigation share the same visible tree and row order.
+fn library_sections<'a>(
+    config: &'a AppConfig,
+    collapsed: &HashSet<Uuid>,
+    query: &str,
+) -> Vec<LibrarySection<'a>> {
+    let mut profiles: HashMap<_, Vec<_>> = HashMap::new();
+    for (index, profile) in config.profiles.iter().enumerate() {
+        profiles
+            .entry(profile.group)
+            .or_default()
+            .push((index, profile));
+    }
+    let root = (
+        None,
+        None,
+        tr(i18n_key::WORKSPACE_UNGROUPED).to_owned(),
+        tr(i18n_key::WORKSPACE_UNGROUPED).to_owned(),
+        0,
+    );
+    let mut sections: Vec<_> = std::iter::once(root)
+        .chain(Group::tree(&config.groups).into_iter().map(|node| {
+            (
+                Some(node.group.id),
+                node.group.parent,
+                node.group.name.clone(),
+                node.path,
+                node.depth,
+            )
+        }))
+        .map(|(id, parent, name, path, depth)| {
+            let profiles: Vec<_> = profiles
+                .remove(&id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, profile)| profile_matches(profile, &path, query))
+                .collect();
+            LibrarySection {
+                id,
+                parent,
+                name,
+                depth,
+                count: profiles.len(),
+                matched: query.is_empty()
+                    || !profiles.is_empty()
+                    || path.to_lowercase().contains(query),
+                collapsed: query.is_empty() && id.is_some_and(|id| collapsed.contains(&id)),
+                path,
+                profiles,
+            }
+        })
+        .collect();
+    let indices: HashMap<_, _> = sections
+        .iter()
+        .enumerate()
+        .filter_map(|(i, section)| section.id.map(|id| (id, i)))
+        .collect();
+    for index in (0..sections.len()).rev() {
+        if let Some(parent) = sections[index]
+            .parent
+            .and_then(|id| indices.get(&id).copied())
+        {
+            sections[parent].count += sections[index].count;
+            sections[parent].matched |= sections[index].matched;
+        }
+    }
+    let mut hidden_depth = None;
+    sections.retain(|section| {
+        if hidden_depth.is_some_and(|depth| section.depth > depth) {
+            return false;
+        }
+        hidden_depth = None;
+        if !section.matched {
+            return false;
+        }
+        if section.collapsed {
+            hidden_depth = Some(section.depth);
+        }
+        true
+    });
+    sections
+}
+
 impl Workspace {
+    pub(super) fn expand_library_group(&mut self, group: Uuid) {
+        let mut current = Some(group);
+        for _ in 0..self.config.groups.len() {
+            let Some(id) = current else { break };
+            self.collapsed.remove(&id);
+            current = self
+                .config
+                .groups
+                .iter()
+                .find(|g| g.id == id)
+                .and_then(|g| g.parent);
+        }
+    }
+
     fn filtered_profile_rows(&self, cx: &App) -> Vec<(&Profile, usize)> {
         let query = self.session_filter.read(cx).value().trim().to_lowercase();
         let mut rows = Vec::new();
         let mut row = 0;
-        for (group, name) in std::iter::once((None, tr(i18n_key::WORKSPACE_UNGROUPED))).chain(
-            self.config
-                .groups
-                .iter()
-                .map(|g| (Some(g.id), g.name.as_str())),
-        ) {
-            let profiles: Vec<_> = self
-                .config
-                .profiles
-                .iter()
-                .filter(|p| p.group == group && profile_matches(p, name, &query))
-                .collect();
-            if profiles.is_empty() && !query.is_empty() {
+        for section in library_sections(&self.config, &self.collapsed, &query) {
+            row += 1;
+            if section.collapsed {
                 continue;
             }
-            row += 1; // Group heading is an immediate child of the scroll container.
-            if query.is_empty() && group.is_some_and(|id| self.collapsed.contains(&id)) {
-                continue;
-            }
-            for profile in profiles {
+            for (_, profile) in section.profiles {
                 rows.push((profile, row));
                 row += 1;
             }
@@ -189,7 +285,7 @@ impl Workspace {
                     if event.keystroke.key == "left" {
                         self.collapsed.insert(group);
                     } else {
-                        self.collapsed.remove(&group);
+                        self.expand_library_group(group);
                     }
                 }
             }
@@ -232,27 +328,20 @@ impl Workspace {
         before: Option<Uuid>,
         cx: &mut Context<Self>,
     ) {
-        if self.closing || self.modal.is_some() || self.window_state.prompts.is_busy() {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+        {
             return;
         }
         if drag.group {
-            let Some(target) = group else { return };
-            if drag.id == target {
+            if self.config.move_group(drag.id, group, None).is_err() {
                 return;
             }
-            let Some(from) = self
-                .config
-                .groups
-                .iter()
-                .position(|item| item.id == drag.id)
-            else {
-                return;
-            };
-            let Some(to) = self.config.groups.iter().position(|item| item.id == target) else {
-                return;
-            };
-            let item = self.config.groups.remove(from);
-            self.config.groups.insert(to, item);
+            if let Some(group) = group {
+                self.expand_library_group(group);
+            }
         } else {
             if before == Some(drag.id) {
                 return;
@@ -280,7 +369,7 @@ impl Workspace {
             self.config.profiles.insert(to, item);
             self.selected_profile = Some(drag.id);
             if let Some(group) = group {
-                self.collapsed.remove(&group);
+                self.expand_library_group(group);
             }
         }
         self.save(cx);
@@ -297,9 +386,9 @@ impl Workspace {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_r_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 div()
                     .h(px(44.))
@@ -362,25 +451,19 @@ impl Workspace {
                     .gap_2()
                     .rounded(px(4.))
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .text_size(px(12.))
-                    .text_color(rgb(ui::TEXT))
+                    .text_color(rgb(ui::colors().text))
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
                     .child(icon(Icon::Plus))
                     .child(tr(i18n_key::COMMON_NEW_CONNECTION))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.toggle_menu(Menu::Create, window, cx)
                     })),
             );
-        let groups: Vec<_> = std::iter::once((None, tr(i18n_key::WORKSPACE_UNGROUPED).to_owned()))
-            .chain(
-                self.config
-                    .groups
-                    .iter()
-                    .map(|g| (Some(g.id), g.name.clone())),
-            )
-            .collect();
+        let sections = library_sections(&self.config, &self.collapsed, &query);
+        let has_matches = !sections.is_empty();
         let mut tree = div()
             .id("session-tree")
             .flex_1()
@@ -390,29 +473,48 @@ impl Workspace {
             .track_scroll(&self.sidebar_scroll)
             .pb_2();
         let mut matched = 0;
-        for (group_index, (group, name)) in groups.into_iter().enumerate() {
-            let profiles: Vec<_> = self
-                .config
-                .profiles
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| p.group == group && profile_matches(p, &name, &query))
-                .collect();
-            if profiles.is_empty() && !query.is_empty() {
-                continue;
-            }
-            matched += profiles.len();
-            let collapsed =
-                query.is_empty() && group.is_some_and(|id| self.collapsed.contains(&id));
+        for (group_index, section) in sections.into_iter().enumerate() {
+            let LibrarySection {
+                id: group,
+                parent,
+                name,
+                path,
+                depth,
+                profiles,
+                count,
+                collapsed,
+                ..
+            } = section;
+            matched += count;
+            let indent = if query.is_empty() {
+                depth.min(12) as f32 * 14.
+            } else {
+                0.
+            };
+            let heading_path = path.clone();
             let hover_group: gpui::SharedString = format!("group-{group_index}").into();
             let drag_name = name.clone();
             let mut heading = div()
                 .id(("library-group", group_index))
+                .relative()
                 .h(px(32.))
-                .px_3()
+                .pl(px(12. + indent))
+                .pr_3()
+                .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(heading_path.clone())).into())
+                .when_some(group, |d, id| {
+                    d.on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                            this.open_group_menu(id, event.position, window, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }),
+                    )
+                })
                 .flex()
                 .items_center()
                 .group(hover_group.clone())
+                .drag_over::<LibraryDrag>(|style, _, _, _| style.bg(rgb(ui::colors().selected)))
                 .on_drop(cx.listener(move |this, drag: &LibraryDrag, _, cx| {
                     cx.stop_propagation();
                     this.move_library_item(drag, group, None, cx);
@@ -428,7 +530,7 @@ impl Workspace {
                         .gap_2()
                         .cursor_pointer()
                         .text_size(px(12.))
-                        .text_color(rgb(ui::MUTED))
+                        .text_color(rgb(ui::colors().muted))
                         .font_weight(FontWeight::MEDIUM)
                         .child(
                             icon(if collapsed {
@@ -445,13 +547,17 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(name.clone()),
+                                .child(if query.is_empty() {
+                                    name.clone()
+                                } else {
+                                    path.clone()
+                                }),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(ui::FAINT))
-                                .child(profiles.len().to_string()),
+                                .text_color(rgb(ui::colors().faint))
+                                .child(count.to_string()),
                         )
                         .when_some(group, |d, id| {
                             d.on_drag(
@@ -473,7 +579,44 @@ impl Workspace {
                         })),
                 );
             if let Some(id) = group {
-                let edit_name = name.clone();
+                // A separate upper-edge drop target retains sibling ordering;
+                // dropping on the rest of the heading reparents the subtree.
+                heading = heading.child(
+                    div()
+                        .id(("group-insert-before", group_index))
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(5.))
+                        .drag_over::<LibraryDrag>(|style, drag, _, _| {
+                            if drag.group {
+                                style.bg(rgb(ui::colors().accent))
+                            } else {
+                                style
+                            }
+                        })
+                        .on_drop(cx.listener(move |this, drag: &LibraryDrag, _, cx| {
+                            if !drag.group {
+                                return;
+                            }
+                            cx.stop_propagation();
+                            if this.closing
+                                || this.lock_screen.locked
+                                || this.modal.is_some()
+                                || this.window_state.prompts.is_busy()
+                            {
+                                return;
+                            }
+                            if this.config.move_group(drag.id, parent, Some(id)).is_ok() {
+                                if let Some(parent) = parent {
+                                    this.expand_library_group(parent);
+                                }
+                                this.save(cx);
+                                cx.notify();
+                            }
+                        })),
+                );
                 heading = heading.child(
                     div()
                         .flex()
@@ -488,17 +631,7 @@ impl Workspace {
                             .size(px(20.))
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.remember_popup_focus(window, cx);
-                                    let fields = Fields::new(
-                                        vec![(i18n_key::WORKSPACE_GROUP_NAME, edit_name.clone())],
-                                        cx,
-                                    );
-                                    fields.focus(window, cx);
-                                    this.modal = Some(Modal::Group {
-                                        editing: Some(id),
-                                        fields,
-                                    });
-                                    cx.notify();
+                                    this.edit_group(Some(id), None, window, cx);
                                 },
                             )),
                         )
@@ -541,7 +674,7 @@ impl Workspace {
                     .find(|pane| pane.is_running(cx))
                     .or_else(|| open.first())
                     .map(|pane| pane.status_color(cx))
-                    .unwrap_or(ui::FAINT);
+                    .unwrap_or(ui::colors().faint);
                 let detail = match &profile.connection {
                     Connection::Local(local) => local.shell.clone(),
                     Connection::Ssh(ssh) => {
@@ -572,13 +705,13 @@ impl Workspace {
                 } else {
                     rustterm::trf!(i18n_key::WORKSPACE_OPEN_PANE_COUNT_HELP, count = open_count)
                 };
-                let tooltip = format!("{}\n{detail}\n{hint}", profile.name);
+                let tooltip = format!("{path} / {}\n{detail}\n{hint}", profile.name);
                 tree = tree.child(
                     div()
                         .id(("profile", index))
                         .h(px(36.))
                         .mx_2()
-                        .pl(px(24.))
+                        .pl(px(24. + indent))
                         .pr_2()
                         .rounded(px(4.))
                         .flex()
@@ -586,16 +719,16 @@ impl Workspace {
                         .gap_2()
                         .cursor_pointer()
                         .text_color(rgb(if selected || open_count > 0 {
-                            ui::TEXT
+                            ui::colors().text
                         } else {
-                            ui::MUTED
+                            ui::colors().muted
                         }))
-                        .when(selected, |d| d.bg(rgb(ui::SELECTED)))
-                        .hover(|s| s.bg(rgb(ui::HOVER)))
+                        .when(selected, |d| d.bg(rgb(ui::colors().selected)))
+                        .hover(|s| s.bg(rgb(ui::colors().hover)))
                         .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
                         .child(
                             icon(glyph).when(glyph == Icon::Terminal && open_count > 0, |icon| {
-                                icon.text_color(rgb(0xa9bfdc))
+                                icon.text_color(rgb(ui::colors().blue))
                             }),
                         )
                         .child(
@@ -611,7 +744,7 @@ impl Workspace {
                             d.child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(ui::MUTED))
+                                    .text_color(rgb(ui::colors().muted))
                                     .child(open_count.to_string()),
                             )
                         })
@@ -657,13 +790,13 @@ impl Workspace {
                 );
             }
         }
-        if matched == 0 {
+        if matched == 0 && (query.is_empty() || !has_matches) {
             tree = tree.child(
                 div()
                     .px_3()
                     .py_4()
                     .text_size(px(11.))
-                    .text_color(rgb(ui::FAINT))
+                    .text_color(rgb(ui::colors().faint))
                     .child(if query.is_empty() {
                         tr(i18n_key::WORKSPACE_NO_SAVED_CONNECTIONS_YET_CHOOSE_NEW_CONNECTION_TO_ADD_ONE)
                     } else {
@@ -681,7 +814,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         div()
                             .id("settings")
@@ -693,8 +826,8 @@ impl Workspace {
                             .gap_2()
                             .cursor_pointer()
                             .text_size(px(12.))
-                            .text_color(rgb(ui::MUTED))
-                            .hover(|s| s.text_color(rgb(ui::TEXT)))
+                            .text_color(rgb(ui::colors().muted))
+                            .hover(|s| s.text_color(rgb(ui::colors().text)))
                             .child(icon(Icon::Settings))
                             .child(tr(i18n_key::COMMON_SETTINGS))
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -703,6 +836,62 @@ impl Workspace {
                     ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::config::LocalConfig;
+
+    fn library() -> AppConfig {
+        let company = Group::new("Company A");
+        let other = Group::new("Company B");
+        let mut project = Group::new("Project");
+        project.parent = Some(company.id);
+        let mut second = Group::new("Project");
+        second.parent = Some(other.id);
+        let mut first_profile = Profile::local("App server", LocalConfig::default());
+        first_profile.group = Some(project.id);
+        let mut second_profile = Profile::local("Database", LocalConfig::default());
+        second_profile.group = Some(second.id);
+        AppConfig {
+            groups: vec![company, project, other, second],
+            profiles: vec![first_profile, second_profile],
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn collapsed_company_hides_its_subtree_but_keeps_recursive_count() {
+        let config = library();
+        let collapsed = HashSet::from([config.groups[0].id]);
+        let sections = library_sections(&config, &collapsed, "");
+        assert_eq!(sections.len(), 4); // Ungrouped, Company A, Company B, its project.
+        assert_eq!(sections[1].count, 1);
+        assert!(sections[1].collapsed);
+        assert_eq!(sections[3].path, "Company B / Project");
+        assert_eq!(sections[3].depth, 1);
+        assert_eq!(sections[3].profiles[0].1.name, "Database");
+    }
+
+    #[test]
+    fn search_uses_ancestor_paths_and_reveals_matches_in_collapsed_groups() {
+        let config = library();
+        let collapsed = HashSet::from([config.groups[0].id, config.groups[1].id]);
+        for query in ["company a", "app server", "company a / project"] {
+            let sections = library_sections(&config, &collapsed, query);
+            assert_eq!(sections.len(), 2);
+            assert_eq!(sections[0].name, "Company A");
+            assert_eq!(sections[1].path, "Company A / Project");
+            assert!(!sections[0].collapsed && !sections[1].collapsed);
+            assert_eq!(sections[1].profiles[0].1.id, config.profiles[0].id);
+        }
+        let both = library_sections(&config, &collapsed, "project");
+        assert_eq!(both.len(), 4);
+        assert_ne!(both[1].path, both[3].path);
+        assert_eq!(collapsed.len(), 2); // Searching never changes saved collapse choices.
+        assert!(library_sections(&config, &collapsed, "missing").is_empty());
     }
 }
 

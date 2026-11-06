@@ -119,17 +119,21 @@ impl DatabaseView {
             .filter(|table| table.section == TableAction::Data)
         {
             match table.changes.get(&row) {
-                Some(RowChange::Delete { .. }) => return ui::DANGER,
-                Some(RowChange::Insert { .. }) => return ui::SUCCESS,
+                Some(RowChange::Delete { .. }) => return ui::colors().danger,
+                Some(RowChange::Insert { .. }) => return ui::colors().success,
                 Some(RowChange::Update { values, .. })
                     if values.iter().any(|(index, _)| *index == column) =>
                 {
-                    return ui::WARNING;
+                    return ui::colors().warning;
                 }
                 _ => {}
             }
         }
-        if null { ui::FAINT } else { ui::TEXT }
+        if null {
+            ui::colors().faint
+        } else {
+            ui::colors().text
+        }
     }
 
     pub(in crate::app::database_view) fn cell_preview(

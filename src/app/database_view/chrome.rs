@@ -112,9 +112,9 @@ impl DatabaseView {
             .w(px(240.))
             .max_w_full()
             .py_1()
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(4.))
             .shadow_md()
             .occlude()
@@ -129,11 +129,17 @@ impl DatabaseView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_color(rgb(if enabled { ui::TEXT } else { ui::FAINT }))
-                    .when(index == self.menu_index, |row| row.bg(rgb(ui::SELECTED)))
+                    .text_color(rgb(if enabled {
+                        ui::colors().text
+                    } else {
+                        ui::colors().faint
+                    }))
+                    .when(index == self.menu_index, |row| {
+                        row.bg(rgb(ui::colors().selected))
+                    })
                     .when(enabled, |row| {
                         row.cursor_pointer()
-                            .hover(|style| style.bg(rgb(ui::HOVER)))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                                 if this.menu_index != index {
                                     this.menu_index = index;

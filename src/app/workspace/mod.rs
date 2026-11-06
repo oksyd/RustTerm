@@ -50,6 +50,7 @@ enum Modal {
     Settings(Entity<SettingsForm>),
     Group {
         editing: Option<Uuid>,
+        parent: Option<Uuid>,
         fields: Fields,
     },
     Auth {
@@ -409,7 +410,7 @@ impl Workspace {
                     this.closing = true;
                     this.files.clear();
                     this.files_subscriptions.clear();
-                    this.dismiss_modal();
+                    this.dismiss_modal(cx);
                     let mut runs = 0;
                     let mut snapshots = 0;
                     for pane in this.panes.values() {

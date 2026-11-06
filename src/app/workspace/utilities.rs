@@ -153,7 +153,7 @@ impl Workspace {
         .unwrap_or_else(|| {
             div()
                 .p_4()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(tr(i18n_key::WORKSPACE_WAITING_FOR_SSH_CONNECTION))
                 .into_any_element()
         });
@@ -172,7 +172,7 @@ impl Workspace {
                 .min_h_0()
                 .flex()
                 .flex_col()
-                .bg(rgb(ui::SURFACE))
+                .bg(rgb(ui::colors().surface))
                 .child(
                     div()
                         .h(px(40.))
@@ -182,13 +182,13 @@ impl Workspace {
                         .items_center()
                         .gap_2()
                         .border_b_1()
-                        .border_color(rgb(ui::BORDER))
+                        .border_color(rgb(ui::colors().border))
                         .child(ui::icon(icon))
                         .child(div().min_w_0().flex_1().truncate().child(name))
                         .child(
                             div()
                                 .text_size(px(11.))
-                                .text_color(rgb(ui::MUTED))
+                                .text_color(rgb(ui::colors().muted))
                                 .child(tr(label)),
                         )
                         .child(
@@ -256,12 +256,12 @@ impl Workspace {
                         .gap_1()
                         .text_size(px(11.))
                         .text_color(rgb(if files.has_failed_transfers() {
-                            ui::WARNING
+                            ui::colors().warning
                         } else {
-                            ui::MUTED
+                            ui::colors().muted
                         }))
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(ui::HOVER)))
+                        .hover(|s| s.bg(rgb(ui::colors().hover)))
                         .tab_index(0)
                         .child(ui::icon(Icon::Folder).size(px(12.)))
                         .child(div().truncate().child(label))

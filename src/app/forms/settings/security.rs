@@ -274,7 +274,7 @@ impl SettingsForm {
                 div()
                     .pt_2()
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::SETTINGS_LOCK_SHORTCUT))
                     .child("  Ctrl+Shift+L"),
             )

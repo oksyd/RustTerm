@@ -421,9 +421,9 @@ impl DatabaseView {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .bg(rgb(ui::CHROME))
+            .bg(rgb(ui::colors().chrome))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 div()
                     .id("database-document-scroll")
@@ -446,12 +446,13 @@ impl DatabaseView {
                             .gap_2()
                             .px_2()
                             .border_r_1()
-                            .border_color(rgb(ui::BORDER))
+                            .border_color(rgb(ui::colors().border))
                             .cursor_pointer()
                             .when(index == self.active_document, |d| {
-                                d.bg(rgb(ui::BG)).text_color(rgb(ui::ACCENT))
+                                d.bg(rgb(ui::colors().bg))
+                                    .text_color(rgb(ui::colors().accent))
                             })
-                            .hover(|s| s.bg(rgb(ui::HOVER)))
+                            .hover(|s| s.bg(rgb(ui::colors().hover)))
                             .child(ui::icon(if document.table.is_some() {
                                 ui::Icon::Table
                             } else {
@@ -459,10 +460,10 @@ impl DatabaseView {
                             }))
                             .child(div().truncate().child(document.title.render()))
                             .when(document.dirty(), |d| {
-                                d.child(div().text_color(rgb(ui::WARNING)).child("•"))
+                                d.child(div().text_color(rgb(ui::colors().warning)).child("•"))
                             })
                             .when(self.running_document == Some(id), |d| {
-                                d.child(div().text_color(rgb(ui::MUTED)).child("…"))
+                                d.child(div().text_color(rgb(ui::colors().muted)).child("…"))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.select_document(index, window, cx)

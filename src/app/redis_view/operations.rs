@@ -317,7 +317,7 @@ impl RedisView {
                 );
         } else {
             toolbar = toolbar
-                .child(div().flex_1().text_color(rgb(ui::MUTED)).child(tr(
+                .child(div().flex_1().text_color(rgb(ui::colors().muted)).child(tr(
                     if self.ops.section == Section::Server {
                         i18n_key::REDIS_STATUS_OF_THE_CONNECTED_REDIS_NODE
                     } else {

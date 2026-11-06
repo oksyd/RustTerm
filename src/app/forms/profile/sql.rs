@@ -94,8 +94,8 @@ impl ProfileForm {
                 .cursor_pointer()
                 .tab_index(0)
                 .border_1()
-                .border_color(rgb(ui::BORDER))
-                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                .border_color(rgb(ui::colors().border))
+                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                 .child(
                     div()
                         .size(px(14.))
@@ -105,12 +105,13 @@ impl ProfileForm {
                         .border_1()
                         .rounded(px(2.))
                         .border_color(rgb(if self.database_tls {
-                            ui::ACCENT
+                            ui::colors().accent
                         } else {
-                            ui::BORDER
+                            ui::colors().border
                         }))
                         .when(self.database_tls, |checkbox| {
-                            checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::ACCENT)))
+                            checkbox
+                                .child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
                         }),
                 )
                 .child(tr(i18n_key::REDIS_USE_TLS))

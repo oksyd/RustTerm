@@ -85,3 +85,9 @@ settings-output-timestamps-help = Local time when each line first received outpu
 settings-cache-command-output = Cache command output
 
 settings-cache-command-output-help = Turn off to stop caching output from commands completed afterward. Commands, exit codes and durations are still recorded. Existing caches expire under the usual limits; terminal scrollback is unaffected.
+
+settings-application-theme = Application theme
+settings-application-theme-help = Select a theme to preview it immediately. Save to keep it, or discard your changes to restore the saved theme. Terminal colors are configured separately below.
+settings-theme-dark = Default dark
+settings-theme-light = Light
+settings-theme-midnight = Midnight blue

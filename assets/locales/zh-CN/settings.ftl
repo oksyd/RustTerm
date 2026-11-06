@@ -85,3 +85,9 @@ settings-output-timestamps-help = 该行首次收到输出的本机时间 [HH:mm
 settings-cache-command-output = 缓存命令输出
 
 settings-cache-command-output-help = 关闭后不再缓存后续完成命令的输出，仍记录命令、退出码和耗时。已有缓存按容量上限淘汰，终端滚动历史不受影响。
+
+settings-application-theme = 软件主题
+settings-application-theme-help = 选择主题即可立即预览。保存后保留，放弃修改则恢复已保存的主题。终端配色可在下方单独设置。
+settings-theme-dark = 默认深色
+settings-theme-light = 浅色
+settings-theme-midnight = 午夜蓝

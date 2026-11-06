@@ -203,9 +203,9 @@ impl CommandHistoryView {
             .py(px(4.))
             .flex()
             .flex_col()
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(3.))
             .shadow_md()
             .occlude()
@@ -237,10 +237,10 @@ impl CommandHistoryView {
                     .items_center()
                     .gap_2()
                     .text_size(px(12.))
-                    .text_color(rgb(if reason.is_none() { ui::TEXT } else { ui::FAINT }))
-                    .when(reason.is_none() && menu.index == index, |d| d.bg(rgb(ui::SELECTED)))
+                    .text_color(rgb(if reason.is_none() { ui::colors().text } else { ui::colors().faint }))
+                    .when(reason.is_none() && menu.index == index, |d| d.bg(rgb(ui::colors().selected)))
                     .when(reason.is_none(), |d| {
-                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::SELECTED)))
+                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::colors().selected)))
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                                 if let Some(menu) = &mut this.menu && menu.index != index {
                                     menu.index = index;

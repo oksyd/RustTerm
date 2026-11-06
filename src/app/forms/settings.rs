@@ -16,7 +16,7 @@ use gpui::{
 };
 use rustterm::{
     app_lock,
-    config::{AppLockConfig, Secret, Settings},
+    config::{AppLockConfig, AppTheme, Secret, Settings},
     i18n::{Language, tr},
 };
 
@@ -76,6 +76,7 @@ pub struct LockChange {
 struct SettingsDraft {
     fields: Vec<String>,
     language: Language,
+    app_theme: AppTheme,
     line_numbers: bool,
     line_timestamps: bool,
     cache_command_output: bool,
@@ -169,6 +170,7 @@ impl SettingsForm {
         let initial = SettingsDraft {
             fields: fields.values(cx),
             language: settings.language,
+            app_theme: settings.app_theme,
             line_numbers: settings.line_numbers,
             line_timestamps: settings.line_timestamps,
             cache_command_output: settings.cache_command_output,
@@ -236,6 +238,7 @@ impl SettingsForm {
             != SettingsDraft {
                 fields: self.fields.values(cx),
                 language: self.values.language,
+                app_theme: self.values.app_theme,
                 line_numbers: self.values.line_numbers,
                 line_timestamps: self.values.line_timestamps,
                 cache_command_output: self.values.cache_command_output,
@@ -387,15 +390,17 @@ impl Render for SettingsForm {
             .flex_shrink_0()
             .gap_1()
             .p_2()
-            .bg(rgb(ui::BG))
+            .bg(rgb(ui::colors().bg))
             .when(compact, |nav| {
-                nav.w_full().border_b_1().border_color(rgb(ui::BORDER))
+                nav.w_full()
+                    .border_b_1()
+                    .border_color(rgb(ui::colors().border))
             })
             .when(!compact, |nav| {
                 nav.w(px(156.))
                     .flex_col()
                     .border_r_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
             })
             .children(SettingsSection::ALL.into_iter().map(|section| {
                 let selected = section == self.section;
@@ -422,14 +427,22 @@ impl Render for SettingsForm {
                     .border_1()
                     .border_color(gpui::transparent_black())
                     .cursor_pointer()
-                    .bg(rgb(if selected { ui::SELECTED } else { ui::BG }))
-                    .text_color(rgb(if selected { ui::TEXT } else { ui::MUTED }))
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
-                    .focus(|style| style.border_color(rgb(ui::ACCENT)))
-                    .child(ui::icon(icon).text_color(rgb(if selected {
-                        ui::ACCENT
+                    .bg(rgb(if selected {
+                        ui::colors().selected
                     } else {
-                        ui::MUTED
+                        ui::colors().bg
+                    }))
+                    .text_color(rgb(if selected {
+                        ui::colors().text
+                    } else {
+                        ui::colors().muted
+                    }))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
+                    .focus(|style| style.border_color(rgb(ui::colors().accent)))
+                    .child(ui::icon(icon).text_color(rgb(if selected {
+                        ui::colors().accent
+                    } else {
+                        ui::colors().muted
                     })))
                     .child(div().truncate().child(tr(section.label())))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -475,7 +488,7 @@ impl Render for SettingsForm {
             .flex()
             .when(compact, |layout| layout.flex_col())
             .text_size(px(12.))
-            .text_color(rgb(ui::TEXT))
+            .text_color(rgb(ui::colors().text))
             .child(navigation)
             .child(
                 div()
@@ -509,7 +522,7 @@ fn section_heading(label: &'static str) -> Div {
         .pb(px(4.))
         .text_size(px(11.))
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(rgb(ui::MUTED))
+        .text_color(rgb(ui::colors().muted))
         .child(tr(label))
 }
 
@@ -525,7 +538,7 @@ fn setting_row(
         .min_h(px(52.))
         .py(px(10.))
         .border_b_1()
-        .border_color(rgb(ui::BORDER))
+        .border_color(rgb(ui::colors().border))
         .child(
             div()
                 .flex_1()
@@ -538,7 +551,7 @@ fn setting_row(
                     text.child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .child(tr(description)),
                     )
                 }),
@@ -562,15 +575,23 @@ fn toggle(
             .items_center()
             .px(px(3.))
             .rounded(px(10.))
-            .bg(rgb(if selected { ui::ACCENT } else { ui::BORDER }))
+            .bg(rgb(if selected {
+                ui::colors().accent
+            } else {
+                ui::colors().border
+            }))
             .when(selected, |rail| rail.justify_end())
-            .child(div().size(px(14.)).rounded(px(7.)).bg(rgb(ui::TEXT))),
+            .child(div().size(px(14.)).rounded(px(7.)).bg(rgb(if selected {
+                ui::colors().on_accent
+            } else {
+                ui::colors().text
+            }))),
     )
     .id(id)
     .cursor_pointer()
     .tab_index(0)
-    .hover(|style| style.bg(rgb(ui::HOVER)))
-    .focus(|style| style.border_color(rgb(ui::ACCENT)))
+    .hover(|style| style.bg(rgb(ui::colors().hover)))
+    .focus(|style| style.border_color(rgb(ui::colors().accent)))
 }
 // Valid history budgets fit exactly in f64 (maximum 64 GiB). Dividing by a
 // power of two preserves every byte, unlike the old integer-MiB display.

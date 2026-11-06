@@ -243,9 +243,9 @@ impl RdpView {
                 (self.layout_size.1 - ui::PANE_HEADER_HEIGHT - 8.).max(28.)
             ))
             .py(px(4.))
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(3.))
             .shadow_md()
             .cursor(CursorStyle::Arrow)
@@ -313,12 +313,18 @@ impl RdpView {
                         .items_center()
                         .gap(px(8.))
                         .text_size(px(11.))
-                        .text_color(rgb(if enabled { ui::TEXT } else { ui::FAINT }))
+                        .text_color(rgb(if enabled {
+                            ui::colors().text
+                        } else {
+                            ui::colors().faint
+                        }))
                         .when(
                             matches!(action, Action::SendClipboard | Action::KeyboardHelp),
-                            |item| item.border_t_1().border_color(rgb(ui::BORDER)),
+                            |item| item.border_t_1().border_color(rgb(ui::colors().border)),
                         )
-                        .when(index == self.menu_index, |item| item.bg(rgb(ui::SELECTED)))
+                        .when(index == self.menu_index, |item| {
+                            item.bg(rgb(ui::colors().selected))
+                        })
                         .when(enabled, |item| {
                             item.cursor_pointer().on_mouse_move(cx.listener(
                                 move |this, _, _, cx| {
@@ -336,7 +342,11 @@ impl RdpView {
                                     matches!(action, Action::MuteAudio) && !self.audio_muted,
                                     |icon| icon.opacity(0.),
                                 )
-                                .text_color(rgb(if enabled { ui::MUTED } else { ui::FAINT })),
+                                .text_color(rgb(if enabled {
+                                    ui::colors().muted
+                                } else {
+                                    ui::colors().faint
+                                })),
                         )
                         .child(div().flex_1().min_w_0().truncate().child(tr(label)))
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -410,7 +420,7 @@ impl RdpView {
                     .gap(px(6.))
                     .cursor_pointer()
                     .text_size(px(12.))
-                    .text_color(rgb(ui::TEXT))
+                    .text_color(rgb(ui::colors().text))
                     .child(ui::icon(Icon::ChevronLeft))
                     .child(tr(i18n_key::RDP_CONNECTION_INFORMATION))
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -425,8 +435,8 @@ impl RdpView {
                     .flex_col()
                     .gap(px(3.))
                     .text_size(px(11.))
-                    .child(div().text_color(rgb(ui::MUTED)).child(tr(label)))
-                    .child(div().text_color(rgb(ui::TEXT)).child(value))
+                    .child(div().text_color(rgb(ui::colors().muted)).child(tr(label)))
+                    .child(div().text_color(rgb(ui::colors().text)).child(value))
             }))
     }
 }

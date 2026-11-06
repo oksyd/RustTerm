@@ -20,7 +20,7 @@ impl DatabaseView {
             .px_2()
             .py_1()
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .children(
                 [
                     (TableAction::Data, "Data"),
@@ -37,7 +37,9 @@ impl DatabaseView {
                         ButtonStyle::Neutral,
                     )
                     .when(table.section == section, |button| {
-                        button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                        button
+                            .bg(rgb(ui::colors().selected))
+                            .text_color(rgb(ui::colors().accent))
                     })
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.select_table_section(section, cx)),
@@ -114,12 +116,15 @@ impl DatabaseView {
                     )
                     .child(div().flex_1())
                     .when(!table.changes.is_empty(), |bar| {
-                        bar.child(div().text_size(px(11.)).text_color(rgb(ui::WARNING)).child(
-                            rustterm::trf!(
-                                i18n_key::DATABASE_PENDING_ROW_COUNT,
-                                count = table.changes.len()
-                            ),
-                        ))
+                        bar.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(ui::colors().warning))
+                                .child(rustterm::trf!(
+                                    i18n_key::DATABASE_PENDING_ROW_COUNT,
+                                    count = table.changes.len()
+                                )),
+                        )
                     })
                     .child(
                         super::super::render::action(
@@ -155,7 +160,7 @@ impl DatabaseView {
                         .px_2()
                         .py_1()
                         .text_size(px(11.))
-                        .text_color(rgb(ui::MUTED))
+                        .text_color(rgb(ui::colors().muted))
                         .child(tr(reason)),
                 );
             }
@@ -175,9 +180,9 @@ impl DatabaseView {
                             .right_0()
                             .w(px(380.))
                             .max_w_full()
-                            .bg(rgb(ui::SURFACE))
+                            .bg(rgb(ui::colors().surface))
                             .border_l_1()
-                            .border_color(rgb(ui::BORDER))
+                            .border_color(rgb(ui::colors().border))
                             .shadow_md()
                             .occlude()
                             .flex()
@@ -219,7 +224,7 @@ impl DatabaseView {
                     .items_center()
                     .justify_between()
                     .rounded_sm()
-                    .bg(rgb(ui::HOVER))
+                    .bg(rgb(ui::colors().hover))
                     .cursor_pointer()
                     .tab_index(0)
                     .child(div().min_w_0().truncate().child(column))
@@ -247,7 +252,7 @@ impl DatabaseView {
                     .items_center()
                     .justify_between()
                     .rounded_sm()
-                    .bg(rgb(ui::HOVER))
+                    .bg(rgb(ui::colors().hover))
                     .cursor_pointer()
                     .tab_index(0)
                     .child(tr(table.filter_operator.label()))
@@ -320,9 +325,9 @@ impl DatabaseView {
                 .max_h(px(240.))
                 .overflow_y_scroll()
                 .map(ui::preserve_scroll_axes)
-                .bg(rgb(ui::RAISED))
+                .bg(rgb(ui::colors().raised))
                 .border_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .shadow_md()
                 .occlude()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -339,7 +344,7 @@ impl DatabaseView {
                         .py_1()
                         .cursor_pointer()
                         .tab_index(0)
-                        .hover(|style| style.bg(rgb(ui::HOVER)))
+                        .hover(|style| style.bg(rgb(ui::colors().hover)))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let table =
@@ -372,7 +377,7 @@ impl DatabaseView {
             .items_center()
             .gap_2()
             .border_t_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 ui::icon_button_enabled(
                     "previous-table-page",
@@ -400,7 +405,7 @@ impl DatabaseView {
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::DATABASE_ROWS_PER_PAGE)),
             )
             .child(
@@ -467,7 +472,9 @@ impl DatabaseView {
                             ButtonStyle::Neutral,
                         )
                         .when(edit.mode == mode, |button| {
-                            button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                            button
+                                .bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().accent))
                         })
                         .on_click(cx.listener(
                             move |this, _, window, cx| this.set_cell_mode(mode, window, cx),
@@ -490,7 +497,7 @@ impl DatabaseView {
             .gap_2()
             .p_2()
             .border_t_1()
-            .border_color(rgb(ui::ACCENT))
+            .border_color(rgb(ui::colors().accent))
             .child(
                 div()
                     .flex()
@@ -505,7 +512,7 @@ impl DatabaseView {
                     )
                     .child(
                         div()
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .text_size(px(11.))
                             .child(column.data_type.clone()),
                     )
@@ -533,7 +540,9 @@ impl DatabaseView {
                                 ButtonStyle::Neutral,
                             )
                             .when(edit.mode == mode, |button| {
-                                button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                                button
+                                    .bg(rgb(ui::colors().selected))
+                                    .text_color(rgb(ui::colors().accent))
                             })
                             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                                 window.prevent_default();
@@ -560,7 +569,7 @@ impl DatabaseView {
                 )
             })
             .when(edit.mode != CellMode::Value, |body| {
-                body.child(div().flex_1().text_color(rgb(ui::MUTED)).child(
+                body.child(div().flex_1().text_color(rgb(ui::colors().muted)).child(
                     if edit.mode == CellMode::Null {
                         "NULL"
                     } else {
@@ -616,7 +625,7 @@ impl DatabaseView {
             let mut item = div()
                 .py_2()
                 .border_b_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .child(div().font_weight(gpui::FontWeight::MEDIUM).child(format!(
                     "{} · {}",
                     tr(label),
@@ -679,7 +688,7 @@ impl DatabaseView {
                     .child(
                         div()
                             .mt_3()
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .text_size(px(11.))
                             .child(tr(i18n_key::DATABASE_SQL_PREVIEW)),
                     )
@@ -701,7 +710,7 @@ impl DatabaseView {
                     .justify_end()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         super::super::render::action(
                             "back-to-table",

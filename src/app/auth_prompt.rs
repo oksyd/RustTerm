@@ -209,9 +209,9 @@ impl Render for AuthPrompt {
             .flex()
             .flex_col()
             .gap_3()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded_lg()
             .child(
                 div()
@@ -228,7 +228,7 @@ impl Render for AuthPrompt {
         if !pending.challenge.instructions.is_empty() {
             card = card.child(
                 div()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(pending.challenge.instructions.clone()),
             );
         }
@@ -236,7 +236,7 @@ impl Render for AuthPrompt {
             card = card.child(div().child(prompt.label.clone()).child(input.clone()));
         }
         if let Some(error) = self.error {
-            card = card.child(div().text_color(rgb(ui::DANGER)).child(tr(error)));
+            card = card.child(div().text_color(rgb(ui::colors().danger)).child(tr(error)));
         }
         card = card.child(
             div()

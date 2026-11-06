@@ -462,16 +462,16 @@ impl RenderOnce for Scrollbars {
                         .as_ref()
                         .is_some_and(|drag| drag.axis == bar.axis);
                     let hovered = current.hover == Some(bar.axis);
-                    window.paint_quad(fill(bar.track, rgb(super::SURFACE)));
+                    window.paint_quad(fill(bar.track, rgb(super::colors().surface)));
                     window.paint_quad(
                         fill(
                             bar.thumb_bounds(),
                             rgb(if dragging {
-                                super::ACCENT
+                                super::colors().accent
                             } else if hovered {
-                                super::MUTED
+                                super::colors().muted
                             } else {
-                                super::FAINT
+                                super::colors().faint
                             }),
                         )
                         .corner_radii(px(3.)),

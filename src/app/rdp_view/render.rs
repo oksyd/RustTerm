@@ -29,9 +29,9 @@ impl Render for RdpView {
             .items_center()
             .gap(px(8.))
             .px(px(8.))
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, _| this.focus.focus(window)),
@@ -49,7 +49,9 @@ impl Render for RdpView {
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .when(self.zoom == Zoom::Fit, |button| {
-                        button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                        button
+                            .bg(rgb(ui::colors().selected))
+                            .text_color(rgb(ui::colors().accent))
                     })
                     .tooltip(|_, cx| {
                         cx.new(|_| {
@@ -86,7 +88,7 @@ impl Render for RdpView {
                         i18n_key::WORKSPACE_ENTER_FULLSCREEN
                     },
                 )
-                .when(fullscreen, |button| button.bg(rgb(ui::SELECTED)))
+                .when(fullscreen, |button| button.bg(rgb(ui::colors().selected)))
                 .tab_index(0)
                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                     window.prevent_default();
@@ -227,11 +229,11 @@ impl Render for RdpView {
                 .px(px(8.))
                 .py(px(5.))
                 .rounded(px(3.))
-                .bg(rgb(ui::SURFACE))
+                .bg(rgb(ui::colors().surface))
                 .cursor(CursorStyle::Arrow)
                 .occlude()
                 .text_size(px(13.))
-                .text_color(rgb(ui::TEXT))
+                .text_color(rgb(ui::colors().text))
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .child(self.preedit.clone());
             for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
@@ -250,8 +252,8 @@ impl Render for RdpView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(ui::BG))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().bg))
+            .text_color(rgb(ui::colors().text))
             .text_size(px(13.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
@@ -279,7 +281,9 @@ impl RdpView {
             i18n_key::RDP_REMOTE_DESKTOP_ACTIONS,
         )
         .tab_index(0)
-        .when(self.menu_open, |button| button.bg(rgb(ui::SELECTED)))
+        .when(self.menu_open, |button| {
+            button.bg(rgb(ui::colors().selected))
+        })
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -294,35 +298,37 @@ impl RdpView {
             .error
             .as_ref()
             .filter(|_| self.state == State::Connected)
-            .map(|error| (error.render(), ui::DANGER, true))
+            .map(|error| (error.render(), ui::colors().danger, true))
             .or_else(|| match &self.clipboard.feedback {
-                Some(feedback @ Feedback::Rejected(_)) => Some((feedback.text(), ui::DANGER, true)),
+                Some(feedback @ Feedback::Rejected(_)) => {
+                    Some((feedback.text(), ui::colors().danger, true))
+                }
                 _ => None,
             })
             .or_else(|| {
                 self.notice
-                    .map(|notice| (tr(notice).to_owned(), ui::MUTED, true))
+                    .map(|notice| (tr(notice).to_owned(), ui::colors().muted, true))
             })
             .or_else(|| {
                 self.incoming_files
                     .as_ref()
-                    .map(|transfer| (transfer.text(), ui::MUTED, false))
+                    .map(|transfer| (transfer.text(), ui::colors().muted, false))
             })
             .or_else(|| {
                 self.file_transfer
                     .as_ref()
                     .filter(|transfer| transfer.available && transfer.bytes_sent > 0)
-                    .map(|transfer| (transfer.text(), ui::MUTED, false))
+                    .map(|transfer| (transfer.text(), ui::colors().muted, false))
             })
             .or_else(|| {
                 self.clipboard.feedback.as_ref().map(|feedback| {
                     let color = match feedback {
                         Feedback::ReadingFiles | Feedback::Waiting | Feedback::Requesting => {
-                            ui::MUTED
+                            ui::colors().muted
                         }
-                        Feedback::RemoteEmpty => ui::WARNING,
-                        Feedback::RemoteReady => ui::ACCENT,
-                        _ => ui::TEXT,
+                        Feedback::RemoteEmpty => ui::colors().warning,
+                        Feedback::RemoteReady => ui::colors().accent,
+                        _ => ui::colors().text,
                     };
                     (feedback.text(), color, true)
                 })
@@ -333,7 +339,7 @@ impl RdpView {
             if self.state == State::Connected {
                 (tr(control_label).to_owned(), control_color, false)
             } else {
-                (self.title.clone(), ui::MUTED, false)
+                (self.title.clone(), ui::colors().muted, false)
             }
         });
         let tooltip = if has_feedback {
@@ -413,7 +419,7 @@ impl RdpView {
                     div()
                         .flex_shrink_0()
                         .font_family(ui::MONOSPACE_FONT)
-                        .text_color(rgb(ui::MUTED))
+                        .text_color(rgb(ui::colors().muted))
                         .child(resolution),
                 )
             })
@@ -634,7 +640,7 @@ impl RdpView {
             .justify_center()
             .gap(px(12.))
             .p(px(20.))
-            .bg(rgb(ui::BG))
+            .bg(rgb(ui::colors().bg))
             .cursor(CursorStyle::Arrow)
             .child(
                 ui::icon(Icon::Desktop)
@@ -650,7 +656,7 @@ impl RdpView {
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(detail)),
             )
             .when_some(self.error.as_ref(), |d, error| {
@@ -658,7 +664,7 @@ impl RdpView {
                     div()
                         .max_w(px(520.))
                         .text_size(px(12.))
-                        .text_color(rgb(ui::DANGER))
+                        .text_color(rgb(ui::colors().danger))
                         .child(error.render()),
                 )
             })

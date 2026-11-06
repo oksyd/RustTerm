@@ -712,3 +712,6 @@ connections-zmodem-output-timed-out = ZMODEM 输出超时
 connections-zmodem-reception-exceeded-the-limit-of-64-files-or-4 = ZMODEM 接收超出每批 64 个文件 / 4 GiB 限制
 
 connections-zmodem-timed-out-waiting-for-the-remote-host = ZMODEM 等待远端超时
+
+connections-group-parent-missing = 分组引用的上级分组不存在。
+connections-group-cycle = 不能将分组放入自身或其子组中。

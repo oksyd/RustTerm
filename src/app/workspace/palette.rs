@@ -588,9 +588,9 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_2()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded_lg();
         if let Some(editing) = self.palette.editing {
             card = card
@@ -663,14 +663,14 @@ impl Workspace {
                             .py_2()
                             .cursor_pointer()
                             .when(index == self.palette.selected, |row| {
-                                row.bg(rgb(ui::SELECTED))
+                                row.bg(rgb(ui::colors().selected))
                             })
-                            .hover(|row| row.bg(rgb(ui::HOVER)))
+                            .hover(|row| row.bg(rgb(ui::colors().hover)))
                             .child(div().flex_1().min_w_0().truncate().child(item.label))
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(ui::MUTED))
+                                    .text_color(rgb(ui::colors().muted))
                                     .child(item.detail),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -681,7 +681,11 @@ impl Workspace {
             );
         }
         if let Some(error) = &self.error {
-            card = card.child(div().text_color(rgb(ui::DANGER)).child(error.render()));
+            card = card.child(
+                div()
+                    .text_color(rgb(ui::colors().danger))
+                    .child(error.render()),
+            );
         }
         div()
             .track_focus(&self.palette.focus)

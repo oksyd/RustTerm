@@ -87,9 +87,9 @@ impl DatabaseView {
                     .truncate()
                     .text_size(px(11.))
                     .text_color(rgb(match state {
-                        TransactionStatus::Idle => ui::MUTED,
-                        TransactionStatus::Active => ui::ACCENT,
-                        _ => ui::WARNING,
+                        TransactionStatus::Idle => ui::colors().muted,
+                        TransactionStatus::Active => ui::colors().accent,
+                        _ => ui::colors().warning,
                     }))
                     .child(tr(label)),
             )

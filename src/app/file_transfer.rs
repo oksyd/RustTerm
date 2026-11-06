@@ -1291,9 +1291,9 @@ impl FileTransferView {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 div()
                     .flex()
@@ -1363,7 +1363,7 @@ impl FileTransferView {
                             ButtonStyle::Danger,
                             any_item.is_none(),
                         )
-                        .text_color(rgb(ui::DANGER))
+                        .text_color(rgb(ui::colors().danger))
                         .when_some(any_item, |button, reason| {
                             button.tooltip(move |_, cx| {
                                 cx.new(|_| ui::Tooltip(tr(reason).into())).into()
@@ -1381,7 +1381,7 @@ impl FileTransferView {
                 div()
                     .p_2()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         text_button(
                             "disconnect-file-session",
@@ -1412,7 +1412,7 @@ impl FileTransferView {
             }),
             display_name(&entry.name),
             div()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .text_size(px(11.))
                 .child(if entry.is_symlink {
                     tr(i18n_key::TERMINAL_LINK)
@@ -1422,7 +1422,7 @@ impl FileTransferView {
                     tr(i18n_key::COMMON_FILE)
                 }),
             div()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .text_size(px(11.))
                 .child(if entry.is_dir {
                     "—".into()
@@ -1433,8 +1433,10 @@ impl FileTransferView {
         .id(("remote-file", index))
         .h(px(FILE_ROW_HEIGHT))
         .when(self.loading, |d| d.opacity(0.5))
-        .when(self.selected.contains(&index), |d| d.bg(rgb(ui::SELECTED)))
-        .hover(|s| s.bg(rgb(ui::HOVER)))
+        .when(self.selected.contains(&index), |d| {
+            d.bg(rgb(ui::colors().selected))
+        })
+        .hover(|s| s.bg(rgb(ui::colors().hover)))
         .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
@@ -1448,10 +1450,15 @@ impl FileTransferView {
     fn render_transfer(&self, row: &TransferRow, cx: &mut Context<Self>) -> AnyElement {
         let id = row.id;
         let (state, color) = if row.cancel_requested && !finished(&row.progress.state) {
-            (tr(i18n_key::TERMINAL_CANCELLING).to_owned(), ui::MUTED)
+            (
+                tr(i18n_key::TERMINAL_CANCELLING).to_owned(),
+                ui::colors().muted,
+            )
         } else {
             match &row.progress.state {
-                SftpTransferState::Queued => (tr(i18n_key::TERMINAL_QUEUED).to_owned(), ui::MUTED),
+                SftpTransferState::Queued => {
+                    (tr(i18n_key::TERMINAL_QUEUED).to_owned(), ui::colors().muted)
+                }
                 SftpTransferState::Running => (
                     match row.progress.total_bytes {
                         Some(total) => format!(
@@ -1461,17 +1468,19 @@ impl FileTransferView {
                         ),
                         None => format_bytes(row.progress.bytes_done),
                     },
-                    ui::ACCENT,
+                    ui::colors().accent,
                 ),
-                SftpTransferState::Completed => {
-                    (tr(i18n_key::TERMINAL_COMPLETED).to_owned(), ui::SUCCESS)
-                }
-                SftpTransferState::Cancelled => {
-                    (tr(i18n_key::TERMINAL_CANCELLED).to_owned(), ui::MUTED)
-                }
+                SftpTransferState::Completed => (
+                    tr(i18n_key::TERMINAL_COMPLETED).to_owned(),
+                    ui::colors().success,
+                ),
+                SftpTransferState::Cancelled => (
+                    tr(i18n_key::TERMINAL_CANCELLED).to_owned(),
+                    ui::colors().muted,
+                ),
                 SftpTransferState::Failed(error) => (
                     rustterm::trf!(i18n_key::SFTP_FAILED_ERROR, error = error),
-                    ui::DANGER,
+                    ui::colors().danger,
                 ),
             }
         };
@@ -1484,7 +1493,7 @@ impl FileTransferView {
             .items_center()
             .gap(px(8.))
             .px(px(10.))
-            .child(div().w(px(32.)).text_color(rgb(ui::MUTED)).child(
+            .child(div().w(px(32.)).text_color(rgb(ui::colors().muted)).child(
                 if row.direction == Direction::Upload {
                     tr(i18n_key::TERMINAL_UPLOAD)
                 } else {
@@ -1602,7 +1611,7 @@ impl Render for FileTransferView {
             .items_center()
             .gap(px(6.))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(
                 ui::icon_button_enabled(
                     "remote-parent",
@@ -1687,7 +1696,9 @@ impl Render for FileTransferView {
                 .tab_index(0)
                 .flex_shrink_0()
                 .when(self.follow_directory, |button| {
-                    button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                    button
+                        .bg(rgb(ui::colors().selected))
+                        .text_color(rgb(ui::colors().accent))
                 })
                 .tooltip({
                     let label = if self.follow_directory {
@@ -1710,7 +1721,9 @@ impl Render for FileTransferView {
                     i18n_key::WORKSPACE_MORE_FILE_ACTIONS,
                 )
                 .tab_index(0)
-                .when(self.actions_open, |button| button.bg(rgb(ui::SELECTED)))
+                .when(self.actions_open, |button| {
+                    button.bg(rgb(ui::colors().selected))
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.actions_open = !this.actions_open;
                     cx.notify();
@@ -1726,10 +1739,10 @@ impl Render for FileTransferView {
         .h(px(24.))
         .flex_shrink_0()
         .text_size(px(10.))
-        .text_color(rgb(ui::MUTED))
-        .bg(rgb(ui::SURFACE))
+        .text_color(rgb(ui::colors().muted))
+        .bg(rgb(ui::colors().surface))
         .border_y_1()
-        .border_color(rgb(ui::BORDER));
+        .border_color(rgb(ui::colors().border));
         let mut panel = div()
             .id("sftp-files")
             .size_full()
@@ -1738,8 +1751,8 @@ impl Render for FileTransferView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(rgb(ui::SURFACE))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().surface))
+            .text_color(rgb(ui::colors().text))
             .text_size(px(12.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
@@ -1769,7 +1782,7 @@ impl Render for FileTransferView {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .bg(rgb(ui::SURFACE))
+                    .bg(rgb(ui::colors().surface))
                     .child(
                         if matches!(editor.action, NameAction::CreateDirectory { .. }) {
                             tr(i18n_key::TERMINAL_FOLDER_NAME)
@@ -1800,7 +1813,7 @@ impl Render for FileTransferView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(if self.loading {
                         tr(i18n_key::TERMINAL_LOADING_FILES)
                     } else if !self.directory_ready {
@@ -1851,8 +1864,8 @@ impl Render for FileTransferView {
                     .items_center()
                     .justify_between()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
-                    .bg(rgb(ui::SURFACE))
+                    .border_color(rgb(ui::colors().border))
+                    .bg(rgb(ui::colors().surface))
                     .text_size(px(11.))
                     .child(rustterm::trf!(
                         i18n_key::SFTP_TRANSFER_ITEM_COUNT,
@@ -1921,7 +1934,7 @@ impl Render for FileTransferView {
                     .px(px(10.))
                     .py(px(6.))
                     .flex_shrink_0()
-                    .text_color(rgb(ui::DANGER))
+                    .text_color(rgb(ui::colors().danger))
                     .child(error.render()),
             );
         } else if let Some(notice) = &self.notice {
@@ -1930,7 +1943,7 @@ impl Render for FileTransferView {
                     .px(px(10.))
                     .py(px(4.))
                     .flex_shrink_0()
-                    .text_color(rgb(ui::SUCCESS))
+                    .text_color(rgb(ui::colors().success))
                     .child(notice.render()),
             );
         }
@@ -1943,9 +1956,9 @@ impl Render for FileTransferView {
                 .items_center()
                 .justify_between()
                 .border_t_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .text_size(px(10.))
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(div().flex_1().min_w_0().truncate().child(if self.mutating {
                     tr(i18n_key::TERMINAL_PROCESSING_FILE_OPERATION).into()
                 } else {

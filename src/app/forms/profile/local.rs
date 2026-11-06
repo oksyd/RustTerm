@@ -97,8 +97,8 @@ impl ProfileForm {
                                 )
                                 .tab_index(0)
                                 .border_1()
-                                .border_color(rgb(ui::BORDER))
-                                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                                .border_color(rgb(ui::colors().border))
+                                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         let index = this
@@ -129,8 +129,8 @@ impl ProfileForm {
                                 self.arguments.len() < MAX_ARGUMENTS,
                             )
                             .border_1()
-                            .border_color(rgb(ui::BORDER))
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .border_color(rgb(ui::colors().border))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.add_argument(window, cx)),
                             ),
@@ -160,8 +160,8 @@ impl ProfileForm {
                                 )
                                 .tab_index(0)
                                 .border_1()
-                                .border_color(rgb(ui::BORDER))
-                                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                                .border_color(rgb(ui::colors().border))
+                                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                                 .on_click(cx.listener(
                                     move |this, _, window, cx| {
                                         let index = this
@@ -194,8 +194,8 @@ impl ProfileForm {
                                 self.environment.len() < MAX_ENVIRONMENT,
                             )
                             .border_1()
-                            .border_color(rgb(ui::BORDER))
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .border_color(rgb(ui::colors().border))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.add_environment(window, cx)),
                             ),

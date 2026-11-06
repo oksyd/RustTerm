@@ -60,9 +60,9 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .bg(rgb(ui::RAISED))
+                .bg(rgb(ui::colors().raised))
                 .border_1()
-                .border_color(rgb(ui::BORDER))
+                .border_color(rgb(ui::colors().border))
                 .rounded(px(6.))
                 .shadow_md()
                 .occlude()
@@ -80,9 +80,9 @@ impl Workspace {
                                 .truncate()
                                 .text_size(px(11.))
                                 .text_color(rgb(if notice.command.exit_status == Some(0) {
-                                    ui::SUCCESS
+                                    ui::colors().success
                                 } else {
-                                    ui::WARNING
+                                    ui::colors().warning
                                 }))
                                 .child(label),
                         )

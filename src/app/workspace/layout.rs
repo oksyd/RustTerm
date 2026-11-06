@@ -382,9 +382,9 @@ impl Workspace {
             .w(px(5.))
             .h_full()
             .flex_shrink_0()
-            .bg(rgb(ui::BG))
+            .bg(rgb(ui::colors().bg))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|style| style.bg(rgb(ui::ACCENT)))
+            .hover(|style| style.bg(rgb(ui::colors().accent)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, cx| {
@@ -404,9 +404,9 @@ impl Workspace {
             .items_center()
             .overflow_x_scroll()
             .map(ui::preserve_scroll_axes)
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_b_1()
-            .border_color(rgb(ui::BORDER));
+            .border_color(rgb(ui::colors().border));
         if let Some(tab) = self.tabs.get(self.active) {
             for id in tab.layout.leaves() {
                 let profile = &self.pane_profiles[&id];
@@ -424,12 +424,13 @@ impl Workspace {
                         .items_center()
                         .cursor_pointer()
                         .text_size(px(12.))
-                        .text_color(rgb(ui::MUTED))
+                        .text_color(rgb(ui::colors().muted))
                         .when(id == self.focused, |d| {
-                            d.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                            d.bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().accent))
                         })
-                        .focus(|d| d.bg(rgb(ui::SELECTED)))
-                        .hover(|d| d.bg(rgb(ui::HOVER)))
+                        .focus(|d| d.bg(rgb(ui::colors().selected)))
+                        .hover(|d| d.bg(rgb(ui::colors().hover)))
                         .child(ui::icon(glyph))
                         .child(
                             div()
@@ -518,8 +519,8 @@ impl Workspace {
                         div()
                             .id(("divider", id))
                             .flex_shrink_0()
-                            .bg(rgb(0x14151a))
-                            .hover(|s| s.bg(rgb(ui::ACCENT)))
+                            .bg(rgb(ui::colors().bg))
+                            .hover(|s| s.bg(rgb(ui::colors().accent)))
                             .when(axis == Axis::Horizontal, |d| {
                                 d.w(px(5.)).h_full().cursor(CursorStyle::ResizeLeftRight)
                             })

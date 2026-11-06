@@ -378,7 +378,7 @@ impl ProfileForm {
                 .on_click(cx.listener(|this, _, _, cx| this.import_ssh(cx))),
             )
             .when_some(self.ssh_import_error.clone(), |body, error| {
-                body.child(div().text_color(rgb(ui::DANGER)).child(error.render()))
+                body.child(div().text_color(rgb(ui::colors().danger)).child(error.render()))
             })
             .when(self.ssh_auth == SshAuthentication::Agent, |body| {
                 body.child(self.fields.selected_rows(&[i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL]))
@@ -406,8 +406,8 @@ impl ProfileForm {
                         )
                         .tab_index(0)
                         .border_1()
-                        .border_color(rgb(ui::BORDER))
-                        .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                        .border_color(rgb(ui::colors().border))
+                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 if this.native_pending || this.prompts.is_blocked() {
@@ -454,14 +454,14 @@ impl ProfileForm {
                                 !self.native_pending,
                             )
                             .border_1()
-                            .border_color(rgb(ui::BORDER))
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .border_color(rgb(ui::colors().border))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(cx.listener(|this, _, _, cx| this.choose_key(cx))),
                         ),
                 ))
             })
             .when_some(self.picker_error, |body, error| {
-                body.child(div().text_color(rgb(ui::DANGER)).child(tr(error)))
+                body.child(div().text_color(rgb(ui::colors().danger)).child(tr(error)))
             })
             .child(self.credential_editor(cx))
             .child(
@@ -471,7 +471,7 @@ impl ProfileForm {
                     .items_center()
                     .gap_1()
                     .cursor_pointer()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(ui::icon(if self.advanced {
                         Icon::ChevronDown
                     } else {
@@ -480,8 +480,8 @@ impl ProfileForm {
                     .child(tr(i18n_key::CONNECTIONS_ADVANCED_SSH_SETTINGS))
                     .tab_index(0)
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
-                    .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                    .border_color(rgb(ui::colors().border))
+                    .focus(|style| style.border_color(rgb(ui::colors().accent)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.advanced
                             && this
@@ -509,8 +509,8 @@ impl ProfileForm {
                         .cursor_pointer()
                         .tab_index(0)
                         .border_1()
-                        .border_color(rgb(ui::BORDER))
-                        .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                        .border_color(rgb(ui::colors().border))
+                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
                         .child(
                             div()
                                 .size(px(14.))
@@ -520,12 +520,12 @@ impl ProfileForm {
                                 .border_1()
                                 .rounded(px(2.))
                                 .border_color(rgb(if self.shell_integration {
-                                    ui::ACCENT
+                                    ui::colors().accent
                                 } else {
-                                    ui::BORDER
+                                    ui::colors().border
                                 }))
                                 .when(self.shell_integration, |checkbox| {
-                                    checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::ACCENT)))
+                                    checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
                                 }),
                         )
                         .child(tr(i18n_key::CONNECTIONS_LOAD_SHELL_INTEGRATION_AUTOMATICALLY))

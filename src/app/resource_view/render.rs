@@ -25,7 +25,7 @@ impl Render for ResourceView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .text_color(rgb(ui::WARNING))
+                    .text_color(rgb(ui::colors().warning))
                     .child(self.error.clone().unwrap_or_else(|| {
                         tr(i18n_key::RESOURCES_RESOURCE_INFORMATION_IS_UNAVAILABLE).into()
                     }))
@@ -43,7 +43,7 @@ impl Render for ResourceView {
             body = body.child(
                 div()
                     .py_4()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::RESOURCES_CONNECTION_DISCONNECTED)),
             );
         } else {
@@ -60,8 +60,8 @@ impl Render for ResourceView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui::RAISED))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().raised))
+            .text_color(rgb(ui::colors().text))
             .text_size(px(12.))
             .track_focus(&self.focus)
             .on_mouse_down(
@@ -96,7 +96,7 @@ impl ResourceView {
             .px_4()
             .py_2()
             .text_size(px(11.))
-            .text_color(rgb(ui::MUTED))
+            .text_color(rgb(ui::colors().muted))
             .child(tr(match self.state {
                 ResourceState::Loading => i18n_key::RESOURCES_COLLECTING,
                 ResourceState::Live => i18n_key::RESOURCES_UPDATED_JUST_NOW,
@@ -129,7 +129,7 @@ impl ResourceView {
                 .child(sparkline(
                     vec![(
                         self.trend.iter().map(|point| point.cpu).collect(),
-                        ui::ACCENT,
+                        ui::colors().accent,
                     )],
                     Some(100.),
                     0.,
@@ -207,7 +207,7 @@ impl ResourceView {
                     "↓ {}",
                     rate(network.and_then(|network| network.rx_bytes_per_sec))
                 )),
-                div().text_color(rgb(ui::ACCENT)).child(format!(
+                div().text_color(rgb(ui::colors().accent)).child(format!(
                     "↑ {}",
                     rate(network.and_then(|network| network.tx_bytes_per_sec))
                 )),
@@ -221,7 +221,7 @@ impl ResourceView {
                     ),
                     (
                         self.trend.iter().map(|point| point.sent).collect(),
-                        ui::ACCENT,
+                        ui::colors().accent,
                     ),
                 ],
                 None,
@@ -248,10 +248,10 @@ impl ResourceView {
                     .py_1()
                     .rounded_sm()
                     .when(self.network.as_ref() == Some(&name), |row| {
-                        row.bg(rgb(ui::SELECTED))
+                        row.bg(rgb(ui::colors().selected))
                     })
                     .cursor_pointer()
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
                     .tab_index(0)
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.select_network(name.clone(), cx)),
@@ -274,7 +274,7 @@ impl ResourceView {
             label(i18n_key::RESOURCES_DISK_SPACE),
             div()
                 .text_size(px(10.))
-                .text_color(rgb(ui::WARNING))
+                .text_color(rgb(ui::colors().warning))
                 .child(if low_space {
                     tr(i18n_key::RESOURCES_LOW_DISK_SPACE)
                 } else {
@@ -288,9 +288,9 @@ impl ResourceView {
         }
         for (index, disk) in disks.iter().enumerate() {
             let color = if disk.used_percent >= 95. {
-                ui::DANGER
+                ui::colors().danger
             } else if disk.used_percent >= 90. {
-                ui::WARNING
+                ui::colors().warning
             } else {
                 MEMORY
             };
@@ -314,7 +314,7 @@ fn section() -> Div {
         .flex_col()
         .gap_2()
         .border_b_1()
-        .border_color(rgb(ui::BORDER))
+        .border_color(rgb(ui::colors().border))
 }
 
 fn label(text: &'static str) -> Div {
@@ -324,7 +324,7 @@ fn label(text: &'static str) -> Div {
 fn detail(text: String) -> Div {
     div()
         .text_size(px(10.))
-        .text_color(rgb(ui::MUTED))
+        .text_color(rgb(ui::colors().muted))
         .child(text)
 }
 
@@ -343,7 +343,7 @@ fn meter(value: Option<f64>, color: u32) -> Div {
         .h(px(4.))
         .w_full()
         .rounded_sm()
-        .bg(rgb(ui::BORDER))
+        .bg(rgb(ui::colors().border))
         .when_some(value, |bar, value| {
             bar.child(
                 div()

@@ -31,7 +31,7 @@ impl RedisView {
             .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .child(
                 div()
                     .h(px(40.))
@@ -49,7 +49,7 @@ impl RedisView {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .text_size(px(11.))
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .child(rustterm::trf!(
                                 i18n_key::REDIS_BATCH_COUNT,
                                 count = self.keys.len()
@@ -106,7 +106,11 @@ impl RedisView {
                                 .unwrap_or(i18n_key::REDIS_SCAN_KEYS_ENTER),
                             enabled,
                         )
-                        .focus(|style| style.bg(rgb(ui::SELECTED)).text_color(rgb(ui::TEXT)))
+                        .focus(|style| {
+                            style
+                                .bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().text))
+                        })
                         .on_click(cx.listener(|this, _, _, cx| this.search(cx))),
                     ),
             );
@@ -116,7 +120,7 @@ impl RedisView {
                     .flex_1()
                     .min_h_0()
                     .p(px(12.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .text_size(px(11.))
                     .child(tr(if self.busy.is_some() {
                         i18n_key::REDIS_SCANNING_KEYS
@@ -172,7 +176,7 @@ impl RedisView {
                     .items_center()
                     .justify_between()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         text_button_enabled(
                             "redis-prev-keys",
@@ -188,7 +192,11 @@ impl RedisView {
                                 cx.new(|_| ui::Tooltip(tr(reason).into())).into()
                             })
                         })
-                        .focus(|style| style.bg(rgb(ui::SELECTED)).text_color(rgb(ui::TEXT)))
+                        .focus(|style| {
+                            style
+                                .bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().text))
+                        })
                         .on_click(cx.listener(|this, _, _, cx| this.page_keys(false, cx))),
                     )
                     .child(
@@ -208,7 +216,11 @@ impl RedisView {
                                 cx.new(|_| ui::Tooltip(tr(reason).into())).into()
                             })
                         })
-                        .focus(|style| style.bg(rgb(ui::SELECTED)).text_color(rgb(ui::TEXT)))
+                        .focus(|style| {
+                            style
+                                .bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().text))
+                        })
                         .on_click(cx.listener(|this, _, _, cx| this.page_keys(true, cx))),
                     ),
             )
@@ -224,7 +236,11 @@ impl RedisView {
                 selected || (index == 0 && self.selected_key.is_none()),
                 |d| d.tab_index(0),
             )
-            .focus(|style| style.bg(rgb(ui::SELECTED)).text_color(rgb(ui::TEXT)))
+            .focus(|style| {
+                style
+                    .bg(rgb(ui::colors().selected))
+                    .text_color(rgb(ui::colors().text))
+            })
             .h(px(34.))
             .w_full()
             .min_w_0()
@@ -234,9 +250,13 @@ impl RedisView {
             .gap(px(6.))
             .cursor_pointer()
             .border_l_2()
-            .border_color(rgb(if selected { ui::ACCENT } else { ui::SURFACE }))
-            .when(selected, |d| d.bg(rgb(ui::SELECTED)))
-            .hover(|d| d.bg(rgb(ui::HOVER)))
+            .border_color(rgb(if selected {
+                ui::colors().accent
+            } else {
+                ui::colors().surface
+            }))
+            .when(selected, |d| d.bg(rgb(ui::colors().selected)))
+            .hover(|d| d.bg(rgb(ui::colors().hover)))
             .child(
                 div()
                     .flex_1()
@@ -259,7 +279,7 @@ impl RedisView {
                             .flex_shrink_0()
                             .text_right()
                             .text_size(px(9.))
-                            .text_color(rgb(ui::ACCENT))
+                            .text_color(rgb(ui::colors().accent))
                             .child(super::render::kind_label(&info.kind).to_ascii_uppercase()),
                     )
                 })
@@ -332,9 +352,9 @@ impl RedisView {
             .flex()
             .items_center()
             .gap(px(if self.compact { 4. } else { 8. }))
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(ui::connection_address(
                 "redis-address",
                 Icon::Redis,
@@ -349,7 +369,7 @@ impl RedisView {
                     .items_center()
                     .gap(px(4.))
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::REDIS_DB))
                     .child(div().w(px(38.)).child(self.database_input.clone())),
             )
@@ -383,10 +403,13 @@ impl RedisView {
                     .rounded(px(3.))
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(ui::HOVER)))
+                    .hover(|d| d.bg(rgb(ui::colors().hover)))
                     .when(
                         self.console_open && self.ops.section == operations::Section::Keys,
-                        |d| d.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT)),
+                        |d| {
+                            d.bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().accent))
+                        },
                     )
                     .tooltip(|_, cx| {
                         cx.new(|_| ui::Tooltip(tr(i18n_key::REDIS_TOGGLE_REDIS_CONSOLE).to_owned()))
@@ -412,9 +435,9 @@ impl RedisView {
                     .rounded(px(3.))
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .hover(|d| d.bg(rgb(ui::HOVER)))
+                    .hover(|d| d.bg(rgb(ui::colors().hover)))
                     .when(self.menu == Some(RedisMenu::Section), |d| {
-                        d.bg(rgb(ui::SELECTED))
+                        d.bg(rgb(ui::colors().selected))
                     })
                     .tooltip(move |_, cx| {
                         cx.new(|_| {
@@ -446,7 +469,7 @@ impl RedisView {
                 )
                 .tab_index(0)
                 .when(self.menu == Some(RedisMenu::Pane), |d| {
-                    d.bg(rgb(ui::SELECTED))
+                    d.bg(rgb(ui::colors().selected))
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(
@@ -517,9 +540,9 @@ impl RedisView {
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.menu_scroll)
             .py(px(4.))
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(4.))
             .shadow_md()
             .occlude()
@@ -536,18 +559,18 @@ impl RedisView {
                     .items_center()
                     .gap(px(10.))
                     .text_color(rgb(if !enabled {
-                        ui::FAINT
+                        ui::colors().faint
                     } else if danger {
-                        ui::DANGER
+                        ui::colors().danger
                     } else {
-                        ui::TEXT
+                        ui::colors().text
                     }))
                     .when(enabled, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::HOVER)))
+                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::colors().hover)))
                     })
-                    .when(enabled, |d| d.focus(|s| s.bg(rgb(ui::SELECTED))))
+                    .when(enabled, |d| d.focus(|s| s.bg(rgb(ui::colors().selected))))
                     .when(enabled && index == self.menu_index, |d| {
-                        d.bg(rgb(ui::SELECTED))
+                        d.bg(rgb(ui::colors().selected))
                     })
                     .when(!enabled, |button| {
                         let reason = self.disabled_reason().unwrap_or(match action {
@@ -562,9 +585,9 @@ impl RedisView {
                             .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tr(reason).into())).into())
                     })
                     .child(icon(glyph).text_color(rgb(if danger && enabled {
-                        ui::DANGER
+                        ui::colors().danger
                     } else {
-                        ui::MUTED
+                        ui::colors().muted
                     })))
                     .child(tr(label))
                     .on_click(cx.listener(move |this, _, window, cx| {

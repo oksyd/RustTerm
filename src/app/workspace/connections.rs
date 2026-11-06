@@ -390,7 +390,7 @@ impl Workspace {
             if stale {
                 self.error =
                     Some(i18n_key::WORKSPACE_THE_TARGET_PANE_WAS_CLOSED_OR_IS_TOO_SMALL_THE.into());
-                self.dismiss_modal();
+                self.dismiss_modal(cx);
                 self.restore_popup_focus(window, cx);
                 cx.notify();
                 return;
@@ -432,7 +432,7 @@ impl Workspace {
             options.authentication = Some(self.window_state.authentication.clone());
             options
         });
-        self.dismiss_modal();
+        self.dismiss_modal(cx);
         self.popup_return_focus = None;
         match &profile.connection {
             Connection::Ssh(config) => {
@@ -727,7 +727,7 @@ impl Workspace {
             return;
         }
         self.remember_popup_focus(window, cx);
-        self.dismiss_modal();
+        self.dismiss_modal(cx);
         self.modal = Some(Modal::Loading);
         self.modal_focus.focus(window);
         let generation = self.modal_generation;
@@ -748,7 +748,7 @@ impl Workspace {
                         Ok(hosts) => this.modal = Some(Modal::Trust(hosts)),
                         Err(error) => {
                             this.error = Some(Message::from_error(error));
-                            this.dismiss_modal();
+                            this.dismiss_modal(cx);
                             this.restore_popup_focus(window, cx);
                         }
                     }

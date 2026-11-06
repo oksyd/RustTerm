@@ -113,9 +113,12 @@ impl Workspace {
             _ => false,
         }
     }
-    pub(super) fn dismiss_modal(&mut self) {
+    pub(super) fn dismiss_modal(&mut self, cx: &mut Context<Self>) {
         self.cancel_profile_test();
         self.clear_recovery_credentials();
+        // Theme selection is a visual preview. A successful save updates the
+        // config first; every other dismissal restores the committed choice.
+        crate::app::ui::set_theme(self.config.settings.app_theme, cx);
         self.modal = None;
         self.modal_observer = None;
         self.update_restart_subscription = None;
@@ -311,7 +314,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.dismiss_modal();
+        self.dismiss_modal(cx);
         self.error = self.last_save_error.clone();
         self.restore_popup_focus(window, cx);
         if matches!(action, LeaveAction::Exit) {
@@ -336,7 +339,11 @@ impl Workspace {
                 settings.files_width = config.settings.files_width;
                 config.settings = settings;
             }
-            Some(Modal::Group { editing, fields }) => {
+            Some(Modal::Group {
+                editing,
+                parent,
+                fields,
+            }) => {
                 let name = fields.get(i18n_key::WORKSPACE_GROUP_NAME, cx);
                 if let Some(id) = editing {
                     let group = config
@@ -348,7 +355,9 @@ impl Workspace {
                         })?;
                     group.name = name;
                 } else {
-                    config.groups.push(Group::new(name));
+                    let mut group = Group::new(name);
+                    group.parent = *parent;
+                    config.groups.push(group);
                 }
             }
             _ => anyhow::bail!(tr(i18n_key::WORKSPACE_THERE_IS_NO_EDITABLE_FORM_OPEN)),
@@ -527,6 +536,7 @@ impl Workspace {
                             updates.configure(&this.config.settings, cx)
                         });
                         set_language(this.config.settings.language);
+                        crate::app::ui::set_theme(this.config.settings.app_theme, cx);
                         Session::set_global_history_budget(
                             this.config.settings.global_history_bytes,
                         );
@@ -684,9 +694,7 @@ impl Workspace {
         let response = window.prompt(
             PromptLevel::Warning,
             tr(i18n_key::WORKSPACE_DELETE_GROUP_CONFIRMATION),
-            Some(tr(
-                i18n_key::WORKSPACE_PROFILES_IN_THIS_GROUP_WILL_BECOME_UNGROUPED_CONNECTIONS_WILL_REMAIN,
-            )),
+            Some(tr(i18n_key::WORKSPACE_DELETE_GROUP_KEEP_CHILDREN)),
             &[tr(i18n_key::COMMON_CANCEL), tr(i18n_key::COMMON_DELETE)],
             cx,
         );
@@ -699,12 +707,8 @@ impl Workspace {
                     if !valid {
                         return;
                     }
-                    this.config.groups.retain(|g| g.id != id);
-                    for p in &mut this.config.profiles {
-                        if p.group == Some(id) {
-                            p.group = None;
-                        }
-                    }
+                    this.config.remove_group(id);
+                    this.collapsed.remove(&id);
                     this.save(cx);
                     cx.notify();
                 });

@@ -53,7 +53,7 @@ impl Render for TunnelPanel {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(tr(i18n_key::CONNECTIONS_PORT_FORWARDING_RULES_ARE_SAVED_IN_THE_SSH_CONNECTION_PROFILE))
                 .child(tr(i18n_key::CONNECTIONS_PORT_FORWARDING_USES_A_SEPARATE_SSH_CONNECTION_AND_MAY_REQUIRE)),
         );
@@ -79,7 +79,7 @@ impl Render for TunnelPanel {
                     .gap_2()
                     .p_2()
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .rounded_sm()
                     .child(
                         div()
@@ -96,7 +96,11 @@ impl Render for TunnelPanel {
                             )
                             .child(
                                 div()
-                                    .text_color(rgb(if failed { ui::DANGER } else { ui::MUTED }))
+                                    .text_color(rgb(if failed {
+                                        ui::colors().danger
+                                    } else {
+                                        ui::colors().muted
+                                    }))
                                     .child(label),
                             ),
                     )
@@ -129,7 +133,11 @@ impl Render for TunnelPanel {
             );
         }
         if let Some(error) = &self.error {
-            body = body.child(div().text_color(rgb(ui::DANGER)).child(error.clone()));
+            body = body.child(
+                div()
+                    .text_color(rgb(ui::colors().danger))
+                    .child(error.clone()),
+            );
         }
         body
     }

@@ -239,7 +239,7 @@ impl ProfileForm {
             }
         }
         if self.credentials.cleared_on_lock && self.credentials.input.read(cx).value().is_empty() {
-            body = body.child(div().text_color(rgb(ui::WARNING)).child(tr(
+            body = body.child(div().text_color(rgb(ui::colors().warning)).child(tr(
                 i18n_key::CONNECTIONS_THE_PASSWORD_WAS_CLEARED_WHEN_RUSTTERM_LOCKED_RE_ENTER_IT,
             )));
         }

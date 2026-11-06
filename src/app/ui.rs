@@ -4,6 +4,8 @@
 use rustterm::i18n::messages as i18n_key;
 mod scroll_area;
 mod scrollbar;
+mod theme;
+pub use theme::{Colors, colors, set_theme};
 
 pub use scroll_area::scrollable;
 pub use scrollbar::{
@@ -26,23 +28,6 @@ pub fn preserve_scroll_axes<E: Styled>(mut element: E) -> E {
     element
 }
 
-pub const BG: u32 = 0x1c1e22;
-pub const CHROME: u32 = 0x202226;
-pub const SURFACE: u32 = 0x23252a;
-pub const RAISED: u32 = 0x292c32;
-pub const BORDER: u32 = 0x343840;
-pub const TEXT: u32 = 0xe3e5ea;
-pub const MUTED: u32 = 0xa3a8b3;
-pub const FAINT: u32 = 0x828995;
-pub const ACCENT: u32 = 0xb5b8eb;
-pub const BRAND: u32 = 0xd98c66;
-pub const SUCCESS: u32 = 0xa7c99c;
-pub const WARNING: u32 = 0xe0b681;
-pub const DANGER: u32 = 0xe39b9e;
-pub const HOVER: u32 = 0x2e3138;
-pub const SELECTED: u32 = 0x343644;
-pub const STATUS: u32 = CHROME;
-pub const INPUT: u32 = BG;
 // GPUI resolves font family names literally; CSS's generic "monospace" is not
 // a portable font selection on the Linux text system.
 pub const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
@@ -142,14 +127,13 @@ impl Icon {
         }
     }
 
-    const fn color(self) -> u32 {
+    fn color(self) -> u32 {
         match self {
-            Self::Redis => 0xd99191,
-            Self::Mysql => 0xd9b382,
-            Self::Postgres => 0x91b5df,
-            Self::Sqlite => 0x9fcac4,
-            Self::Desktop => 0xa9c7c0,
-            _ => MUTED,
+            Self::Redis => colors().danger,
+            Self::Mysql => colors().warning,
+            Self::Postgres => colors().blue,
+            Self::Sqlite | Self::Desktop => colors().teal,
+            _ => colors().muted,
         }
     }
 }
@@ -191,8 +175,8 @@ pub enum ButtonStyle {
 impl ButtonStyle {
     fn hover_colors(self) -> (u32, u32) {
         match self {
-            Self::Neutral => (HOVER, TEXT),
-            Self::Primary => (0xc3c6ed, BG),
+            Self::Neutral => (colors().hover, colors().text),
+            Self::Primary => (colors().accent_hover, colors().on_accent),
             Self::Danger => (0x793e48, 0xffffff),
         }
     }
@@ -218,8 +202,8 @@ fn icon_button_control(
 ) -> Stateful<Div> {
     let (hover_bg, hover_fg) = style.hover_colors();
     let foreground = match style {
-        ButtonStyle::Primary => ACCENT,
-        _ => MUTED,
+        ButtonStyle::Primary => colors().accent,
+        _ => colors().muted,
     };
     div()
         .id(id)
@@ -299,12 +283,12 @@ fn text_button_control(
     enabled: bool,
 ) -> Stateful<Div> {
     let (hover_bg, hover_fg) = match style {
-        ButtonStyle::Neutral => (SELECTED, TEXT),
+        ButtonStyle::Neutral => (colors().selected, colors().text),
         _ => style.hover_colors(),
     };
     let (background, foreground) = match style {
-        ButtonStyle::Primary => (ACCENT, BG),
-        _ => (HOVER, TEXT),
+        ButtonStyle::Primary => (colors().accent, colors().on_accent),
+        _ => (colors().hover, colors().text),
     };
     div()
         .id(id)
@@ -357,7 +341,7 @@ pub fn connection_address(
                 .min_w_0()
                 .truncate()
                 .font_family(MONOSPACE_FONT)
-                .text_color(rgb(TEXT))
+                .text_color(rgb(colors().text))
                 .child(address),
         )
         .child(CopyAddress {
@@ -405,7 +389,7 @@ impl gpui::Render for CopyAddressState {
         )
         .tab_index(0)
         .size(px(24.))
-        .when(self.copied, |button| button.bg(rgb(SELECTED)))
+        .when(self.copied, |button| button.bg(rgb(colors().selected)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -436,9 +420,9 @@ impl Render for Tooltip {
             .max_w(px(480.0))
             .rounded(px(3.0))
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(RAISED))
-            .text_color(rgb(TEXT))
+            .border_color(rgb(colors().border))
+            .bg(rgb(colors().raised))
+            .text_color(rgb(colors().text))
             .text_size(px(11.0))
             .whitespace_normal()
             .child(self.0.clone())

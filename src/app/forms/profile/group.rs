@@ -34,7 +34,7 @@ impl ProfileForm {
             self.tunnel_open = false;
             self.group_cursor = self
                 .group
-                .and_then(|id| self.groups.iter().position(|group| group.id == id))
+                .and_then(|id| self.groups.iter().position(|group| group.0 == id))
                 .map_or(0, |index| index + 1);
         } else {
             let count = self.groups.len() + 1;
@@ -47,7 +47,7 @@ impl ProfileForm {
                     self.group = self
                         .group_cursor
                         .checked_sub(1)
-                        .map(|index| self.groups[index].id);
+                        .map(|index| self.groups[index].0);
                     self.group_open = false;
                 }
                 "escape" => self.group_open = false,
@@ -76,7 +76,11 @@ impl ProfileForm {
     pub(super) fn group_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let selected = self
             .group
-            .and_then(|id| self.groups.iter().find(|g| g.id == id));
+            .and_then(|id| self.groups.iter().find(|g| g.0 == id));
+        let label = selected
+            .map(|group| group.1.clone())
+            .unwrap_or_else(|| tr(i18n_key::WORKSPACE_UNGROUPED).to_owned());
+        let tooltip = label.clone();
         let mut picker = column().child(
             div()
                 .id("profile-group")
@@ -86,31 +90,37 @@ impl ProfileForm {
                 .justify_between()
                 .h(px(32.))
                 .px_2()
-                .bg(rgb(ui::INPUT))
+                .bg(rgb(ui::colors().input))
                 .border_1()
                 .border_color(rgb(if self.group_open {
-                    ui::ACCENT
+                    ui::colors().accent
                 } else {
-                    ui::BORDER
+                    ui::colors().border
                 }))
                 .rounded(px(2.))
                 .cursor_pointer()
+                .min_w_0()
+                .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
                 .child(
-                    selected
-                        .map(|group| group.name.clone())
-                        .unwrap_or_else(|| tr(i18n_key::WORKSPACE_UNGROUPED).to_owned()),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(label),
                 )
                 .child(ui::icon(Icon::ChevronDown))
                 .on_key_down(cx.listener(Self::group_key))
                 .capture_key_up(cx.listener(Self::group_key_up))
                 .tab_index(0)
-                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.group_open = !this.group_open;
                     this.tunnel_open = false;
                     this.group_cursor = this
                         .group
-                        .and_then(|id| this.groups.iter().position(|g| g.id == id))
+                        .and_then(|id| this.groups.iter().position(|g| g.0 == id))
                         .map_or(0, |index| index + 1);
                     this.group_scroll.scroll_to_item(this.group_cursor);
                     this.group_focus.focus(window);
@@ -119,7 +129,7 @@ impl ProfileForm {
         );
         if self.group_open {
             let options = std::iter::once((None, tr(i18n_key::WORKSPACE_UNGROUPED).to_owned()))
-                .chain(self.groups.iter().map(|g| (Some(g.id), g.name.clone())));
+                .chain(self.groups.iter().map(|g| (Some(g.0), g.1.clone())));
             picker = picker.child(
                 div()
                     .id("profile-group-options")
@@ -128,8 +138,8 @@ impl ProfileForm {
                     .map(ui::preserve_scroll_axes)
                     .track_scroll(&self.group_scroll)
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
-                    .bg(rgb(ui::RAISED))
+                    .border_color(rgb(ui::colors().border))
+                    .bg(rgb(ui::colors().raised))
                     .children(options.enumerate().map(|(index, (id, name))| {
                         div()
                             .id(("profile-group-option", index))
@@ -137,22 +147,29 @@ impl ProfileForm {
                             .py_1()
                             .cursor_pointer()
                             .bg(rgb(if self.group_cursor == index {
-                                ui::SELECTED
+                                ui::colors().selected
                             } else {
-                                ui::RAISED
+                                ui::colors().raised
                             }))
                             .text_color(rgb(if self.group == id {
-                                ui::ACCENT
+                                ui::colors().accent
                             } else {
-                                ui::TEXT
+                                ui::colors().text
                             }))
-                            .hover(|style| style.bg(rgb(ui::HOVER)))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
+                            .tooltip({
+                                let path = name.clone();
+                                move |_, cx| cx.new(|_| ui::Tooltip(path.clone())).into()
+                            })
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
                             .child(name)
                             .tab_index(0)
                             .tab_stop(false)
                             .border_1()
-                            .border_color(rgb(ui::BORDER))
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .border_color(rgb(ui::colors().border))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.group = id;
                                 this.group_open = false;

@@ -85,7 +85,7 @@ impl Workspace {
     fn menu_size(&self, menu: Menu, available: Size<Pixels>) -> Size<Pixels> {
         let width = match menu {
             Menu::File => 320.,
-            Menu::Create | Menu::NewConnection | Menu::Profile(_) => 300.,
+            Menu::Create | Menu::NewConnection | Menu::Profile(_) | Menu::Group(_) => 300.,
             _ => 380.,
         };
         let header = if menu.profile(&self.config.profiles).is_some() {
@@ -129,9 +129,9 @@ impl Workspace {
             .flex_col()
             .overflow_hidden()
             .py(px(MENU_PADDING - 1.))
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .border_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded(px(3.))
             .shadow_md()
             .occlude()
@@ -154,9 +154,9 @@ impl Workspace {
                     .flex_shrink_0()
                     .min_w_0()
                     .text_size(px(11.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .border_b_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(div().truncate().child(profile.name.clone())),
             );
         }
@@ -212,19 +212,19 @@ impl Workspace {
                     .items_center()
                     .gap_2()
                     .text_color(rgb(if !enabled {
-                        ui::FAINT
+                        ui::colors().faint
                     } else if matches!(action, MenuAction::DeleteProfile) {
-                        ui::DANGER
+                        ui::colors().danger
                     } else {
-                        ui::TEXT
+                        ui::colors().text
                     }))
                     .when(matches!(action, MenuAction::DeleteProfile), |d| {
-                        d.border_t_1().border_color(rgb(ui::BORDER))
+                        d.border_t_1().border_color(rgb(ui::colors().border))
                     })
-                    .when(selected, |d| d.bg(rgb(ui::SELECTED)))
+                    .when(selected, |d| d.bg(rgb(ui::colors().selected)))
                     .when(enabled, |d| {
                         d.cursor_pointer()
-                            .hover(|style| style.bg(rgb(ui::SELECTED)))
+                            .hover(|style| style.bg(rgb(ui::colors().selected)))
                             .on_mouse_move(cx.listener(move |this, _, window, cx| {
                                 if this.menu == Some(menu) {
                                     if submenu {
@@ -249,7 +249,7 @@ impl Workspace {
                             div()
                                 .text_size(px(10.))
                                 .flex_shrink_0()
-                                .text_color(rgb(ui::MUTED))
+                                .text_color(rgb(ui::colors().muted))
                                 .child(item.shortcut),
                         )
                     })

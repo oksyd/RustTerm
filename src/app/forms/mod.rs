@@ -96,7 +96,7 @@ fn row(label: &'static str, content: impl IntoElement) -> Div {
                 .w(px(150.))
                 .flex_shrink_0()
                 .text_size(px(11.))
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(tr(label)),
         )
         .child(div().flex_1().min_w_0().child(content))
@@ -104,7 +104,7 @@ fn row(label: &'static str, content: impl IntoElement) -> Div {
 fn hint(source: &'static str) -> Div {
     div()
         .text_size(px(11.))
-        .text_color(rgb(ui::MUTED))
+        .text_color(rgb(ui::colors().muted))
         .child(tr(source))
 }
 #[derive(Debug, thiserror::Error)]

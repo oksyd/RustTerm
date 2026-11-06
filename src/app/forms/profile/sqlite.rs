@@ -253,10 +253,10 @@ impl ProfileForm {
                 }))
             })
             .when_some(self.sqlite_error.clone(), |body, error| {
-                body.child(div().text_color(rgb(ui::DANGER)).child(error.render()))
+                body.child(div().text_color(rgb(ui::colors().danger)).child(error.render()))
             })
             .when_some(self.sqlite_notice.clone(), |body, notice| {
-                body.child(div().text_color(rgb(ui::MUTED)).child(notice.render()))
+                body.child(div().text_color(rgb(ui::colors().muted)).child(notice.render()))
             })
             .into_any_element()
     }

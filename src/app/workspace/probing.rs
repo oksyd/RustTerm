@@ -38,9 +38,9 @@ impl ProfileTest {
 
     pub(super) fn color(&self) -> u32 {
         match self.status {
-            TestStatus::Running => ui::MUTED,
-            TestStatus::Success(..) => ui::SUCCESS,
-            TestStatus::Failed(_) => ui::DANGER,
+            TestStatus::Running => ui::colors().muted,
+            TestStatus::Success(..) => ui::colors().success,
+            TestStatus::Failed(_) => ui::colors().danger,
         }
     }
 

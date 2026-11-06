@@ -80,7 +80,7 @@ impl DatabaseView {
             let run = TextRun {
                 len: text.len(),
                 font: window.text_style().font(),
-                color: rgb(ui::TEXT).into(),
+                color: rgb(ui::colors().text).into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,

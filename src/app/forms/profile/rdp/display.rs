@@ -72,7 +72,7 @@ impl ProfileForm {
             .when(self.rdp.settings.desktop_scale.is_none(), |body| body.child(hint(i18n_key::RDP_MATCHES_LOCAL_DISPLAY_SCALING_WHEN_CONNECTING)))
             .when_some(saved_scale, |body, scale| body.child(row(
                 i18n_key::RDP_SAVED_SCALING,
-                div().text_color(rgb(ui::ACCENT)).child(format!("{scale}%")),
+                div().text_color(rgb(ui::colors().accent)).child(format!("{scale}%")),
             )))
             .child(self.rdp_choices(
                 "rdp-quality", i18n_key::RDP_DISPLAY_QUALITY, self.rdp.settings.quality(),
@@ -124,8 +124,8 @@ impl ProfileForm {
                 body.child(row(i18n_key::RDP_TRUSTED_CERTIFICATE_SHA_256, div().text_size(px(10.)).child(certificate.clone())))
                     .child(ui::text_button("rdp-clear-certificate", i18n_key::RDP_CLEAR_CERTIFICATE_TRUST, ButtonStyle::Neutral)
                         .tab_index(0)
-                        .border_1().border_color(rgb(ui::BORDER))
-                        .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                        .border_1().border_color(rgb(ui::colors().border))
+                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.native_pending || this.prompts.is_blocked() { return; }
                             this.rdp.clear_certificate = true;

@@ -101,16 +101,16 @@ impl ProfileForm {
                 .gap_1()
                 .h(px(32.))
                 .px_2()
-                .bg(rgb(ui::INPUT))
+                .bg(rgb(ui::colors().input))
                 .border_1()
                 .border_color(rgb(if self.tunnel_open {
-                    ui::ACCENT
+                    ui::colors().accent
                 } else {
-                    ui::BORDER
+                    ui::colors().border
                 }))
                 .rounded(px(2.))
                 .cursor_pointer()
-                .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                .focus(|style| style.border_color(rgb(ui::colors().accent)))
                 .child(div().flex_1().min_w_0().text_ellipsis().child(selected))
                 .child(ui::icon(Icon::ChevronDown))
                 .on_key_down(cx.listener(Self::tunnel_key))
@@ -146,8 +146,8 @@ impl ProfileForm {
                     .map(ui::preserve_scroll_axes)
                     .track_scroll(&self.tunnel_scroll)
                     .border_1()
-                    .border_color(rgb(ui::BORDER))
-                    .bg(rgb(ui::RAISED))
+                    .border_color(rgb(ui::colors().border))
+                    .bg(rgb(ui::colors().raised))
                     .children(choices.enumerate().map(|(index, (id, label))| {
                         div()
                             .id(("redis-tunnel-option", index))
@@ -155,21 +155,21 @@ impl ProfileForm {
                             .py_1()
                             .cursor_pointer()
                             .bg(rgb(if self.tunnel_cursor == index {
-                                ui::SELECTED
+                                ui::colors().selected
                             } else {
-                                ui::RAISED
+                                ui::colors().raised
                             }))
                             .text_color(rgb(if self.ssh_profile == id {
-                                ui::ACCENT
+                                ui::colors().accent
                             } else {
-                                ui::TEXT
+                                ui::colors().text
                             }))
-                            .hover(|style| style.bg(rgb(ui::HOVER)))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
                             .tab_index(0)
                             .tab_stop(false)
                             .border_1()
-                            .border_color(rgb(ui::BORDER))
-                            .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                            .border_color(rgb(ui::colors().border))
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .child(label)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.ssh_profile = id;

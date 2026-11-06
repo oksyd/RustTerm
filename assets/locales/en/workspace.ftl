@@ -507,3 +507,9 @@ workspace-zoom-current-pane = Zoom current pane
 workspace-zoom-current-pane-ctrl-shift-enter = Zoom current pane · Ctrl+Shift+Enter
 
 workspace-zoom-restore-pane = Zoom / restore pane
+
+workspace-new-subgroup = New subgroup…
+workspace-move-group-to-root = Move to top level
+workspace-group-parent = Parent group
+workspace-group-root = Top level
+workspace-delete-group-keep-children = Connections and subgroups will move to the parent group, or to the top level if this group has no parent. Nothing inside the group will be deleted.

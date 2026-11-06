@@ -4,6 +4,7 @@ use crate::i18n::{Message, messages as i18n_key};
 
 mod credential_process;
 pub mod credentials;
+mod groups;
 pub mod known_hosts;
 mod local;
 mod profiles;
@@ -18,12 +19,13 @@ mod workspace;
 
 pub use credential_process::{ProcessCredentialStore, run_credential_worker};
 pub use credentials::{CredentialRef, CredentialStore, Secret, SystemCredentialStore};
+pub use groups::GroupNode;
 pub use known_hosts::{HostKey, HostKeyStatus, KnownHosts};
 pub use local::{LocalConfig, LocalProfile};
 pub use profiles::{Connection, Group, Profile};
 pub use rdp::{RdpConfig, RdpQuality, RdpSharedFolder};
 pub use redis::{RedisConfig, RedisEndpoint, RedisTopology};
-pub use settings::{AppLockConfig, Settings, Theme};
+pub use settings::{AppLockConfig, AppTheme, Settings, Theme};
 pub use sql::{DatabaseConfig, SqlConfig, SqlEngine, SqliteConfig};
 pub use ssh::{AuthMethod, ForwardKind, PortForward, SshConfig, SshJumpHost, SshProfile};
 pub use storage::{ConfigLock, config_dir};
@@ -229,6 +231,7 @@ impl AppConfig {
                 ));
             }
         }
+        self.validate_group_tree()?;
         let mut ids = HashSet::new();
         let ssh_ids: HashSet<_> = self
             .profiles

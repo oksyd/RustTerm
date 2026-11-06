@@ -430,10 +430,10 @@ impl RedisView {
 
     pub fn status_color(&self) -> u32 {
         match self.state {
-            ConnectionState::Connecting | ConnectionState::WaitingHostKey => ui::WARNING,
-            ConnectionState::Connected => ui::SUCCESS,
-            ConnectionState::Disconnected => ui::MUTED,
-            ConnectionState::Failed => ui::DANGER,
+            ConnectionState::Connecting | ConnectionState::WaitingHostKey => ui::colors().warning,
+            ConnectionState::Connected => ui::colors().success,
+            ConnectionState::Disconnected => ui::colors().muted,
+            ConnectionState::Failed => ui::colors().danger,
         }
     }
 

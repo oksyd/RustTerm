@@ -3,6 +3,28 @@ use crate::i18n::messages as i18n_key;
 use super::{Result, invalid};
 use serde::{Deserialize, Serialize};
 
+/// Application chrome, independent of the user's terminal palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTheme {
+    #[default]
+    Dark,
+    Light,
+    Midnight,
+}
+
+impl AppTheme {
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Midnight];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => i18n_key::SETTINGS_THEME_DARK,
+            Self::Light => i18n_key::SETTINGS_THEME_LIGHT,
+            Self::Midnight => i18n_key::SETTINGS_THEME_MIDNIGHT,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {

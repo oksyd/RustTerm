@@ -19,6 +19,7 @@ pub(super) enum Menu {
     NewConnection,
     Create,
     Profile(Uuid),
+    Group(Uuid),
 }
 pub(super) const APPLICATION_MENUS: [(Menu, &str); 5] = [
     (Menu::File, i18n_key::COMMON_FILE),
@@ -42,6 +43,10 @@ pub(super) enum MenuAction {
     NewSqlite,
     NewRdp,
     NewGroup,
+    NewSubgroup,
+    EditGroup,
+    DeleteGroup,
+    GroupToRoot,
     Settings,
     Updates,
     Lock,
@@ -89,7 +94,7 @@ impl Menu {
         match self {
             Self::File | Self::NewConnection => Some(Self::File),
             Self::Edit | Self::View | Self::Session | Self::Help => Some(self),
-            Self::Create | Self::Profile(_) => None,
+            Self::Create | Self::Profile(_) | Self::Group(_) => None,
         }
     }
 
@@ -216,6 +221,16 @@ impl Menu {
                     ]
                 }
             }
+            Self::Group(_) => {
+                const {
+                    &[
+                        MenuItem::new(i18n_key::WORKSPACE_NEW_SUBGROUP, "", NewSubgroup),
+                        MenuItem::new(i18n_key::WORKSPACE_EDIT_GROUP, "F2", EditGroup),
+                        MenuItem::new(i18n_key::WORKSPACE_MOVE_GROUP_TO_ROOT, "", GroupToRoot),
+                        MenuItem::new(i18n_key::WORKSPACE_DELETE_GROUP, "Delete", DeleteGroup),
+                    ]
+                }
+            }
             Self::Profile(_) => {
                 const {
                     &[
@@ -245,6 +260,66 @@ impl Menu {
 }
 
 impl Workspace {
+    pub(super) fn edit_group(
+        &mut self,
+        editing: Option<Uuid>,
+        parent: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+        {
+            return;
+        }
+        let group = editing.and_then(|id| self.config.groups.iter().find(|g| g.id == id));
+        let parent = group.map_or(parent, |g| g.parent);
+        let name = group.map(|g| g.name.clone()).unwrap_or_default();
+        self.remember_popup_focus(window, cx);
+        let fields = Fields::new(vec![(i18n_key::WORKSPACE_GROUP_NAME, name)], cx);
+        fields.focus(window, cx);
+        self.modal = Some(Modal::Group {
+            editing,
+            parent,
+            fields,
+        });
+        if let Some(parent) = parent {
+            self.expand_library_group(parent);
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_group_menu(
+        &mut self,
+        id: Uuid,
+        position: gpui::Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing
+            || self.lock_screen.locked
+            || self.modal.is_some()
+            || self.window_state.prompts.is_busy()
+            || !self.config.groups.iter().any(|g| g.id == id)
+        {
+            return;
+        }
+        if self.menu.take().is_some() {
+            self.restore_popup_focus(window, cx);
+        }
+        self.release_rdp_control(cx);
+        self.sidebar_focus.focus(window);
+        self.remember_popup_focus(window, cx);
+        self.menu = Some(Menu::Group(id));
+        self.menu_anchor = position;
+        self.menu_index = 0;
+        self.menu_scroll.scroll_to_item(0);
+        self.menu_focus.focus(window);
+        cx.notify();
+    }
+
     pub(super) fn application_menu(&self) -> Option<Menu> {
         self.menu.and_then(Menu::category)
     }
@@ -446,6 +521,12 @@ impl Workspace {
             "f2" if matches!(menu, Menu::Profile(_)) => {
                 self.menu_action(MenuAction::EditProfile, window, cx)
             }
+            "f2" if matches!(menu, Menu::Group(_)) => {
+                self.menu_action(MenuAction::EditGroup, window, cx)
+            }
+            "delete" if matches!(menu, Menu::Group(_)) => {
+                self.menu_action(MenuAction::DeleteGroup, window, cx)
+            }
             "delete" if matches!(menu, Menu::Profile(_)) => {
                 self.menu_action(MenuAction::DeleteProfile, window, cx)
             }
@@ -471,6 +552,16 @@ impl Workspace {
             return false;
         }
         use MenuAction::*;
+        if matches!(action, NewSubgroup | EditGroup | DeleteGroup | GroupToRoot) {
+            return self
+                .menu
+                .and_then(|menu| match menu {
+                    Menu::Group(id) => Some(id),
+                    _ => None,
+                })
+                .and_then(|id| self.config.groups.iter().find(|g| g.id == id))
+                .is_some_and(|g| action != GroupToRoot || g.parent.is_some());
+        }
         if matches!(action, NewConnection) {
             return self.application_menu() == Some(Menu::File);
         }
@@ -578,9 +669,12 @@ impl Workspace {
             }
             return;
         }
-        let profile = self
-            .menu
-            .take()
+        let menu = self.menu.take();
+        let group = menu.and_then(|menu| match menu {
+            Menu::Group(id) => Some(id),
+            _ => None,
+        });
+        let profile = menu
             .and_then(|menu| menu.profile(&self.config.profiles))
             .cloned();
         self.restore_popup_focus(window, cx);
@@ -639,14 +733,20 @@ impl Workspace {
             NewPostgres => self.edit_profile(None, ProfileKind::Postgres, window, cx),
             NewSqlite => self.edit_profile(None, ProfileKind::Sqlite, window, cx),
             NewRdp => self.edit_profile(None, ProfileKind::Rdp, window, cx),
-            NewGroup => {
-                self.remember_popup_focus(window, cx);
-                let fields = Fields::new(vec![(i18n_key::WORKSPACE_GROUP_NAME, String::new())], cx);
-                fields.focus(window, cx);
-                self.modal = Some(Modal::Group {
-                    editing: None,
-                    fields,
-                });
+            NewGroup => self.edit_group(None, None, window, cx),
+            NewSubgroup => self.edit_group(None, group, window, cx),
+            EditGroup => self.edit_group(group, None, window, cx),
+            DeleteGroup => {
+                if let Some(id) = group {
+                    self.delete_group(id, window, cx);
+                }
+            }
+            GroupToRoot => {
+                if let Some(id) = group
+                    && self.config.move_group(id, None, None).is_ok()
+                {
+                    self.save(cx);
+                }
             }
             Settings => self.open_settings(SettingsSection::General, window, cx),
             Updates => self.open_settings(SettingsSection::Updates, window, cx),

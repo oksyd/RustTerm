@@ -103,11 +103,11 @@ impl SettingsForm {
                     .mt_4()
                     .p_3()
                     .rounded(px(4.))
-                    .bg(rgb(ui::INPUT))
+                    .bg(rgb(ui::colors().input))
                     .text_color(rgb(if updates.error.is_some() {
-                        ui::DANGER
+                        ui::colors().danger
                     } else {
-                        ui::TEXT
+                        ui::colors().text
                     }))
                     .child(updates.message().render()),
             )

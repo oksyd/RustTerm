@@ -174,19 +174,19 @@ impl RdpView {
         match &self.control {
             KeyboardControl::Released => (
                 i18n_key::RDP_CLICK_THE_REMOTE_DESKTOP_TO_TAKE_CONTROL,
-                ui::MUTED,
+                ui::colors().muted,
             ),
             KeyboardControl::Pending(_) => (
                 i18n_key::RDP_REQUESTING_KEYBOARD_CONTROL_CTRL_ALT_RELEASES,
-                ui::WARNING,
+                ui::colors().warning,
             ),
             KeyboardControl::Active(_) => (
                 i18n_key::RDP_CONTROLLING_REMOTE_DESKTOP_CTRL_ALT_RELEASES,
-                ui::ACCENT,
+                ui::colors().accent,
             ),
             KeyboardControl::Limited(_) => (
                 i18n_key::RDP_SYSTEM_SHORTCUTS_STAY_LOCAL_CTRL_ALT_RELEASES,
-                ui::WARNING,
+                ui::colors().warning,
             ),
         }
     }

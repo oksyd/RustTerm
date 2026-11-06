@@ -130,8 +130,8 @@ impl ProfileForm {
                         .tab_index(0)
                         .flex_shrink_0()
                         .border_1()
-                        .border_color(rgb(ui::BORDER))
-                        .focus(|style| style.border_color(rgb(ui::ACCENT)))
+                        .border_color(rgb(ui::colors().border))
+                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.native_pending || this.prompts.is_blocked() {
                                 return;

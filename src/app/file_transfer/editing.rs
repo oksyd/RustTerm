@@ -23,7 +23,7 @@ impl FileTransferView {
             .px_2()
             .py_1()
             .text_size(px(11.))
-            .text_color(rgb(ui::MUTED))
+            .text_color(rgb(ui::colors().muted))
             .child(tr(i18n_key::SFTP_EXISTING_FILES));
         for (id, label, policy) in [
             (
@@ -46,7 +46,8 @@ impl FileTransferView {
                 text_button(id, label, ButtonStyle::Neutral)
                     .tab_index(0)
                     .when(self.conflict_policy == policy, |d| {
-                        d.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                        d.bg(rgb(ui::colors().selected))
+                            .text_color(rgb(ui::colors().accent))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.prompts.is_blocked() {
@@ -435,24 +436,32 @@ impl FileTransferView {
             .p_2()
             .child(
                 div()
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(preview.document.path.clone()),
             )
             .child(div().flex_1().min_h_0().child(preview.input.clone()));
         if !preview.editable {
-            body = body.child(div().text_color(rgb(ui::MUTED)).child(tr(
+            body = body.child(div().text_color(rgb(ui::colors().muted)).child(tr(
                 i18n_key::SFTP_LARGE_OR_SPECIAL_TEXT_IS_PREVIEWED_ONLY_USE_THE_EXTERNAL,
             )));
         }
         if preview.external.is_some() {
-            body = body.child(div().text_color(rgb(ui::MUTED)).child(tr(
+            body = body.child(div().text_color(rgb(ui::colors().muted)).child(tr(
                 i18n_key::SFTP_SAVE_IN_THE_EXTERNAL_EDITOR_THEN_UPLOAD_YOUR_EDITS_HERE,
             )));
         }
         if let Some(error) = &self.error {
-            body = body.child(div().text_color(rgb(ui::DANGER)).child(error.render()));
+            body = body.child(
+                div()
+                    .text_color(rgb(ui::colors().danger))
+                    .child(error.render()),
+            );
         } else if let Some(notice) = &self.notice {
-            body = body.child(div().text_color(rgb(ui::SUCCESS)).child(notice.render()));
+            body = body.child(
+                div()
+                    .text_color(rgb(ui::colors().success))
+                    .child(notice.render()),
+            );
         }
         let external = preview.external.is_some();
         body.child(

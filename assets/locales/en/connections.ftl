@@ -712,3 +712,6 @@ connections-zmodem-output-timed-out = ZMODEM output timed out
 connections-zmodem-reception-exceeded-the-limit-of-64-files-or-4 = ZMODEM reception exceeded the limit of 64 files or 4 GiB per batch
 
 connections-zmodem-timed-out-waiting-for-the-remote-host = ZMODEM timed out waiting for the remote host
+
+connections-group-parent-missing = A group references a parent that does not exist.
+connections-group-cycle = A group cannot be placed inside itself or one of its subgroups.

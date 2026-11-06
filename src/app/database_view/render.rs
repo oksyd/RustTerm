@@ -21,8 +21,8 @@ impl Render for DatabaseView {
                         .h_full()
                         .flex_shrink_0()
                         .cursor(CursorStyle::ResizeLeftRight)
-                        .bg(rgb(ui::BORDER))
-                        .hover(|style| style.bg(rgb(ui::ACCENT)))
+                        .bg(rgb(ui::colors().border))
+                        .hover(|style| style.bg(rgb(ui::colors().accent)))
                         .tooltip(|_, cx| {
                             cx.new(|_| {
                                 ui::Tooltip(
@@ -70,8 +70,8 @@ impl Render for DatabaseView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(rgb(ui::BG))
-            .text_color(rgb(ui::TEXT))
+            .bg(rgb(ui::colors().bg))
+            .text_color(rgb(ui::colors().text))
             .text_size(px(12.))
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::capture_edit_key))
@@ -112,8 +112,8 @@ impl Render for DatabaseView {
                             .py_2()
                             .flex_shrink_0()
                             .border_t_1()
-                            .border_color(rgb(ui::BORDER))
-                            .text_color(rgb(ui::DANGER))
+                            .border_color(rgb(ui::colors().border))
+                            .text_color(rgb(ui::colors().danger))
                             .child(error.render())
                             .map(|content| ui::scrollable(content, None)),
                     )
@@ -123,9 +123,9 @@ impl Render for DatabaseView {
                 self.error.is_none() && self.documents[self.active_document].error.is_none(),
                 |panel| {
                     if let Some(busy) = self.busy {
-                        panel.child(notice(tr(busy).to_owned(), ui::MUTED))
+                        panel.child(notice(tr(busy).to_owned(), ui::colors().muted))
                     } else if let Some(message) = &self.notice {
-                        panel.child(notice(message.render(), ui::MUTED))
+                        panel.child(notice(message.render(), ui::colors().muted))
                     } else {
                         panel
                     }
@@ -146,11 +146,11 @@ impl Render for DatabaseView {
                                 .px_3()
                                 .py_2()
                                 .rounded(px(4.))
-                                .bg(rgb(ui::RAISED))
+                                .bg(rgb(ui::colors().raised))
                                 .border_1()
-                                .border_color(rgb(ui::BORDER))
+                                .border_color(rgb(ui::colors().border))
                                 .text_size(px(11.))
-                                .text_color(rgb(ui::SUCCESS))
+                                .text_color(rgb(ui::colors().success))
                                 .shadow_sm()
                                 .occlude()
                                 .child(message.render()),
@@ -191,9 +191,9 @@ impl DatabaseView {
             .flex()
             .items_center()
             .gap_1()
-            .bg(rgb(ui::SURFACE))
+            .bg(rgb(ui::colors().surface))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .child(ui::connection_address(
                 "database-address",
                 Icon::for_sql_engine(self.engine()),
@@ -216,7 +216,7 @@ impl DatabaseView {
                             .flex_shrink_0()
                             .px_2()
                             .text_size(px(11.))
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .child(tr(mode)),
                     )
                 },
@@ -231,7 +231,9 @@ impl DatabaseView {
                 .flex_shrink_0()
                 .whitespace_nowrap()
                 .when(self.browser_open, |button| {
-                    button.bg(rgb(ui::SELECTED)).text_color(rgb(ui::ACCENT))
+                    button
+                        .bg(rgb(ui::colors().selected))
+                        .text_color(rgb(ui::colors().accent))
                 })
                 .tooltip(|_, cx| {
                     cx.new(|_| {
@@ -263,7 +265,9 @@ impl DatabaseView {
                     i18n_key::WORKSPACE_DATABASE_ACTIONS,
                 )
                 .tab_index(0)
-                .when(self.menu_open, |button| button.bg(rgb(ui::SELECTED)))
+                .when(self.menu_open, |button| {
+                    button.bg(rgb(ui::colors().selected))
+                })
                 .on_mouse_down(MouseButton::Left, |_, window, cx| {
                     window.prevent_default();
                     cx.stop_propagation();
@@ -290,7 +294,7 @@ impl DatabaseView {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .when(compact, |body| body.flex_1())
             .when(!compact, |body| {
                 body.w(px(self.browser_width())).flex_shrink_0()
@@ -368,7 +372,7 @@ impl DatabaseView {
                     .pr(px(ui::SCROLLBAR_WIDTH))
                     .flex_shrink_0()
                     .border_b_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         uniform_list(
                             "database-choice-list",
@@ -392,17 +396,21 @@ impl DatabaseView {
             );
         }
         if self.visible_tables.is_empty() {
-            browser = browser.child(div().flex_1().p_3().text_color(rgb(ui::MUTED)).child(tr(
-                if self.busy.is_some() {
-                    i18n_key::DATABASE_LOADING_DATABASE_OBJECTS
-                } else if self.state == State::Connected {
-                    i18n_key::DATABASE_NO_MATCHING_TABLES_OR_VIEWS
-                } else if self.engine() == SqlEngine::Sqlite {
-                    i18n_key::DATABASE_OPEN_THE_DATABASE_TO_BROWSE_ITS_TABLES_AND_VIEWS
-                } else {
-                    i18n_key::DATABASE_CONNECT_TO_BROWSE_DATABASE_OBJECTS
-                },
-            )));
+            browser = browser.child(
+                div()
+                    .flex_1()
+                    .p_3()
+                    .text_color(rgb(ui::colors().muted))
+                    .child(tr(if self.busy.is_some() {
+                        i18n_key::DATABASE_LOADING_DATABASE_OBJECTS
+                    } else if self.state == State::Connected {
+                        i18n_key::DATABASE_NO_MATCHING_TABLES_OR_VIEWS
+                    } else if self.engine() == SqlEngine::Sqlite {
+                        i18n_key::DATABASE_OPEN_THE_DATABASE_TO_BROWSE_ITS_TABLES_AND_VIEWS
+                    } else {
+                        i18n_key::DATABASE_CONNECT_TO_BROWSE_DATABASE_OBJECTS
+                    })),
+            );
         } else {
             browser = browser.child(
                 div()
@@ -445,7 +453,7 @@ impl DatabaseView {
                     .flex_wrap()
                     .gap_1()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .children(
                         [
                             (TableAction::Data, "Data"),
@@ -480,8 +488,10 @@ impl DatabaseView {
             .items_center()
             .cursor_pointer()
             .tab_index(0)
-            .hover(|style| style.bg(rgb(ui::HOVER)))
-            .when(name == self.database(), |item| item.bg(rgb(ui::SELECTED)))
+            .hover(|style| style.bg(rgb(ui::colors().hover)))
+            .when(name == self.database(), |item| {
+                item.bg(rgb(ui::colors().selected))
+            })
             .child(div().truncate().child(name.clone()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.available() {
@@ -514,15 +524,15 @@ impl DatabaseView {
             .gap_2()
             .cursor_pointer()
             .tab_index(0)
-            .when(selected, |row| row.bg(rgb(ui::SELECTED)))
-            .hover(|style| style.bg(rgb(ui::HOVER)))
-            .focus(|style| style.bg(rgb(ui::SELECTED)))
+            .when(selected, |row| row.bg(rgb(ui::colors().selected)))
+            .hover(|style| style.bg(rgb(ui::colors().hover)))
+            .focus(|style| style.bg(rgb(ui::colors().selected)))
             .child(ui::icon(if is_view { Icon::View } else { Icon::Table }))
             .child(div().min_w_0().flex_1().truncate().child(name))
             .child(
                 div()
                     .text_size(px(9.))
-                    .text_color(rgb(ui::MUTED))
+                    .text_color(rgb(ui::colors().muted))
                     .child(if is_view {
                         tr(i18n_key::WORKSPACE_VIEW)
                     } else {
@@ -624,7 +634,7 @@ impl DatabaseView {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(ui::MUTED))
+                            .text_color(rgb(ui::colors().muted))
                             .child(tr(i18n_key::DATABASE_ROW_LIMIT)),
                     )
                     .child(div().w(px(64.)).child(document.row_limit.clone())),
@@ -643,7 +653,7 @@ impl DatabaseView {
                 .items_center()
                 .justify_center()
                 .p_3()
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(tr(
                     i18n_key::DATABASE_RUN_SQL_OR_SELECT_A_TABLE_TO_INSPECT_DATA,
                 ))
@@ -661,7 +671,7 @@ impl DatabaseView {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(rgb(ui::BORDER));
+            .border_color(rgb(ui::colors().border));
         if output.results.len() > 1 {
             results = results.child(
                 div()
@@ -682,9 +692,9 @@ impl DatabaseView {
                             .tab_index(0)
                             .when(
                                 index == self.documents[self.active_document].result_index,
-                                |item| item.bg(rgb(ui::SELECTED)),
+                                |item| item.bg(rgb(ui::colors().selected)),
                             )
-                            .hover(|style| style.bg(rgb(ui::HOVER)))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
                             .child(rustterm::trf!(
                                 i18n_key::DATABASE_RESULT_NUMBER,
                                 number = index + 1
@@ -736,7 +746,7 @@ impl DatabaseView {
                 .pb_1()
                 .flex_shrink_0()
                 .text_size(px(10.))
-                .text_color(rgb(ui::MUTED))
+                .text_color(rgb(ui::colors().muted))
                 .child(rustterm::trf!(
                     i18n_key::DATABASE_SHOWN_TOTAL_LOADED_ROWS_AFFECTED_AFFECTED_ELAPSED_MS,
                     shown = self.documents[self.active_document].visible_rows.len(),
@@ -754,7 +764,7 @@ impl DatabaseView {
                     div()
                         .flex_1()
                         .p_3()
-                        .text_color(rgb(ui::MUTED))
+                        .text_color(rgb(ui::colors().muted))
                         .child(tr(i18n_key::DATABASE_NO_ROWS_RETURNED)),
                 )
                 .into_any_element();
@@ -765,7 +775,7 @@ impl DatabaseView {
             .h(px(28.))
             .flex_shrink_0()
             .flex()
-            .bg(rgb(ui::RAISED))
+            .bg(rgb(ui::colors().raised))
             .children(result.columns.iter().enumerate().map(|(column, name)| {
                 let sort = self
                     .table_workspace()
@@ -792,10 +802,10 @@ impl DatabaseView {
                     .flex()
                     .items_center()
                     .border_r_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .cursor_pointer()
                     .tab_index(0)
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
                     .tooltip({
                         let name = name.clone();
                         move |_, cx| cx.new(|_| ui::Tooltip(name.clone())).into()
@@ -815,7 +825,7 @@ impl DatabaseView {
                             .w(px(6.))
                             .h_full()
                             .cursor(CursorStyle::ResizeLeftRight)
-                            .hover(|style| style.bg(rgb(ui::ACCENT)))
+                            .hover(|style| style.bg(rgb(ui::colors().accent)))
                             .tooltip(|_, cx| {
                                 cx.new(|_| {
                                     ui::Tooltip(
@@ -924,7 +934,7 @@ impl DatabaseView {
                     .gap_2()
                     .p_2()
                     .border_t_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(
                         div()
                             .id("database-selected-value")
@@ -1012,9 +1022,9 @@ impl DatabaseView {
             .h(px(30.))
             .flex()
             .bg(rgb(if visible_index.is_multiple_of(2) {
-                ui::BG
+                ui::colors().bg
             } else {
-                ui::SURFACE
+                ui::colors().surface
             }))
             .children(row.iter().enumerate().map(|(column, cell)| {
                 if let Some(input) = self.inline_cell_input(row_index, column) {
@@ -1040,14 +1050,14 @@ impl DatabaseView {
                     .items_center()
                     .border_r_1()
                     .border_b_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .cursor_pointer()
                     .when(
                         self.documents[self.active_document].selected_cell
                             == Some((row_index, column)),
-                        |item| item.bg(rgb(ui::SELECTED)),
+                        |item| item.bg(rgb(ui::colors().selected)),
                     )
-                    .hover(|style| style.bg(rgb(ui::HOVER)))
+                    .hover(|style| style.bg(rgb(ui::colors().hover)))
                     .text_color(rgb(self.cell_color(row_index, column, cell.is_none())))
                     .child(div().truncate().child(self.cell_preview(
                         row_index,
@@ -1092,7 +1102,7 @@ pub(super) fn action(
     ui::text_button_enabled(id, label, style, enabled)
         .flex_shrink_0()
         .whitespace_nowrap()
-        .focus(|style| style.border_color(rgb(ui::ACCENT)))
+        .focus(|style| style.border_color(rgb(ui::colors().accent)))
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             window.prevent_default();
             cx.stop_propagation();
@@ -1104,7 +1114,7 @@ fn notice(message: String, color: u32) -> Div {
         .py_1()
         .flex_shrink_0()
         .border_t_1()
-        .border_color(rgb(ui::BORDER))
+        .border_color(rgb(ui::colors().border))
         .text_size(px(11.))
         .text_color(rgb(color))
         .child(message)

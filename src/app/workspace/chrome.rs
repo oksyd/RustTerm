@@ -42,13 +42,13 @@ impl Workspace {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .bg(rgb(ui::CHROME))
+            .bg(rgb(ui::colors().chrome))
             .rounded_tl(corners.top_left)
             .rounded_tr(corners.top_right)
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .text_size(px(12.))
-            .text_color(rgb(ui::MUTED))
+            .text_color(rgb(ui::colors().muted))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -71,7 +71,11 @@ impl Workspace {
                     .overflow_hidden()
                     .when(application_menu.is_none(), |title| {
                         title
-                            .child(icon(Icon::Logo).size(px(16.)).text_color(rgb(ui::BRAND)))
+                            .child(
+                                icon(Icon::Logo)
+                                    .size(px(16.))
+                                    .text_color(rgb(ui::colors().brand)),
+                            )
                             .child("RustTerm")
                     })
                     .on_mouse_down(MouseButton::Left, move |event, window, _| {
@@ -113,12 +117,18 @@ impl Workspace {
                             .cursor_pointer()
                             .when(index == 0, |button| button.rounded_tl(corners.top_left))
                             .text_color(rgb(if selected == category {
-                                ui::TEXT
+                                ui::colors().text
                             } else {
-                                ui::MUTED
+                                ui::colors().muted
                             }))
-                            .when(selected == category, |button| button.bg(rgb(ui::SELECTED)))
-                            .hover(|style| style.bg(rgb(ui::HOVER)).text_color(rgb(ui::TEXT)))
+                            .when(selected == category, |button| {
+                                button.bg(rgb(ui::colors().selected))
+                            })
+                            .hover(|style| {
+                                style
+                                    .bg(rgb(ui::colors().hover))
+                                    .text_color(rgb(ui::colors().text))
+                            })
                             .on_hover(cx.listener(move |this, hovered, window, cx| {
                                 if *hovered && this.application_menu().is_some() {
                                     this.switch_application_menu(category, window, cx);
@@ -367,15 +377,27 @@ impl Workspace {
             .items_center()
             .gap(px(8.))
             .cursor_pointer()
-            .bg(rgb(if active { ui::BG } else { ui::CHROME }))
+            .bg(rgb(if active {
+                ui::colors().bg
+            } else {
+                ui::colors().chrome
+            }))
             .border_b_2()
-            .border_color(if active { rgb(ui::ACCENT) } else { rgba(0) })
-            .text_color(rgb(if active { ui::TEXT } else { ui::MUTED }))
-            .hover(|s| s.bg(rgb(ui::HOVER)))
+            .border_color(if active {
+                rgb(ui::colors().accent)
+            } else {
+                rgba(0)
+            })
+            .text_color(rgb(if active {
+                ui::colors().text
+            } else {
+                ui::colors().muted
+            }))
+            .hover(|s| s.bg(rgb(ui::colors().hover)))
             .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
             .child(icon(glyph).when(
                 active && matches!(glyph, Icon::Terminal | Icon::SplitHorizontal),
-                |icon| icon.text_color(rgb(ui::ACCENT)),
+                |icon| icon.text_color(rgb(ui::colors().accent)),
             ))
             .child(self.workspace_tab_label(tab))
             .when(unread, |d| {
@@ -384,7 +406,7 @@ impl Workspace {
                         .size(px(5.))
                         .flex_shrink_0()
                         .rounded_full()
-                        .bg(rgb(ui::ACCENT)),
+                        .bg(rgb(ui::colors().accent)),
                 )
             })
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -432,7 +454,7 @@ impl Workspace {
                     .top(px(7.))
                     .bottom(px(7.))
                     .w(px(1.))
-                    .bg(rgb(ui::BORDER)),
+                    .bg(rgb(ui::colors().border)),
             )
             .when_some(group, |tab, profile| {
                 tab.child(
@@ -499,8 +521,12 @@ impl Workspace {
             .items_center()
             .cursor_pointer()
             .tab_index(0)
-            .bg(rgb(if active { ui::BG } else { ui::CHROME }))
-            .hover(|s| s.bg(rgb(ui::HOVER)))
+            .bg(rgb(if active {
+                ui::colors().bg
+            } else {
+                ui::colors().chrome
+            }))
+            .hover(|s| s.bg(rgb(ui::colors().hover)))
             .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
             .child(
                 div()
@@ -513,7 +539,11 @@ impl Workspace {
                     .px(px(6.))
                     .py_1()
                     .rounded(px(4.))
-                    .bg(rgb(if active { ui::SELECTED } else { ui::RAISED }))
+                    .bg(rgb(if active {
+                        ui::colors().selected
+                    } else {
+                        ui::colors().raised
+                    }))
                     .text_size(px(11.))
                     .text_color(rgb(color))
                     .child(
@@ -626,9 +656,9 @@ impl Workspace {
             .min_w_0()
             .flex()
             .items_center()
-            .bg(rgb(ui::CHROME))
+            .bg(rgb(ui::colors().chrome))
             .border_b_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
@@ -695,7 +725,9 @@ impl Workspace {
         let state = pane
             .map(|pane| pane.status_text(cx))
             .unwrap_or_else(|| tr(i18n_key::WORKSPACE_READY).into());
-        let color = pane.map(|pane| pane.status_color(cx)).unwrap_or(ui::MUTED);
+        let color = pane
+            .map(|pane| pane.status_color(cx))
+            .unwrap_or(ui::colors().muted);
         let detail = pane.map(|pane| pane.status_details(cx)).unwrap_or_default();
         let target = profile
             .map(|profile| match &profile.connection {
@@ -738,15 +770,15 @@ impl Workspace {
             .flex()
             .items_center()
             .overflow_hidden()
-            .bg(rgb(ui::STATUS))
+            .bg(rgb(ui::colors().status))
             .rounded_bl(corners.bottom_left)
             .rounded_br(corners.bottom_right)
             .pl(corners.bottom_left)
             .pr(corners.bottom_right)
             .border_t_1()
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .text_size(px(11.))
-            .text_color(rgb(ui::MUTED))
+            .text_color(rgb(ui::colors().muted))
             .child(match pane {
                 Some(Pane::Rdp(view)) => view.update(cx, |view, cx| view.render_status(cx)),
                 _ => div()
@@ -783,7 +815,7 @@ impl Workspace {
                         div()
                             .px_2()
                             .text_size(px(10.))
-                            .text_color(rgb(ui::SUCCESS))
+                            .text_color(rgb(ui::colors().success))
                             .child(tr(i18n_key::COMMON_SAVED)),
                     )
                 },
@@ -797,7 +829,7 @@ impl Workspace {
                     )
                     .flex_shrink_0()
                     .text_size(px(10.))
-                    .text_color(rgb(ui::WARNING))
+                    .text_color(rgb(ui::colors().warning))
                     .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                 )
             })
@@ -809,7 +841,7 @@ impl Workspace {
                         ui::ButtonStyle::Neutral,
                     )
                     .text_size(px(10.))
-                    .text_color(rgb(ui::ACCENT))
+                    .text_color(rgb(ui::colors().accent))
                     .tooltip({
                         let text = self.updates.read(cx).message().render();
                         move |_, cx| cx.new(|_| ui::Tooltip(text.clone())).into()
@@ -835,7 +867,7 @@ impl gpui::Render for TabDrag {
         div()
             .px_3()
             .py_2()
-            .bg(rgb(ui::SELECTED))
+            .bg(rgb(ui::colors().selected))
             .child(self.title.clone())
     }
 }

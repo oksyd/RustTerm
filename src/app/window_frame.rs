@@ -115,7 +115,7 @@ impl WindowFrame {
             .border_b(self.border.bottom)
             .border_l(self.border.left)
             .border_r(self.border.right)
-            .border_color(rgb(ui::BORDER))
+            .border_color(rgb(ui::colors().border))
             .rounded_tl(outer_radius(self.corners.top_left))
             .rounded_tr(outer_radius(self.corners.top_right))
             .rounded_bl(outer_radius(self.corners.bottom_left))

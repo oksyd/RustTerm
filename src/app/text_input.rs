@@ -5,7 +5,7 @@
 use rustterm::i18n::messages as i18n_key;
 mod sql;
 
-use crate::app::ui::{self, ACCENT, BORDER, FAINT, TEXT};
+use crate::app::ui;
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent,
@@ -736,7 +736,12 @@ impl TextInput {
                 } else {
                     ".SystemUIFont"
                 }),
-                color: rgb(if empty { FAINT } else { TEXT }).into(),
+                color: rgb(if empty {
+                    ui::colors().faint
+                } else {
+                    ui::colors().text
+                })
+                .into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -923,7 +928,7 @@ impl TextInput {
                     }
                     window.paint_quad(fill(
                         Bounds::new(point(left, origin.y), size(right - left, height)),
-                        rgb(0x3a3b46),
+                        rgb(ui::colors().selected),
                     ));
                 }
                 let _ = line.shaped.paint(origin, height, window, cx);
@@ -938,7 +943,7 @@ impl TextInput {
                             point(left, origin.y + height - px(2.)),
                             size(right - left, px(1.)),
                         ),
-                        rgb(ACCENT),
+                        rgb(ui::colors().accent),
                     ));
                 }
                 if self.focus.is_focused(window)
@@ -948,7 +953,7 @@ impl TextInput {
                     let x = origin.x + self.line_x(line, self.cursor);
                     window.paint_quad(fill(
                         Bounds::new(point(x, origin.y), size(px(1.), height)),
-                        rgb(ACCENT),
+                        rgb(ui::colors().accent),
                     ));
                 }
             }
@@ -1027,13 +1032,13 @@ impl Render for TextInput {
             }))
             .border_1()
             .border_color(rgb(if self.invalid || self.validation_error.is_some() {
-                crate::app::ui::DANGER
+                crate::app::ui::colors().danger
             } else if self.focus.is_focused(window) {
-                ACCENT
+                ui::colors().accent
             } else {
-                BORDER
+                ui::colors().border
             }))
-            .bg(rgb(crate::app::ui::INPUT))
+            .bg(rgb(crate::app::ui::colors().input))
             .when(self.read_only, |d| d.opacity(0.65))
             .cursor(CursorStyle::IBeam)
             .track_focus(&self.focus)
@@ -1136,7 +1141,7 @@ impl Render for TextInput {
                     .right(px(6.))
                     .top(px((height - 28.) / 2. - 1.))
                     .rounded(px(4.))
-                    .focus(|style| style.bg(rgb(crate::app::ui::HOVER)))
+                    .focus(|style| style.bg(rgb(crate::app::ui::colors().hover)))
                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -1170,7 +1175,7 @@ impl Render for TextInput {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(crate::app::ui::DANGER))
+                        .text_color(rgb(crate::app::ui::colors().danger))
                         .child(message.render()),
                 )
                 .child(

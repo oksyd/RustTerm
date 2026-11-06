@@ -77,7 +77,7 @@ pub struct ProfileForm {
     pub original: Option<Profile>,
     pub kind: ProfileKind,
     fields: Fields,
-    groups: Vec<Group>,
+    groups: Vec<(Uuid, String)>,
     group: Option<Uuid>,
     group_open: bool,
     suppress_group_key_up: bool,
@@ -121,6 +121,12 @@ impl ProfileForm {
         prompts: PromptGate,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The picker uses full paths in tree order so identically named projects
+        // under different companies remain distinguishable.
+        let groups = Group::tree(&groups)
+            .into_iter()
+            .map(|node| (node.group.id, node.path))
+            .collect();
         let group = profile.as_ref().and_then(|p| p.group);
         let mut values = vec![(
             i18n_key::COMMON_NAME,
@@ -510,7 +516,7 @@ impl ProfileForm {
 
 impl Render for ProfileForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        column().text_size(px(12.)).text_color(rgb(ui::TEXT))
+        column().text_size(px(12.)).text_color(rgb(ui::colors().text))
             .child(self.fields.selected_rows(&[i18n_key::COMMON_NAME]))
             .child(self.group_picker(cx))
             .child(match self.kind {

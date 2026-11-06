@@ -90,12 +90,16 @@ impl DatabaseView {
                     .gap_2()
                     .p_2()
                     .border_b_1()
-                    .border_color(rgb(ui::BORDER))
+                    .border_color(rgb(ui::colors().border))
                     .child(div().min_w_0().flex_1().truncate().child(column.to_owned()))
-                    .child(div().text_color(rgb(ui::MUTED)).child(rustterm::trf!(
-                        i18n_key::COMMON_BYTE_SIZE,
-                        bytes = value.map_or(0, str::len)
-                    )))
+                    .child(
+                        div()
+                            .text_color(rgb(ui::colors().muted))
+                            .child(rustterm::trf!(
+                                i18n_key::COMMON_BYTE_SIZE,
+                                bytes = value.map_or(0, str::len)
+                            )),
+                    )
                     .child(
                         ui::text_button_enabled(
                             "database-full-value-copy",
@@ -152,9 +156,9 @@ impl DatabaseView {
                                     .line_height(px(20.))
                                     .whitespace_normal()
                                     .text_color(rgb(if value.is_none() {
-                                        ui::FAINT
+                                        ui::colors().faint
                                     } else {
-                                        ui::TEXT
+                                        ui::colors().text
                                     }))
                                     .child(chunk.to_owned())
                                     .into_any_element()
