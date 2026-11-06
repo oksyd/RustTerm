@@ -2,9 +2,9 @@ use super::clipboard::{ClipboardRead, Feedback};
 use super::*;
 use crate::app::text_input::alt_gr_text;
 use gpui::{
-    ClipboardEntry, ClipboardItem, EntityInputHandler, KeyDownEvent, KeyUpEvent, Modifiers,
-    ModifiersChangedEvent, MouseButton, ScrollDelta, ScrollWheelEvent, UTF16Selection, point, px,
-    size,
+    ClipboardEntry, ClipboardItem, EntityInputHandler, KeyDownEvent, KeyUpEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, ScrollDelta, ScrollWheelEvent, UTF16Selection,
+    point, px, size,
 };
 use rustterm::i18n::messages as i18n_key;
 
@@ -332,8 +332,7 @@ impl RdpView {
                 );
             }
         }
-        // Printable text and IME commits have exactly one path. In particular,
-        // AltGr must not be interpreted as a Ctrl+Alt remote shortcut.
+        // AltGr text must not be interpreted as a Ctrl+Alt remote shortcut.
         if let Some(text) = alt_gr_text(key) {
             // GPUI's Linux backends only forward text automatically when the
             // modifiers are a subset of Shift. Deliver AltGr text explicitly.
@@ -342,11 +341,10 @@ impl RdpView {
             cx.stop_propagation();
             return;
         }
-        let shortcut = mods.control || mods.alt || mods.platform;
-        if !is_special(&key.key) && !shortcut {
-            return;
-        }
-        if let Some(scancode) = scancode(&key.key) {
+        // Ordinary typing must reach the Windows keyboard/IME pipeline. Unicode
+        // injection bypasses it, so even a remote Chinese IME receives Latin
+        // text when the local desktop is using an English keyboard.
+        if let Some((scancode, mods)) = key_scancode(key, window.modifiers()) {
             if self.sync_modifiers(mods, cx)
                 && self.send(
                     RdpCommand::Key {
@@ -1231,51 +1229,50 @@ fn utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
     start..offset(text, range.end).max(start)
 }
 
-fn is_special(key: &str) -> bool {
-    matches!(
-        key,
-        "escape"
-            | "backspace"
-            | "tab"
-            | "enter"
-            | "return"
-            | "insert"
-            | "delete"
-            | "home"
-            | "end"
-            | "pageup"
-            | "pagedown"
-            | "up"
-            | "down"
-            | "left"
-            | "right"
-            | "printscreen"
-            | "capslock"
-            | "numlock"
-            | "scrolllock"
-            | "menu"
-    ) || key
-        .strip_prefix('f')
-        .and_then(|s| s.parse::<u8>().ok())
-        .is_some_and(|n| (1..=12).contains(&n))
+fn key_scancode(key: &Keystroke, physical: Modifiers) -> Option<(u16, Modifiers)> {
+    if alt_gr_text(key).is_some() {
+        return None;
+    }
+    let mut modifiers = key.modifiers;
+    // GPUI removes Shift from symbol keystrokes (Shift+1 becomes "!").
+    // Restore it without changing local shortcut matching above.
+    modifiers.shift |= physical.shift;
+    let shortcut = modifiers.control || modifiers.alt || modifiers.platform;
+    if !shortcut
+        && key.key_char.as_deref().is_some_and(|text| {
+            // Keep local layout/compose text on the Unicode path when the key
+            // cannot reproduce it. GPUI may expose an ASCII key name for a
+            // non-Latin layout, and does not forward Caps Lock on every backend.
+            if text.len() != 1 || !text.is_ascii() {
+                return true;
+            }
+            let character = text.as_bytes()[0];
+            let shifted =
+                character.is_ascii_uppercase() || b"~!@#$%^&*()_+{}|:\"<>?".contains(&character);
+            character != b' ' && shifted != modifiers.shift
+        })
+    {
+        return None;
+    }
+    Some((scancode(&key.key)?, modifiers))
 }
 
 /// Set-1 scan codes; the high E0 byte marks extended RDP keys.
 fn scancode(key: &str) -> Option<u16> {
     Some(match key {
         "escape" => 0x01,
-        "1" => 0x02,
-        "2" => 0x03,
-        "3" => 0x04,
-        "4" => 0x05,
-        "5" => 0x06,
-        "6" => 0x07,
-        "7" => 0x08,
-        "8" => 0x09,
-        "9" => 0x0a,
-        "0" => 0x0b,
-        "-" => 0x0c,
-        "=" => 0x0d,
+        "1" | "!" => 0x02,
+        "2" | "@" => 0x03,
+        "3" | "#" => 0x04,
+        "4" | "$" => 0x05,
+        "5" | "%" => 0x06,
+        "6" | "^" => 0x07,
+        "7" | "&" => 0x08,
+        "8" | "*" => 0x09,
+        "9" | "(" => 0x0a,
+        "0" | ")" => 0x0b,
+        "-" | "_" => 0x0c,
+        "=" | "+" => 0x0d,
         "backspace" => 0x0e,
         "tab" => 0x0f,
         "q" => 0x10,
@@ -1288,8 +1285,8 @@ fn scancode(key: &str) -> Option<u16> {
         "i" => 0x17,
         "o" => 0x18,
         "p" => 0x19,
-        "[" => 0x1a,
-        "]" => 0x1b,
+        "[" | "{" => 0x1a,
+        "]" | "}" => 0x1b,
         "enter" | "return" => 0x1c,
         "control" => 0x1d,
         "a" => 0x1e,
@@ -1301,11 +1298,11 @@ fn scancode(key: &str) -> Option<u16> {
         "j" => 0x24,
         "k" => 0x25,
         "l" => 0x26,
-        ";" => 0x27,
-        "'" => 0x28,
-        "`" => 0x29,
+        ";" | ":" => 0x27,
+        "'" | "\"" => 0x28,
+        "`" | "~" => 0x29,
         "shift" => 0x2a,
-        "\\" => 0x2b,
+        "\\" | "|" => 0x2b,
         "z" => 0x2c,
         "x" => 0x2d,
         "c" => 0x2e,
@@ -1313,9 +1310,9 @@ fn scancode(key: &str) -> Option<u16> {
         "b" => 0x30,
         "n" => 0x31,
         "m" => 0x32,
-        "," => 0x33,
-        "." => 0x34,
-        "/" => 0x35,
+        "," | "<" => 0x33,
+        "." | ">" => 0x34,
+        "/" | "?" => 0x35,
         "alt" => 0x38,
         "space" | " " => 0x39,
         "capslock" => 0x3a,
@@ -1543,13 +1540,146 @@ mod tests {
     }
 
     #[test]
-    fn extended_keys_and_printable_text_have_distinct_paths() {
-        assert_eq!(scancode("delete"), Some(0xe053));
-        assert_eq!(scancode("c"), Some(0x2e));
-        assert!(!is_special("c"));
-        assert!(!is_special("中"));
-        assert!(is_special("f12"));
-        assert!(is_special("enter"));
+    fn english_typing_reaches_remote_ime_as_keys_including_candidate_selection() {
+        let plain = Modifiers::default();
+        for (key, text, code) in [
+            ("n", Some("n"), 0x31),
+            ("i", Some("i"), 0x17),
+            ("h", Some("h"), 0x23),
+            ("a", Some("a"), 0x1e),
+            ("o", Some("o"), 0x18),
+            ("space", Some(" "), 0x39),
+            ("1", Some("1"), 0x02),
+            ("'", Some("'"), 0x28),
+            ("enter", None, 0x1c),
+            ("backspace", None, 0x0e),
+            ("delete", None, 0xe053),
+            ("f12", None, 0x58),
+        ] {
+            let key = Keystroke {
+                key: key.into(),
+                key_char: text.map(str::to_owned),
+                modifiers: plain,
+            };
+            assert_eq!(key_scancode(&key, plain), Some((code, plain)));
+        }
+    }
+
+    #[test]
+    fn shifted_symbols_preserve_shift_and_release_the_same_key_after_shift_is_released() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        for (shifted, plain) in [
+            ("!", "1"),
+            ("@", "2"),
+            ("#", "3"),
+            ("$", "4"),
+            ("%", "5"),
+            ("^", "6"),
+            ("&", "7"),
+            ("*", "8"),
+            ("(", "9"),
+            (")", "0"),
+            ("_", "-"),
+            ("+", "="),
+            ("{", "["),
+            ("}", "]"),
+            (":", ";"),
+            ("\"", "'"),
+            ("~", "`"),
+            ("|", "\\"),
+            ("<", ","),
+            (">", "."),
+            ("?", "/"),
+        ] {
+            // GPUI's symbol event omits Shift; Window still knows it is held.
+            let key = Keystroke {
+                key: shifted.into(),
+                key_char: Some(shifted.into()),
+                modifiers: Modifiers::default(),
+            };
+            let (code, modifiers) = key_scancode(&key, shift).unwrap();
+            assert_eq!(modifiers, shift);
+            let mut held = BTreeSet::from([code]);
+            assert!(held.remove(&scancode(plain).unwrap()));
+            assert_eq!(scancode(shifted), Some(code));
+        }
+    }
+
+    #[test]
+    fn local_layout_text_and_altgr_keep_unicode_delivery() {
+        let plain = Modifiers::default();
+        for (key, text) in [
+            ("n", "你"),
+            ("q", "ๆ"),
+            ("eacute", "é"),
+            ("a", "A"),
+            ("a", "abc"),
+            ("!", "!"),
+        ] {
+            let key = Keystroke {
+                key: key.into(),
+                key_char: Some(text.into()),
+                modifiers: plain,
+            };
+            assert_eq!(key_scancode(&key, plain), None);
+        }
+        let alt_gr = Modifiers {
+            control: true,
+            alt: true,
+            ..plain
+        };
+        let key = Keystroke {
+            key: "q".into(),
+            key_char: Some("@".into()),
+            modifiers: alt_gr,
+        };
+        assert_eq!(key_scancode(&key, alt_gr), None);
+        assert_eq!(alt_gr_text(&key), Some("@"));
+
+        let shift = Modifiers {
+            shift: true,
+            ..plain
+        };
+        // Caps Lock+Shift and layouts with shifted digits must retain their
+        // committed text rather than becoming uppercase letters or US symbols.
+        for key in ["a", "1"] {
+            let key = Keystroke {
+                key: key.into(),
+                key_char: Some(key.into()),
+                modifiers: shift,
+            };
+            assert_eq!(key_scancode(&key, shift), None);
+        }
+    }
+
+    #[test]
+    fn shifted_letters_and_shortcuts_keep_remote_modifiers() {
+        for (modifiers, text) in [
+            (
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                Some("A"),
+            ),
+            (
+                Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                None,
+            ),
+        ] {
+            let key = Keystroke {
+                key: "a".into(),
+                key_char: text.map(str::to_owned),
+                modifiers,
+            };
+            assert_eq!(key_scancode(&key, modifiers), Some((0x1e, modifiers)));
+        }
     }
 
     #[test]
