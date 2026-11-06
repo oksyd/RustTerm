@@ -1,3 +1,19 @@
+## [0.1.6] - 2026-11-06
+
+### 🚀 Features
+
+- *(terminal)* Support Ctrl+wheel font zoom
+- Add nested connection groups and live theme previews
+- Add Elasticsearch support
+
+### 🐛 Bug Fixes
+
+- *(rdp)* Restore remote IME input
+## [0.1.5] - 2026-11-04
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.5
 ## [0.1.4] - 2026-11-04
 
 ### 🐛 Bug Fixes
