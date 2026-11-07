@@ -9,6 +9,7 @@ const AUTO_COLUMN_WIDTH: f32 = 560.;
 #[derive(Clone, Copy)]
 pub(super) enum ResizeTarget {
     Browser,
+    Editor,
     Column(usize),
 }
 
@@ -46,8 +47,20 @@ impl DatabaseView {
             self.resize_drag = None;
             return;
         }
-        let requested = drag.width + f32::from(event.position.x) - drag.start_x;
+        let position = if matches!(drag.target, ResizeTarget::Editor) {
+            event.position.y
+        } else {
+            event.position.x
+        };
+        let requested = drag.width + f32::from(position) - drag.start_x;
         let changed = match drag.target {
+            ResizeTarget::Editor => {
+                let height = requested.clamp(100., self.editor_max_height());
+                let changed = (self.editor_height - height).abs() > 0.5;
+                self.editor_height = height;
+                self.update_editor_height(cx);
+                changed
+            }
             ResizeTarget::Browser => {
                 let width = requested.clamp(180., self.browser_max_width());
                 let changed = (self.browser_width - width).abs() > 0.5;

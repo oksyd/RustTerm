@@ -178,7 +178,7 @@ impl DatabaseView {
     }
 }
 
-fn value_chunks(text: &str) -> Vec<Range<usize>> {
+pub(super) fn value_chunks(text: &str) -> Vec<Range<usize>> {
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {

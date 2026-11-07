@@ -2,6 +2,7 @@ mod chrome;
 mod command_notice;
 mod connections;
 mod dialogs;
+mod docker;
 mod editing;
 mod layout;
 mod locking;
@@ -89,6 +90,7 @@ enum LeaveAction {
 pub struct Workspace {
     config: AppConfig,
     path: PathBuf,
+    paths: rustterm::config::AppPaths,
     _lock: ConfigLock,
     tabs: Vec<Tab>,
     tab_scroll: gpui::ScrollHandle,
@@ -152,6 +154,7 @@ pub struct Workspace {
     command_views: HashMap<usize, Entity<CommandHistoryView>>,
     command_subscriptions: HashMap<usize, Subscription>,
     resources: resources::Resources,
+    docker: docker::Dockers,
     selected_profile: Option<Uuid>,
     sidebar_focus: FocusHandle,
     sidebar_scroll: gpui::ScrollHandle,
@@ -179,7 +182,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(
         config: AppConfig,
-        path: PathBuf,
+        paths: rustterm::config::AppPaths,
         lock: ConfigLock,
         startup: Startup,
         window: &mut Window,
@@ -227,7 +230,7 @@ impl Workspace {
                 }
                 cx.notify();
             });
-        let window_state = WindowState::new(window, &path);
+        let window_state = WindowState::new(window, &paths);
         let authentication =
             cx.new(|cx| crate::app::auth_prompt::AuthPrompt::new(window_state.clone(), window, cx));
         let authentication_subscription =
@@ -249,7 +252,8 @@ impl Workspace {
             restart_requested: false,
             restart: startup.restart.clone(),
             config,
-            path,
+            path: paths.config.clone(),
+            paths,
             _lock: lock,
             tabs: Vec::new(),
             tab_scroll: gpui::ScrollHandle::new(),
@@ -313,6 +317,7 @@ impl Workspace {
             command_views: HashMap::new(),
             command_subscriptions: HashMap::new(),
             resources: resources::Resources::default(),
+            docker: docker::Dockers::default(),
             selected_profile: None,
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: gpui::ScrollHandle::new(),
@@ -421,7 +426,7 @@ impl Workspace {
                         }
                         pane.close(cx);
                     }
-                    diagnostics::metrics(&this.path, this.panes.len(), runs, snapshots);
+                    diagnostics::metrics(&this.paths.logs(), this.panes.len(), runs, snapshots);
                     this.save(cx);
                     cx.notify();
                     true
@@ -447,7 +452,7 @@ impl Workspace {
                 .update(cx, |this, cx| {
                     let forced = this.panes.values().any(|p| p.is_running(cx));
                     if forced {
-                        diagnostics::record(&this.path, "forced-application-exit", 0);
+                        this.window_state.record("forced-application-exit", 0);
                     }
                     this.saving || this.save_failed || this.pending_credentials > 0
                 })

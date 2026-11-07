@@ -1603,15 +1603,7 @@ impl Render for FileTransferView {
         let selected = self.selected.len();
         let download_unavailable =
             unavailable.or((selected == 0).then_some(i18n_key::COMMON_SELECT_AT_LEAST_ONE_ITEM));
-        let path_bar = div()
-            .h(px(38.))
-            .flex_shrink_0()
-            .px(px(10.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
+        let path_bar = ui::panel_header()
             .child(
                 ui::icon_button_enabled(
                     "remote-parent",
@@ -1652,14 +1644,7 @@ impl Render for FileTransferView {
                     this.navigate(path, cx);
                 })),
             );
-        let toolbar = div()
-            .h(px(38.))
-            .flex_shrink_0()
-            .px(px(8.))
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            .text_size(px(11.))
+        let toolbar = ui::toolbar()
             .child(
                 ui::text_button_enabled(
                     "upload",
@@ -1808,19 +1793,17 @@ impl Render for FileTransferView {
         panel = panel.child(header);
         if self.entries.is_empty() {
             panel = panel.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .text_color(rgb(ui::colors().muted))
-                    .child(if self.loading {
+                ui::empty_state(
+                    Icon::Folder,
+                    if self.loading {
                         tr(i18n_key::TERMINAL_LOADING_FILES)
                     } else if !self.directory_ready {
                         tr(i18n_key::TERMINAL_COULD_NOT_READ_THIS_DIRECTORY_CHANGE_THE_PATH_AND_TRY)
                     } else {
                         tr(i18n_key::TERMINAL_THIS_DIRECTORY_IS_EMPTY)
-                    }),
+                    },
+                )
+                .flex_1(),
             );
         } else {
             panel = panel.child(
@@ -1930,12 +1913,12 @@ impl Render for FileTransferView {
         }
         if let Some(error) = &self.error {
             panel = panel.child(
-                div()
-                    .px(px(10.))
-                    .py(px(6.))
-                    .flex_shrink_0()
-                    .text_color(rgb(ui::colors().danger))
-                    .child(error.render()),
+                ui::feedback(error.render(), true)
+                    .id("sftp-error")
+                    .max_h(px(96.))
+                    .overflow_y_scroll()
+                    .map(ui::preserve_scroll_axes)
+                    .map(|content| ui::scrollable(content, None)),
             );
         } else if let Some(notice) = &self.notice {
             panel = panel.child(

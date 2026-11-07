@@ -186,7 +186,6 @@ impl Receiver {
         })
     }
 
-    #[cfg(test)]
     pub(super) fn try_recv(&mut self) -> Result<QueuedCommand, TryRecvError> {
         self.dequeue()
     }

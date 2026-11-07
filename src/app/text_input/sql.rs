@@ -298,7 +298,7 @@ impl TextInput {
         let left = (f32::from(self.line_x(line, self.cursor) - self.scroll_x) + 9.)
             .clamp(0., (f32::from(bounds.size.width) - 260.).max(0.));
         let top = (line.row as f32 * 20. - f32::from(self.scroll_y) + 25.)
-            .clamp(5., (175. - height).max(5.));
+            .clamp(5., (self.multiline_height - 5. - height).max(5.));
         Some(
             div()
                 .id("sql-completion-menu")

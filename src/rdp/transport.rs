@@ -71,6 +71,25 @@ impl<S: AsyncRead + AsyncWrite> Framed<S> {
 }
 
 impl<S: AsyncRead + Unpin> Framed<S> {
+    pub async fn read_rdstls_capabilities(&mut self) -> Result<()> {
+        let bytes = self.read_frame(|_| Ok(Some(8))).await?;
+        if bytes[..6] != [1, 0, 1, 0, 1, 0] || u16::from_le_bytes([bytes[6], bytes[7]]) & 1 == 0 {
+            return Err(RdpError::Protocol("RDSTLS capabilities"));
+        }
+        Ok(())
+    }
+
+    pub async fn read_rdstls_result(&mut self) -> Result<()> {
+        let bytes = self.read_frame(|_| Ok(Some(10))).await?;
+        if bytes[..6] != [1, 0, 4, 0, 1, 0] {
+            return Err(RdpError::Protocol("RDSTLS authentication response"));
+        }
+        if bytes[6..] != [0; 4] {
+            return Err(RdpError::Authentication);
+        }
+        Ok(())
+    }
+
     pub async fn read_pdu(&mut self) -> Result<Bytes> {
         self.read_frame(|bytes| Ok(wire::frame_size(bytes, MAX_PDU)?.map(|(_, size)| size)))
             .await
@@ -680,6 +699,29 @@ mod tests {
         assert_eq!(framed.read_credssp().await.unwrap(), [0x30, 2, 5, 0]);
         assert_eq!(framed.read_early_auth().await.unwrap(), [0; 4]);
         assert_eq!(framed.read_pdu().await.unwrap().as_ref(), &[0, 5, 6, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn rdstls_authentication_preserves_the_following_rdp_frame() {
+        let bytes = [
+            1, 0, 1, 0, 1, 0, 3, 0, 1, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 5, 6, 0, 0,
+        ];
+        let mut framed = Framed::new(bytes.as_slice());
+        framed.read_rdstls_capabilities().await.unwrap();
+        framed.read_rdstls_result().await.unwrap();
+        assert_eq!(framed.read_pdu().await.unwrap().as_ref(), &[0, 5, 6, 0, 0]);
+        let denied = [1, 0, 4, 0, 1, 0, 5, 0, 0, 0];
+        assert_eq!(
+            Framed::new(denied.as_slice()).read_rdstls_result().await,
+            Err(RdpError::Authentication)
+        );
+        let unsupported = [1, 0, 1, 0, 1, 0, 2, 0];
+        assert!(
+            Framed::new(unsupported.as_slice())
+                .read_rdstls_capabilities()
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

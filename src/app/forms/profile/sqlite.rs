@@ -11,11 +11,6 @@ use rustterm::{
 };
 use std::path::PathBuf;
 
-pub(super) const FIELDS: &[&str] = &[
-    i18n_key::DATABASE_DATABASE_FILE,
-    i18n_key::DATABASE_QUERY_TIMEOUT_SECONDS,
-];
-
 impl ProfileForm {
     pub(super) fn sqlite_config(&self, cx: &App) -> anyhow::Result<SqliteConfig> {
         let original = self.original.as_ref().and_then(|profile| {
@@ -244,7 +239,7 @@ impl ProfileForm {
             ))
             .child(hint(i18n_key::DATABASE_OPENING_A_DATABASE_REQUIRES_AN_EXISTING_FILE_NEW_DATABASE_CREATES))
             .child(row(i18n_key::DATABASE_ACCESS_MODE, access))
-            .child(self.fields.selected_rows(&[i18n_key::DATABASE_QUERY_TIMEOUT_SECONDS]))
+            .child(self.network_options(cx))
             .when(self.native_pending, |body| {
                 body.child(hint(if self.sqlite_creating {
                     i18n_key::DATABASE_CREATING_DATABASE

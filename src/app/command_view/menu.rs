@@ -2,7 +2,7 @@ use super::{CommandHistoryEvent, CommandHistoryView, CommandMenu};
 use crate::app::ui::{self, Icon};
 use gpui::{
     AnyElement, App, ClipboardItem, Context, KeyDownEvent, Pixels, Point, Window, anchored, div,
-    point, prelude::*, px, rgb,
+    prelude::*, px,
 };
 use rustterm::{config::Uuid, i18n::messages as i18n_key, i18n::tr};
 
@@ -153,24 +153,11 @@ impl CommandHistoryView {
                 self.run_menu_action(menu, ACTIONS[menu.index].0, window, cx)
             }
             "up" | "down" | "tab" | "home" | "end" => {
-                let backwards = key == "up"
-                    || key == "end"
-                    || (key == "tab" && event.keystroke.modifiers.shift);
-                let start = match key {
-                    "home" => 0,
-                    "end" => ACTIONS.len() - 1,
-                    _ if backwards => (menu.index + ACTIONS.len() - 1) % ACTIONS.len(),
-                    _ => (menu.index + 1) % ACTIONS.len(),
-                };
-                let next = (0..ACTIONS.len())
-                    .map(|step| {
-                        if backwards {
-                            (start + ACTIONS.len() - step) % ACTIONS.len()
-                        } else {
-                            (start + step) % ACTIONS.len()
-                        }
-                    })
-                    .find(|&index| self.action_disabled(menu, ACTIONS[index].0, cx).is_none());
+                let enabled: Vec<_> = ACTIONS
+                    .iter()
+                    .map(|(action, _, _)| self.action_disabled(menu, *action, cx).is_none())
+                    .collect();
+                let next = ui::popup::next_index(event, menu.index, &enabled);
                 if let Some(index) = next {
                     self.menu.as_mut().unwrap().index = index;
                     self.menu_scroll.scroll_to_item(index);
@@ -188,27 +175,9 @@ impl CommandHistoryView {
         let bounds = self.bounds?;
         let width = (bounds.size.width - px(8.)).clamp(px(1.), px(280.));
         let height = (bounds.size.height - px(8.)).clamp(px(1.), px(130.));
-        let position = point(
-            menu.position
-                .x
-                .clamp(bounds.left(), (bounds.right() - width).max(bounds.left())),
-            menu.position
-                .y
-                .clamp(bounds.top(), (bounds.bottom() - height).max(bounds.top())),
-        );
-        let popup = div()
-            .id("command-context-menu")
-            .w(width)
-            .max_h(height)
-            .py(px(4.))
-            .flex()
-            .flex_col()
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(3.))
-            .shadow_md()
-            .occlude()
+        let position = ui::popup::fit(menu.position, gpui::size(width, height), bounds).origin;
+        let popup = ui::popup::surface("command-context-menu")
+            .w(width).max_h(height)
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.menu_scroll)
@@ -218,9 +187,8 @@ impl CommandHistoryView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.menu = None;
-                cx.notify();
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.close_menu(window, cx);
             }))
             .children(
                 ACTIONS
@@ -228,19 +196,9 @@ impl CommandHistoryView {
                     .enumerate()
                     .map(|(index, (action, label, icon))| {
                         let reason = self.action_disabled(menu, action, cx);
-                        div()
-                    .id(("command-context-action", index))
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_size(px(12.))
-                    .text_color(rgb(if reason.is_none() { ui::colors().text } else { ui::colors().faint }))
-                    .when(reason.is_none() && menu.index == index, |d| d.bg(rgb(ui::colors().selected)))
+                        ui::popup::row(("command-context-action", index), reason.is_none(),menu.index == index)
                     .when(reason.is_none(), |d| {
-                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::colors().selected)))
+                        d
                             .on_mouse_move(cx.listener(move |this, _, _, cx| {
                                 if let Some(menu) = &mut this.menu && menu.index != index {
                                     menu.index = index;

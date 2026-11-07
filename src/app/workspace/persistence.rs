@@ -15,11 +15,11 @@ impl Workspace {
         self.saving = true;
         self.save_failed = false;
         let config = self.config.clone();
-        let path = self.path.join("config.toml");
+        let paths = self.paths.clone();
         let saved = config.clone();
         let task = cx
             .background_executor()
-            .spawn(async move { config.save(path) });
+            .spawn(async move { paths.save_config(&config) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {

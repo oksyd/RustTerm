@@ -209,6 +209,24 @@ pub(crate) fn mcs_send_data(user_id: u16, channel: u16, payload: &[u8]) -> Resul
     x224_data(&out)
 }
 
+pub(crate) fn mcs_disconnect(packet: &[u8]) -> Result<Option<u8>> {
+    if packet.first() != Some(&3) {
+        return Ok(None);
+    }
+    let data = x224_payload(packet)?;
+    if !data.first().is_some_and(|byte| byte >> 2 == 8) {
+        return Ok(None);
+    }
+    if data.len() != 2 || data[1] & 0x7f != 0 {
+        return Err(Error::Invalid("MCS disconnect"));
+    }
+    let reason = ((data[0] & 3) << 1) | (data[1] >> 7);
+    if reason > 4 {
+        return Err(Error::Invalid("MCS disconnect reason"));
+    }
+    Ok(Some(reason))
+}
+
 pub(crate) fn mcs_indication(packet: &[u8]) -> Result<(u16, u16, &[u8])> {
     let mut reader = Reader::new(x224_payload(packet)?);
     if reader.u8()? != 0x68 {
@@ -226,6 +244,24 @@ pub(crate) fn mcs_indication(packet: &[u8]) -> Result<(u16, u16, &[u8])> {
     let data = reader.take(length)?;
     reader.finish()?;
     Ok((user, channel, data))
+}
+
+/// Read one Share Control PDU from an MCS user-data field. T.128 flow data
+/// consumes the remaining field and is ignored (MS-RDPBCGR 2.2.8.1.1.1.1).
+pub(crate) fn next_share_pdu<'a>(pdus: &mut Reader<'a>) -> Result<Option<&'a [u8]>> {
+    if pdus.is_empty() {
+        return Ok(None);
+    }
+    let mut header = *pdus;
+    let length = usize::from(header.u16_le()?);
+    if length == 0x8000 {
+        pdus.skip(pdus.remaining_len())?;
+        return Ok(None);
+    }
+    if length < 6 {
+        return Err(Error::Invalid("Share Control length"));
+    }
+    pdus.take(length).map(Some)
 }
 
 pub(crate) fn share_control(source: u16, kind: u16, body: &[u8]) -> Result<Vec<u8>> {

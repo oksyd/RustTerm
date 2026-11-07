@@ -43,6 +43,10 @@ workspace-close-panes-confirmation =
     }
 
 workspace-close-tab = Close tab
+workspace-new-tab-session = New session
+workspace-close-other-tabs = Close other tabs
+workspace-close-tabs-to-right = Close tabs to the right
+workspace-close-tab-group = Close group
 
 workspace-close-window = Close window
 

@@ -39,6 +39,10 @@ workspace-close-current-pane = 关闭当前分屏
 workspace-close-panes-confirmation = 关闭 { $count } 个分栏？
 
 workspace-close-tab = 关闭标签
+workspace-new-tab-session = 新建会话
+workspace-close-other-tabs = 关闭其他标签
+workspace-close-tabs-to-right = 关闭右侧标签
+workspace-close-tab-group = 关闭组
 
 workspace-close-window = 关闭窗口
 

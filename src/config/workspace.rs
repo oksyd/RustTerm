@@ -60,6 +60,10 @@ pub struct WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
     pub fn validate(&self) -> Result<()> {
         fn node(
             layout: &SavedLayout,

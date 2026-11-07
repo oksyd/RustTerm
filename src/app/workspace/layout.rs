@@ -85,6 +85,10 @@ impl Workspace {
                 commands.read(cx).focus_handle().focus(window);
                 return;
             }
+            if let Some(docker) = self.active_docker() {
+                docker.read(cx).focus_handle().focus(window);
+                return;
+            }
             if let Some(resources) = self.active_resources() {
                 resources.read(cx).focus_handle().focus(window);
                 return;
@@ -222,6 +226,7 @@ impl Workspace {
         };
         self.tabs[self.active].focused = self.focused;
         self.sync_resources(window, cx);
+        self.sync_docker(window, cx);
         self.utility_overlay = self.utility_is_open()
             && !WorkspaceLayout::new(
                 f32::from(
@@ -240,7 +245,9 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn input_composing(&self, window: &Window, cx: &App) -> bool {
-        self.modal_composing(cx)
+        self.active_docker()
+            .is_some_and(|view| view.read(cx).input_composing(cx))
+            || self.modal_composing(cx)
             || self.session_filter.read(cx).is_composing()
             || self
                 .panes

@@ -9,6 +9,8 @@ struct ServerCapabilities {
     multifragment: bool,
     large_pointer: u16,
     persistent_cache: bool,
+    rail: u32,
+    window_list: u32,
 }
 
 const NSCODEC_GUID: [u8; 16] = [
@@ -94,6 +96,39 @@ pub(super) fn share_body(packet: &[u8], kind: u16) -> Result<&[u8]> {
     Ok(reader.remaining())
 }
 
+/// Notifications can precede the first Demand Active. In particular, preserve
+/// the server's Set Error Info code instead of reporting a malformed activation.
+pub(super) fn before_demand(packet: &[u8]) -> Result<bool> {
+    match packet.get(2..4) {
+        Some([0x16, 0]) => {
+            let mut reader = Reader::new(share_body(packet, 6)?);
+            let _share = reader.u32_le()?;
+            let length = usize::from(reader.u16_le()?);
+            reader.skip(length)?;
+            reader.finish()?;
+            Ok(true)
+        }
+        Some([0x17, 0]) => {
+            let mut reader = Reader::new(share_body(packet, 7)?);
+            reader.skip(8)?; // shareId, padding, streamId, uncompressedLength
+            let kind = reader.u8()?;
+            if reader.u8()? != 0 || reader.u16_le()? != 0 {
+                return Err(Error::Unsupported("compressed startup notification"));
+            }
+            if !matches!(kind, 47 | 54) {
+                return Err(Error::Invalid("notification before Demand Active"));
+            }
+            let code = reader.u32_le()?;
+            reader.finish()?;
+            if kind == 47 && code != 0 {
+                return Err(Error::Server(code));
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 fn demand_active(
     config: &ClientConfig,
     info: &mut ConnectionInfo,
@@ -101,7 +136,8 @@ fn demand_active(
 ) -> Result<ServerCapabilities> {
     let mut reader = Reader::new(share_body(packet, 1)?);
     info.server_id = u16::from_le_bytes([packet[4], packet[5]]);
-    if info.server_id < 1001 || info.server_id == info.user_id {
+    // FreeRDP can use the attached client's user ID as the Share Control source.
+    if info.server_id < 1001 {
         return Err(Error::Invalid("server channel identifier"));
     }
     info.share_id = reader.u32_le()?;
@@ -119,6 +155,8 @@ fn demand_active(
         multifragment: false,
         large_pointer: 0,
         persistent_cache: false,
+        rail: 0,
+        window_list: 0,
     };
     info.fastpath_input = false;
     info.unicode_input = false;
@@ -188,6 +226,11 @@ fn demand_active(
                     info.vc_chunk_size = chunk;
                 }
             }
+            23 => server.rail = cap.u32_le()?,
+            24 => {
+                server.window_list = cap.u32_le()?;
+                cap.skip(3)?;
+            }
             26 => {
                 let _server_max_request = cap.u32_le()?;
                 server.multifragment = true;
@@ -203,15 +246,10 @@ fn demand_active(
                     let guid = cap.take(16)?;
                     let _server_codec_id = cap.u8()?;
                     let length = usize::from(cap.u16_le()?);
-                    let properties = cap.take(length)?;
+                    cap.skip(length)?;
                     if guid == NSCODEC_GUID {
-                        if properties.len() != 3
-                            || properties[0] > 1
-                            || properties[1] > 1
-                            || !(1..=7).contains(&properties[2])
-                        {
-                            return Err(Error::Invalid("NSCodec capability"));
-                        }
+                        // Server properties are opaque. FreeRDP sends four
+                        // reserved bytes, not the three-byte client container.
                         info.nscodec = true;
                     }
                 }
@@ -234,6 +272,12 @@ fn demand_active(
             "missing general, bitmap or input capability",
         ));
     }
+    if config.remote_app.is_some() && (server.rail & 1 == 0 || server.window_list == 0) {
+        return Err(Error::Unsupported("server RemoteApp capabilities"));
+    }
+    if config.remote_app.is_some() {
+        info.surface_commands &= !0x10;
+    } // no per-desktop frame markers
     // NSCodec always discards chroma bits, even at color-loss level 1.
     info.nscodec &=
         config.allow_lossy_bitmaps && info.color_depth == 32 && info.surface_commands & 0x42 != 0;
@@ -312,6 +356,12 @@ fn confirm_active(
     }
     channel[4..8].copy_from_slice(&(info.vc_chunk_size as u32).to_le_bytes());
     capability(&mut caps, &mut count, 20, &channel);
+    if config.remote_app.is_some() {
+        capability(&mut caps, &mut count, 23, &1u32.to_le_bytes());
+        let mut windows = [0; 7];
+        windows[..4].copy_from_slice(&server.window_list.min(2).to_le_bytes());
+        capability(&mut caps, &mut count, 24, &windows);
+    }
     capability(&mut caps, &mut count, 12, &[0; 4]); // no beep
     capability(&mut caps, &mut count, 14, &[1, 0, 0, 0]);
 
@@ -523,8 +573,8 @@ mod tests {
             let mut codec = vec![1];
             codec.extend_from_slice(&NSCODEC_GUID);
             codec.push(1);
-            codec.extend_from_slice(&3u16.to_le_bytes());
-            codec.extend_from_slice(&[1, 1, 7]);
+            codec.extend_from_slice(&4u16.to_le_bytes());
+            codec.extend_from_slice(&[0; 4]); // FreeRDP server container.
             capability(&mut caps, &mut count, 29, &codec);
         }
         if acknowledgements {
@@ -566,6 +616,70 @@ mod tests {
     }
 
     #[test]
+    fn remote_app_requires_both_capabilities_and_declines_enhanced_graphics() {
+        let config = ClientConfig {
+            remote_app: Some(crate::remote_app::RemoteApp {
+                program: "||calc".into(),
+                ..Default::default()
+            }),
+            dynamic_resolution: false,
+            ..Default::default()
+        };
+        let mut info = info();
+        assert_eq!(
+            activate(&config, &mut info, &demand(None, false), false).unwrap_err(),
+            Error::Unsupported("server RemoteApp capabilities")
+        );
+        let mut request = demand(Some(0x52), true);
+        let count = u16::from_le_bytes([request[14], request[15]]);
+        let length = u16::from_le_bytes([request[12], request[13]]);
+        let mut rail_caps = Vec::new();
+        let mut rail_count = 0;
+        capability(
+            &mut rail_caps,
+            &mut rail_count,
+            23,
+            &0xffffu32.to_le_bytes(),
+        );
+        capability(&mut rail_caps, &mut rail_count, 24, &[2, 0, 0, 0, 3, 12, 0]);
+        request[14..16].copy_from_slice(&(count + rail_count).to_le_bytes());
+        request[12..14].copy_from_slice(&(length + rail_caps.len() as u16).to_le_bytes());
+        request.splice(request.len() - 4..request.len() - 4, rail_caps);
+        let total = request.len() as u16;
+        request[..2].copy_from_slice(&total.to_le_bytes());
+        let response = activate(&config, &mut info, &request, false).unwrap();
+        let caps = confirmed_caps(&response[0]);
+        assert_eq!(
+            caps.iter().find(|(kind, _)| *kind == 23).unwrap().1,
+            1u32.to_le_bytes()
+        );
+        assert_eq!(
+            caps.iter().find(|(kind, _)| *kind == 24).unwrap().1,
+            [2, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(info.surface_commands, 0x42);
+        assert!(!info.frame_acknowledgements);
+    }
+
+    #[test]
+    fn server_may_use_the_attached_user_as_its_share_source() {
+        let mut info = info();
+        info.user_id = 1002;
+        activate(
+            &ClientConfig::default(),
+            &mut info,
+            &demand(None, false),
+            false,
+        )
+        .unwrap();
+        assert_eq!(info.server_id, info.user_id);
+        let mut invalid = demand(None, false);
+        invalid[4..6].copy_from_slice(&1000u16.to_le_bytes());
+        assert!(activate(&ClientConfig::default(), &mut info, &invalid, false).is_err());
+        assert_eq!(info.server_id, 1002);
+    }
+
+    #[test]
     fn surface_negotiation_preserves_lossless_policy_and_server_capabilities() {
         for allow_lossy_bitmaps in [false, true] {
             let config = ClientConfig {
@@ -594,7 +708,7 @@ mod tests {
             assert!(
                 !confirmed_caps(&packets[0])
                     .iter()
-                    .any(|(kind, _)| matches!(kind, 28 | 29 | 30))
+                    .any(|(kind, _)| matches!(kind, 28..=30))
             );
         }
         let config = ClientConfig {
@@ -667,6 +781,8 @@ mod tests {
             multifragment: true,
             large_pointer: 3,
             persistent_cache: false,
+            rail: 0,
+            window_list: 0,
         };
         let packet = confirm_active(&config, &info, &server).unwrap();
         let caps = confirmed_caps(&packet);

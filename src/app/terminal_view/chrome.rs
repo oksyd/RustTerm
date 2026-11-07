@@ -319,13 +319,15 @@ impl TerminalView {
         self.menu_index = self.menu_index.min(items.len() - 1);
         match event.keystroke.key.as_str() {
             "escape" => self.close_menu(window, cx),
-            "up" => self.menu_index = (self.menu_index + items.len() - 1) % items.len(),
-            "tab" if event.keystroke.modifiers.shift => {
-                self.menu_index = (self.menu_index + items.len() - 1) % items.len()
+            "up" | "down" | "tab" | "home" | "end" => {
+                let enabled: Vec<_> = items
+                    .iter()
+                    .map(|item| self.menu_action_enabled(item.action))
+                    .collect();
+                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
+                    self.menu_index = index;
+                }
             }
-            "down" | "tab" => self.menu_index = (self.menu_index + 1) % items.len(),
-            "home" => self.menu_index = 0,
-            "end" => self.menu_index = items.len() - 1,
             "enter" | "return" | "space" => {
                 self.menu_action(items[self.menu_index].action, window, cx)
             }
@@ -374,9 +376,15 @@ impl TerminalView {
             .when(self.kind == TerminalKind::Ssh, |d| {
                 d.child(self.tool_button(SessionTool::Files, cx))
             })
-            .child(self.tool_button(SessionTool::Commands, cx))
+            .when(self.kind != TerminalKind::Container, |d| {
+                d.child(self.tool_button(SessionTool::Commands, cx))
+            })
+            .when(
+                matches!(self.kind, TerminalKind::Ssh | TerminalKind::Container),
+                |d| d.child(self.tool_button(SessionTool::Resources, cx)),
+            )
             .when(self.kind == TerminalKind::Ssh, |d| {
-                d.child(self.tool_button(SessionTool::Resources, cx))
+                d.child(self.tool_button(SessionTool::Docker, cx))
             })
             .child(
                 ui::icon_button_enabled(
@@ -445,10 +453,11 @@ impl TerminalView {
                 Some(i18n_key::COMMON_SFTP_IS_NOT_AVAILABLE_FOR_THIS_CONNECTION)
             }
             SessionTool::Resources
-                if self
-                    .resource_session()
-                    .and_then(Session::resources)
-                    .is_none() =>
+                if self.kind == TerminalKind::Ssh
+                    && self
+                        .resource_session()
+                        .and_then(Session::resources)
+                        .is_none() =>
             {
                 Some(i18n_key::COMMON_RESOURCE_MONITORING_IS_NOT_AVAILABLE_FOR_THIS_CONNECTION)
             }
@@ -458,6 +467,7 @@ impl TerminalView {
 
     fn tool_button(&self, tool: SessionTool, cx: &Context<Self>) -> AnyElement {
         let (id, label, glyph) = match tool {
+            SessionTool::Docker => ("session-docker", i18n_key::DOCKER_TITLE, Icon::Container),
             SessionTool::Files => ("session-files", i18n_key::TERMINAL_FILES, Icon::Folder),
             SessionTool::Commands => (
                 "session-commands",
@@ -495,6 +505,7 @@ impl TerminalView {
                     SessionTool::Files => PaneEvent::Files,
                     SessionTool::Commands => PaneEvent::Commands,
                     SessionTool::Resources => PaneEvent::Resources,
+                    SessionTool::Docker => PaneEvent::Docker,
                 });
             }))
             .into_any_element()
@@ -504,54 +515,50 @@ impl TerminalView {
         if !self.menu_open || self.context_menu_position.is_some() {
             return None;
         }
-        let (width, height) = self.bounds.map_or((300., 240.), |b| {
-            (f32::from(b.size.width), f32::from(b.size.height))
-        });
-        let mut popup = div()
-            .id(("pane-menu", self.index))
+        // The canvas excludes the toolbar and search/transfer rows. The toolbar
+        // may also span a docked utility panel, so anchor to its actual bounds.
+        let (width, height) = match (self.header_bounds, self.bounds) {
+            (Some(header), Some(canvas)) => (
+                f32::from(header.size.width),
+                f32::from(canvas.bottom() - header.top()).max(ui::PANE_HEADER_HEIGHT),
+            ),
+            _ => (300., 240.),
+        };
+        let items = self.menu_items();
+        let bounds = ui::popup::fit(
+            gpui::point(px(width - 324.), px(ui::PANE_HEADER_HEIGHT)),
+            gpui::size(
+                px(320.),
+                px(items.len() as f32 * ui::metrics::ROW + 2. * ui::popup::PADDING),
+            ),
+            gpui::Bounds::new(
+                gpui::point(px(4.), px(4.)),
+                gpui::size(px((width - 8.).max(0.)), px((height - 8.).max(0.))),
+            ),
+        );
+        let mut popup = ui::popup::surface(("pane-menu", self.index))
             .absolute()
-            .top(px(ui::PANE_HEADER_HEIGHT))
-            .right(px(4.))
-            .w(px((width - 8.).min(320.)))
-            .max_h(px((height - 8.).max(28.)))
-            .py(px(4.))
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(3.))
-            .shadow_md()
-            .occlude()
+            .left(bounds.origin.x)
+            .top(bounds.origin.y)
+            .w(bounds.size.width)
+            .max_h(bounds.size.height)
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.menu_scroll)
             .track_focus(&self.menu_focus)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for (index, item) in self.menu_items().into_iter().enumerate() {
+        for (index, item) in items.into_iter().enumerate() {
             let action = item.action;
             let enabled = self.menu_action_enabled(action);
             popup =
                 popup.child(
-                    div()
-                        .id(("pane-menu-item", index))
-                        .h(px(28.))
-                        .flex_shrink_0()
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(px(11.))
-                        .text_color(rgb(if enabled {
-                            ui::colors().text
-                        } else {
-                            ui::colors().faint
+                    ui::popup::row(("pane-menu-item", index), enabled, index == self.menu_index)
+                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                            if enabled && this.menu_index != index {
+                                this.menu_index = index;
+                                cx.notify();
+                            }
                         }))
-                        .when(index == self.menu_index, |d| {
-                            d.bg(rgb(ui::colors().selected))
-                        })
-                        .when(enabled, |d| {
-                            d.cursor_pointer()
-                                .hover(|s| s.bg(rgb(ui::colors().selected)))
-                        })
                         .child(ui::icon(item.icon))
                         .child(div().flex_1().min_w_0().truncate().child(tr(item.label)))
                         .when(width >= 290., |d| {
@@ -573,16 +580,15 @@ impl TerminalView {
                 .absolute()
                 .top_0()
                 .left_0()
-                .right_0()
-                .bottom_0()
+                .w(px(width))
+                .h(px(height))
                 .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.close_menu(window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                    this.close_menu(window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }))
                 .child(ui::scrollable(popup, Some(self.menu_scroll.clone())))
                 .into_any_element(),
         )

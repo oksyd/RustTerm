@@ -33,7 +33,7 @@ impl TunnelBridge {
         let name = match engine {
             SqlEngine::Mysql => "mysql.sock".to_owned(),
             SqlEngine::Postgres => format!(".s.PGSQL.{}", config.port),
-            SqlEngine::Sqlite => return Err(DatabaseError::InvalidConfig),
+            SqlEngine::Sqlite | SqlEngine::ClickHouse => return Err(DatabaseError::InvalidConfig),
         };
         let socket = directory.path().join(name);
         let listener = UnixListener::bind(&socket).map_err(|_| DatabaseError::SshConnection)?;

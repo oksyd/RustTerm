@@ -3,11 +3,26 @@ use super::{ArgumentRow, EnvironmentRow, ProfileForm, preserve_text, preserved_p
 use crate::app::ui::{self, ButtonStyle, Icon};
 use gpui::{AnyElement, App, Context, Window, div, prelude::*, rgb};
 use rustterm::config::{Connection, LocalConfig};
+use rustterm::i18n::Message;
 use rustterm::i18n::messages as i18n_key;
 use std::{collections::BTreeMap, path::PathBuf};
 
 const MAX_ARGUMENTS: usize = 256;
 const MAX_ENVIRONMENT: usize = 512;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StartupField {
+    Argument(usize),
+    EnvironmentKey(usize),
+    EnvironmentValue(usize),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(super) struct StartupError {
+    pub field: StartupField,
+    pub message: Message,
+}
 
 impl ProfileForm {
     pub(super) fn local_config(&self, cx: &App) -> anyhow::Result<LocalConfig> {
@@ -78,7 +93,10 @@ impl ProfileForm {
                     .any(char::is_control)
             });
         column()
-            .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_SHELL]))
+            .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_SHELL, i18n_key::COMMON_WORKING_DIRECTORY]))
+            .child(self.advanced_toggle(i18n_key::CONNECTIONS_STARTUP_OPTIONS,
+                rustterm::trf!(i18n_key::CONNECTIONS_STARTUP_SUMMARY, arguments = self.arguments.len(), variables = self.environment.len()), cx))
+            .when(self.advanced, |body| body.child(column()
             .child(row(
                 i18n_key::CONNECTIONS_ARGUMENTS,
                 column()
@@ -140,7 +158,6 @@ impl ProfileForm {
                         i18n_key::CONNECTIONS_EACH_ROW_IS_ONE_ARGUMENT_QUOTES_AND_SPACES_ARE_KEPT,
                     )),
             ))
-            .child(self.fields.selected_rows(&[i18n_key::COMMON_WORKING_DIRECTORY]))
             .child(row(
                 i18n_key::CONNECTIONS_ENVIRONMENT_VARIABLES,
                 column()
@@ -207,6 +224,8 @@ impl ProfileForm {
                     i18n_key::CONNECTIONS_IMPORTED_CONTROL_CHARACTERS_ARE_PRESERVED_UNLESS_YOU_EDIT_THEIR_ROW,
                 ))
             })
+            .child(hint(i18n_key::CONNECTIONS_ENVIRONMENT_VARIABLES_AND_STARTUP_ARGUMENTS_ARE_SAVED_AS_PLAIN_CONFIGURATION))
+            ))
             .into_any_element()
     }
 }
@@ -217,13 +236,42 @@ fn local_config(
     cwd: Option<PathBuf>,
     environment: impl IntoIterator<Item = (String, String)>,
 ) -> anyhow::Result<LocalConfig> {
+    for (index, argument) in args.iter().enumerate() {
+        if argument.len() > 65536 || argument.contains('\0') {
+            return Err(StartupError {
+                field: StartupField::Argument(index),
+                message: Message::new(
+                    i18n_key::CONNECTIONS_A_STARTUP_ARGUMENT_IS_TOO_LONG_OR_CONTAINS_NUL,
+                ),
+            }
+            .into());
+        }
+    }
     let mut env = BTreeMap::new();
-    for (key, value) in environment {
+    for (index, (key, value)) in environment.into_iter().enumerate() {
+        let invalid_key = key.is_empty() || key.contains(['=', '\0']) || key.len() > 256;
+        if invalid_key || value.contains('\0') || value.len() > 65536 {
+            return Err(StartupError {
+                field: if invalid_key {
+                    StartupField::EnvironmentKey(index)
+                } else {
+                    StartupField::EnvironmentValue(index)
+                },
+                message: Message::new(
+                    i18n_key::CONNECTIONS_AN_ENVIRONMENT_VARIABLE_IS_INVALID_OR_TOO_LONG,
+                ),
+            }
+            .into());
+        }
         if env.insert(key.clone(), value).is_some() {
-            anyhow::bail!(rustterm::msg!(
-                i18n_key::CONNECTIONS_DUPLICATE_ENVIRONMENT_VARIABLE_NAME,
-                name = key
-            ));
+            return Err(StartupError {
+                field: StartupField::EnvironmentKey(index),
+                message: rustterm::msg!(
+                    i18n_key::CONNECTIONS_DUPLICATE_ENVIRONMENT_VARIABLE_NAME,
+                    name = key
+                ),
+            }
+            .into());
         }
     }
     let config = LocalConfig {
@@ -238,7 +286,7 @@ fn local_config(
 
 #[cfg(test)]
 mod tests {
-    use super::local_config;
+    use super::{StartupError, StartupField, local_config};
     use rustterm::i18n::messages as i18n_key;
 
     #[test]
@@ -264,6 +312,10 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(
+            duplicate.downcast_ref::<StartupError>().unwrap().field,
+            StartupField::EnvironmentKey(1)
+        );
+        assert_eq!(
             duplicate.to_string(),
             rustterm::trf!(
                 i18n_key::CONNECTIONS_DUPLICATE_ENVIRONMENT_VARIABLE_NAME,
@@ -278,6 +330,32 @@ mod tests {
                 [(String::new(), "value".into())]
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_validation_identifies_the_row_to_reveal_after_collapsing() {
+        let error = local_config(
+            "/bin/sh".into(),
+            vec!["valid".into(), "bad\0argument".into()],
+            None,
+            [],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<StartupError>().unwrap().field,
+            StartupField::Argument(1)
+        );
+        let error = local_config(
+            "/bin/sh".into(),
+            vec![],
+            None,
+            [("OK".into(), "bad\0value".into())],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<StartupError>().unwrap().field,
+            StartupField::EnvironmentValue(0)
         );
     }
 }

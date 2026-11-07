@@ -1,17 +1,16 @@
 //! Remote desktop preferences retain credentials and certificate trust by identity.
 use rustterm::i18n::messages as i18n_key;
 mod display;
+mod navigation;
 mod resources;
+pub(super) use navigation::RdpFormView;
 
 use super::super::{column, hint, parse_value, row};
 use super::ProfileForm;
-use crate::app::{
-    text_input::TextInput,
-    ui::{self, ButtonStyle, Icon},
-};
-use gpui::{AnyElement, App, Context, Div, Entity, Window, div, prelude::*, px, rgb};
+use crate::app::ui::{self, ButtonStyle, Icon};
+use gpui::{AnyElement, App, Context, Div, Window, div, prelude::*, px, rgb};
 use rustterm::{
-    config::{Connection, Profile, RdpConfig, RdpQuality, RdpSharedFolder, Uuid},
+    config::{Connection, Profile, RdpConfig, RdpQuality, RdpRemoteApp, RdpSharedFolder, Uuid},
     i18n::tr,
 };
 
@@ -21,11 +20,19 @@ const FIELDS: &[&str] = &[
     i18n_key::WORKSPACE_USERNAME,
     i18n_key::RDP_DOMAIN_OPTIONAL,
 ];
+const REMOTE_APP: &[&str] = &[
+    i18n_key::RDP_REMOTE_APP_PROGRAM,
+    i18n_key::RDP_REMOTE_APP_ARGUMENTS,
+    i18n_key::RDP_REMOTE_APP_DIRECTORY,
+];
 const DIMENSIONS: &[&str] = &[
     i18n_key::RDP_DESKTOP_WIDTH_PIXELS,
     i18n_key::RDP_DESKTOP_HEIGHT_PIXELS,
 ];
-pub(super) const ADVANCED: &[&str] = &[i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS];
+pub(super) const ADVANCED: &[&str] = &[
+    i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
+    i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DisplayMode {
@@ -49,7 +56,9 @@ pub(super) struct RdpFormState {
 
 impl RdpFormState {
     fn display_mode(&self) -> DisplayMode {
-        if self.settings.monitor_count > 1 {
+        if self.settings.remote_app.is_some() {
+            DisplayMode::Fixed
+        } else if self.settings.monitor_count > 1 {
             DisplayMode::VirtualMonitors
         } else if self.settings.dynamic_resolution {
             DisplayMode::FollowWindow
@@ -77,6 +86,12 @@ pub(super) fn initial_fields(
             _ => None,
         })
         .unwrap_or_default();
+    let app = settings.remote_app.clone().unwrap_or_default();
+    values.extend([
+        (REMOTE_APP[0], app.program),
+        (REMOTE_APP[1], app.arguments),
+        (REMOTE_APP[2], app.working_directory),
+    ]);
     values.extend([
         (i18n_key::WORKSPACE_HOST, settings.host.clone()),
         (i18n_key::WORKSPACE_PORT, settings.port.to_string()),
@@ -97,6 +112,10 @@ pub(super) fn initial_fields(
             i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
             settings.timeout_secs.to_string(),
         ),
+        (
+            i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS,
+            settings.keepalive_secs.to_string(),
+        ),
     ]);
     RdpFormState {
         settings,
@@ -105,20 +124,6 @@ pub(super) fn initial_fields(
 }
 
 impl ProfileForm {
-    pub(super) fn rdp_inputs(&self, cx: &App) -> Vec<Entity<TextInput>> {
-        let mut inputs = self.fields.selected_inputs(FIELDS);
-        if self.credential_input_visible(cx) {
-            inputs.push(self.credentials.input.clone());
-        }
-        if self.rdp.display_mode() != DisplayMode::FollowWindow {
-            inputs.extend(self.fields.selected_inputs(DIMENSIONS));
-        }
-        if self.advanced {
-            inputs.extend(self.fields.selected_inputs(ADVANCED));
-        }
-        inputs
-    }
-
     pub(super) fn rdp_config(
         &self,
         current_profiles: &[Profile],
@@ -127,12 +132,21 @@ impl ProfileForm {
         let get = |key| self.fields.get(key, cx);
         let domain = get(i18n_key::RDP_DOMAIN_OPTIONAL);
         let mut settings = self.rdp.settings.clone();
+        if settings.remote_app.is_some() {
+            settings.remote_app = Some(RdpRemoteApp {
+                program: get(REMOTE_APP[0]),
+                arguments: get(REMOTE_APP[1]),
+                working_directory: get(REMOTE_APP[2]),
+            });
+        }
         settings.host = get(i18n_key::WORKSPACE_HOST);
         settings.port = parse_value(i18n_key::WORKSPACE_PORT, &get(i18n_key::WORKSPACE_PORT))?;
         settings.username = get(i18n_key::WORKSPACE_USERNAME);
         settings.domain = (!domain.is_empty()).then_some(domain);
-        settings.dynamic_resolution = self.rdp.display_mode() == DisplayMode::FollowWindow;
-        if !settings.dynamic_resolution {
+        if settings.remote_app.is_none() {
+            settings.dynamic_resolution = self.rdp.display_mode() == DisplayMode::FollowWindow;
+        }
+        if self.rdp.display_mode() != DisplayMode::FollowWindow {
             settings.width = parse_value(
                 i18n_key::RDP_DESKTOP_WIDTH_PIXELS,
                 &get(i18n_key::RDP_DESKTOP_WIDTH_PIXELS),
@@ -146,6 +160,10 @@ impl ProfileForm {
             i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
             &get(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS),
         )?;
+        settings.keepalive_secs = parse_value(
+            i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS,
+            &get(i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS),
+        )?;
         preserve_references(
             &mut settings,
             self.original.as_ref().map(|profile| profile.id),
@@ -154,62 +172,6 @@ impl ProfileForm {
         );
         settings.validate()?;
         Ok(settings)
-    }
-
-    pub(super) fn rdp_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        column()
-            .child(
-                section(i18n_key::RDP_CONNECTION)
-                    .child(self.fields.selected_rows(FIELDS))
-                    .child(self.credential_editor(cx)),
-            )
-            .child(self.rdp_display(cx))
-            .child(self.rdp_resources(cx))
-            .child(
-                ui::text_button(
-                    "rdp-advanced",
-                    i18n_key::RDP_ADVANCED_RDP_SETTINGS,
-                    ButtonStyle::Neutral,
-                )
-                .flex()
-                .items_center()
-                .gap_1()
-                .tab_index(0)
-                .border_1()
-                .border_color(rgb(ui::colors().border))
-                .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                .child(ui::icon(if self.advanced {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronRight
-                }))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this.native_pending || this.prompts.is_blocked() {
-                        return;
-                    }
-                    if this.advanced
-                        && this
-                            .fields
-                            .selected_inputs(ADVANCED)
-                            .iter()
-                            .any(|input| input.read(cx).focus_handle().is_focused(window))
-                    {
-                        this.fields
-                            .field(i18n_key::WORKSPACE_USERNAME)
-                            .read(cx)
-                            .focus(window);
-                    }
-                    this.advanced = !this.advanced;
-                    cx.notify();
-                })),
-            )
-            .when(self.advanced, |body| body.child(self.rdp_advanced(cx)))
-            .when(self.original.is_some(), |body| {
-                body.child(hint(
-                    i18n_key::RDP_SAVED_CHANGES_APPLY_TO_THE_NEXT_CONNECTION_THE_CURRENT_SESSION,
-                ))
-            })
-            .into_any_element()
     }
 
     fn rdp_choices<T: Copy + PartialEq + 'static>(
@@ -372,6 +334,8 @@ mod tests {
             dynamic_resolution: false,
             clipboard: false,
             timeout_secs: 30,
+            keepalive_secs: 60,
+            prevent_idle: true,
             ..saved.clone()
         };
         preserve_references(&mut preferences, id, &profiles, false);

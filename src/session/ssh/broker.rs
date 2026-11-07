@@ -27,16 +27,27 @@ pub(super) async fn run_shell<H: client::Handler>(
     handle: &client::Handle<H>,
     mut sftp: mpsc::Receiver<OpenRequest>,
     mut resources: mpsc::Receiver<resources::Request>,
+    mut exec: mpsc::Receiver<crate::session::exec::Request>,
     stop: &CancellationToken,
 ) {
     let mut sftp_pending = FuturesUnordered::new();
     let mut resource_pending = FuturesUnordered::new();
+    let mut exec_pending = FuturesUnordered::new();
     loop {
         tokio::select! {
             biased;
             _ = stop.cancelled() => break,
             Some(()) = sftp_pending.next(), if !sftp_pending.is_empty() => {},
             Some(()) = resource_pending.next(), if !resource_pending.is_empty() => {},
+            Some(()) = exec_pending.next(), if !exec_pending.is_empty() => {},
+            Some(request) = exec.recv() => {
+                if request.cancel.is_cancelled() || request.reply.is_closed() { continue; }
+                if exec_pending.len() >= crate::session::exec::MAX_CHANNELS {
+                    let _ = request.reply.send(Err(crate::docker::Error::Busy));
+                } else {
+                    exec_pending.push(crate::session::exec::open(handle, request));
+                }
+            },
             Some(request) = sftp.recv() => {
                 if request.cancel.is_cancelled() || request.reply.is_closed() {
                     continue;

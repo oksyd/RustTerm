@@ -84,6 +84,7 @@ struct SettingsDraft {
     confirm_multiline_paste: bool,
     restore_workspace: bool,
     auto_reconnect: bool,
+    status_bar_monitoring: bool,
     check_updates: bool,
 }
 
@@ -178,6 +179,7 @@ impl SettingsForm {
             confirm_multiline_paste: settings.confirm_multiline_paste,
             restore_workspace: settings.restore_workspace,
             auto_reconnect: settings.auto_reconnect,
+            status_bar_monitoring: settings.status_bar_monitoring,
             check_updates: settings.check_updates,
         };
         let configured = lock.password_hash.is_some();
@@ -246,6 +248,7 @@ impl SettingsForm {
                 confirm_multiline_paste: self.values.confirm_multiline_paste,
                 restore_workspace: self.values.restore_workspace,
                 auto_reconnect: self.values.auto_reconnect,
+                status_bar_monitoring: self.values.status_bar_monitoring,
                 check_updates: self.values.check_updates,
             }
             || self.lock_is_dirty(cx)
@@ -531,32 +534,7 @@ fn setting_row(
     description: Option<&'static str>,
     control: impl IntoElement,
 ) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(20.))
-        .min_h(px(52.))
-        .py(px(10.))
-        .border_b_1()
-        .border_color(rgb(ui::colors().border))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(tr(label))
-                .when_some(description, |text, description| {
-                    text.child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(ui::colors().muted))
-                            .child(tr(description)),
-                    )
-                }),
-        )
-        .child(div().flex_shrink_0().child(control))
+    ui::setting_row(tr(label), description.map(tr), control)
 }
 
 fn toggle(

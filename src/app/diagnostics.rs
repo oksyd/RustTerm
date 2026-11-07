@@ -75,6 +75,26 @@ pub fn metrics(directory: &Path, panes: usize, runs: usize, snapshots: u64) {
 }
 
 fn append(entry: Entry) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // prepare_logs is best effort. Never write through an unsafe state/log
+        // directory if preparation failed (or its permissions subsequently changed).
+        for directory in [Some(entry.directory.as_path()), entry.directory.parent()]
+            .into_iter()
+            .flatten()
+        {
+            let Ok(metadata) = fs::metadata(directory) else {
+                return;
+            };
+            if !metadata.is_dir()
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.mode() & 0o022 != 0
+            {
+                return;
+            }
+        }
+    }
     let path = entry.directory.join("diagnostics.log");
     if let Ok(metadata) = fs::symlink_metadata(&path)
         && !metadata.is_file()
@@ -96,7 +116,9 @@ fn append(entry: Entry) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+        );
     }
     if let Ok(mut file) = options.open(path) {
         let seconds = SystemTime::now()

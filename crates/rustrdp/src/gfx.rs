@@ -135,7 +135,9 @@ pub(crate) enum FrameEvent {
 
 pub(crate) struct Gfx {
     limits: Limits,
+    allow_avc: bool,
     version: Option<u32>,
+    confirmed_flags: u32,
     reset: bool,
     surfaces: BTreeMap<u16, Surface>,
     cache: BTreeMap<u16, CachedBitmap>,
@@ -152,10 +154,12 @@ pub(crate) struct Gfx {
 }
 
 impl Gfx {
-    pub(crate) fn new(limits: Limits) -> Self {
+    pub(crate) fn new(limits: Limits, allow_avc: bool) -> Self {
         Self {
             limits,
+            allow_avc,
             version: None,
+            confirmed_flags: 0,
             reset: false,
             surfaces: BTreeMap::new(),
             cache: BTreeMap::new(),
@@ -183,9 +187,22 @@ impl Gfx {
     pub(crate) fn codec(&self) -> Option<crate::GraphicsCodec> {
         self.codec
     }
-    pub(crate) fn capabilities() -> Vec<u8> {
+    fn offered_capabilities(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        CAPABILITIES.into_iter().map(|(version, flags)| {
+            let flags = if self.allow_avc {
+                flags
+            } else if version >= 0x000a_0002 {
+                // AVC_DISABLED and AVC_THINCLIENT are mutually exclusive.
+                (flags & !0x40) | 0x20
+            } else {
+                flags & !0x10 // AVC420_ENABLED in RDP 8.1
+            };
+            (version, flags)
+        })
+    }
+    pub(crate) fn capabilities(&self) -> Vec<u8> {
         let mut body = (CAPABILITIES.len() as u16).to_le_bytes().to_vec();
-        for (version, flags) in CAPABILITIES {
+        for (version, flags) in self.offered_capabilities() {
             for field in [version, 4, flags] {
                 body.extend_from_slice(&field.to_le_bytes());
             }
@@ -228,23 +245,36 @@ impl Gfx {
             }
             match kind {
                 0x13 => {
+                    let version = body.u32_le()?;
+                    let length = body.u32_le()? as usize;
+                    let caps = body.take(length)?;
+                    body.finish()?;
+                    // Unknown capability sets are ignored, not interpreted as
+                    // a supported version (MS-RDPEGFX 3.3.5.19).
+                    let offered = self
+                        .offered_capabilities()
+                        .find(|(value, _)| *value == version);
+                    let Some((_, offered)) = offered else {
+                        if matches!(version, 0x000a_0100 | 0x000a_0502 | 0x000a_0600) {
+                            return Err(Error::Invalid("unoffered graphics capability version"));
+                        }
+                        continue;
+                    };
                     if self.version.is_some() {
                         return Err(Error::Invalid("duplicate graphics capabilities"));
                     }
-                    let version = body.u32_le()?;
-                    if body.u32_le()? != 4 {
+                    if length != 4 {
                         return Err(Error::Invalid("graphics capabilities size"));
                     }
-                    let flags = body.u32_le()?;
-                    let Some((_, offered)) =
-                        CAPABILITIES.iter().find(|(value, _)| *value == version)
-                    else {
-                        return Err(Error::Unsupported("graphics capability version"));
-                    };
-                    if flags & !offered != 0 {
+                    let flags = Reader::new(caps).u32_le()?;
+                    // Restrictions must survive confirmation: clearing
+                    // AVC_DISABLED or SCALEDMAP_DISABLE would enable operations
+                    // that were explicitly excluded from our capabilities.
+                    if flags & !offered != 0 || flags & (offered & 0xa0) != offered & 0xa0 {
                         return Err(Error::Invalid("unoffered graphics capabilities"));
                     }
                     self.version = Some(version);
+                    self.confirmed_flags = flags;
                     self.cache_limit = if flags & 3 != 0 || version == 0x000a_0301 {
                         16 * 1024 * 1024
                     } else {
@@ -518,6 +548,9 @@ impl Gfx {
     fn wire_to_surface(&mut self, reader: &mut Reader<'_>) -> Result<()> {
         let id = reader.u16_le()?;
         let codec = reader.u16_le()?;
+        if matches!(codec, 11 | 14 | 15) && !self.avc_codec_negotiated(codec) {
+            return Err(Error::Invalid("unnegotiated graphics AVC codec"));
+        }
         pixel_format(reader.u8()?)?;
         let surface = self
             .surfaces
@@ -548,6 +581,19 @@ impl Gfx {
             _ => return Err(Error::Unsupported("graphics bitmap codec")),
         });
         Ok(())
+    }
+
+    fn avc_codec_negotiated(&self, codec: u16) -> bool {
+        if !self.allow_avc {
+            return false;
+        }
+        match self.version {
+            Some(0x0008_0105) => codec == 11 && self.confirmed_flags & 0x10 != 0,
+            Some(version) if version >= 0x000a_0002 => {
+                self.confirmed_flags & 0x20 == 0 && (codec != 15 || version >= 0x000a_0200)
+            }
+            _ => false,
+        }
     }
 }
 

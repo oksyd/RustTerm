@@ -13,6 +13,9 @@
 //! complete decrypted frame to [`Connector::advance`]. Process every returned
 //! packet and event in order. [`HandshakeOutput::session`] transfers the active
 //! session, including graphics and compression history received during setup.
+//! Check [`Connector::server_redirection`] or [`Session::server_redirection`]
+//! before feeding each primary-transport frame to follow authenticated handoffs.
+//! RDSTLS negotiation is explicit and never enabled on an ordinary NLA request.
 //!
 //! A transport can use [`wire::frame_size`] to separate partial or coalesced
 //! frames. The caller supplies receive/send queue bounds, timeouts, cancellation
@@ -50,7 +53,8 @@
 //! The optional `graphics` feature adds the graphics pipeline with RemoteFX,
 //! ClearCodec and H.264 AVC420/AVC444. Enable it explicitly through
 //! [`ClientConfig::graphics_pipeline`] and acknowledge presented frames.
-//! GDI drawing orders, Gateway and RemoteApp are unsupported. Optional codecs
+//! Standard RemoteApp uses RAIL and windowing orders; Enhanced RemoteApp,
+//! GDI drawing orders and Gateway are unsupported. Optional codecs
 //! and CAL exchanges still need broader real-server interoperability validation.
 #![forbid(unsafe_code)]
 
@@ -65,6 +69,7 @@ pub mod graphics;
 mod input;
 mod monitor;
 pub mod multitransport;
+pub mod remote_app;
 mod session;
 pub mod udp;
 pub mod wire;
@@ -225,6 +230,8 @@ pub struct ClientConfig {
     pub domain: String,
     /// Nonempty client computer name, up to 15 UTF-16 code units.
     pub client_name: String,
+    /// Launch one published application using Standard RemoteApp (no graphics pipeline).
+    pub remote_app: Option<remote_app::RemoteApp>,
     /// Requested initial desktop width in pixels; default 1280.
     pub width: u16,
     /// Requested initial desktop height in pixels; default 720.
@@ -252,14 +259,15 @@ pub struct ClientConfig {
     /// Request the Display Control channel; default true.
     pub dynamic_resolution: bool,
     /// Enable the RDP Graphics Pipeline and its video codecs. Requires the
-    /// `graphics` feature, lossy bitmaps, and presentation-driven acknowledgements.
+    /// `graphics` feature and presentation-driven acknowledgements.
     /// Disabled by default.
     pub graphics_pipeline: bool,
     /// Offer additional reliable and lossy transports. Disabled by default.
     pub multitransport: bool,
     /// Maximum server-to-client bulk compression package. Disabled by default.
     pub bulk_compression: Option<BulkCompression>,
-    /// Allow bitmap color fidelity loss and chroma subsampling; default false.
+    /// Allow lossy legacy bitmaps and AVC video; default false. The graphics
+    /// pipeline still supports its baseline codecs, including RemoteFX.
     pub allow_lossy_bitmaps: bool,
     /// Opt into presentation-driven frame acknowledgements. Disabled by default.
     ///
@@ -280,6 +288,7 @@ impl Default for ClientConfig {
             username: String::new(),
             domain: String::new(),
             client_name: "RustRDP".into(),
+            remote_app: None,
             width: 1280,
             height: 720,
             color_depth: ColorDepth::default(),
@@ -316,13 +325,21 @@ impl ClientConfig {
     /// [`Connector::new`] always performs this validation as well.
     pub fn validate(&self) -> Result<()> {
         self.limits.frame_bytes(self.width, self.height)?;
+        if let Some(app) = &self.remote_app {
+            app.validate()?;
+            if self.graphics_pipeline || self.dynamic_resolution || !self.monitors.is_empty() {
+                return Err(Error::Unsupported(
+                    "RemoteApp requires a fixed single bitmap desktop",
+                ));
+            }
+        }
         if self.graphics_pipeline {
             if !cfg!(feature = "graphics") {
                 return Err(Error::Unsupported("graphics feature is disabled"));
             }
-            if !self.allow_lossy_bitmaps || self.frame_acknowledgements.is_none() {
+            if self.frame_acknowledgements.is_none() {
                 return Err(Error::Invalid(
-                    "graphics pipeline requires lossy bitmaps and frame acknowledgements",
+                    "graphics pipeline requires frame acknowledgements",
                 ));
             }
         }

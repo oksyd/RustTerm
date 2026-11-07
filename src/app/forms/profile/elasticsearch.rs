@@ -40,19 +40,6 @@ pub(super) fn initial_fields(
 }
 
 impl ProfileForm {
-    pub(super) fn es_fields(&self) -> Vec<&'static str> {
-        let mut fields = vec![msg::ES_ENDPOINT];
-        if self.es_auth == ElasticsearchAuth::Basic {
-            fields.push(msg::WORKSPACE_USERNAME);
-        }
-        fields.extend([
-            msg::ES_CA_FILE,
-            msg::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
-            msg::DATABASE_QUERY_TIMEOUT_SECONDS,
-        ]);
-        fields
-    }
-
     pub(super) fn elasticsearch_config(
         &self,
         profiles: &[Profile],
@@ -127,6 +114,7 @@ impl ProfileForm {
                         ButtonStyle::Neutral
                     },
                 )
+                .tab_index(0)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if this.native_pending || this.prompts.is_blocked() {
                         return;
@@ -140,14 +128,14 @@ impl ProfileForm {
             }),
         );
         column()
-            .child(self.tunnel_picker(cx))
-            .child(row(msg::ES_AUTH, choices))
-            .child(self.fields.selected_rows(&self.es_fields()))
+            .child(self.fields.selected_rows(&[msg::ES_ENDPOINT]))
             .child(hint(msg::ES_ENDPOINT_HELP))
-            .child(self.credential_editor(cx))
-            .when(self.es_auth != ElasticsearchAuth::None, |body| {
-                body.child(hint(msg::ES_AUTH_HELP))
+            .child(row(msg::ES_AUTH, choices))
+            .when(self.es_auth == ElasticsearchAuth::Basic, |body| {
+                body.child(self.fields.selected_rows(&[msg::WORKSPACE_USERNAME]))
             })
+            .child(self.credential_editor(cx))
+            .child(self.network_options(cx))
             .into_any_element()
     }
 }

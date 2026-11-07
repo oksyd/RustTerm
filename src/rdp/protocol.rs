@@ -89,7 +89,10 @@ impl ClipboardRequest {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct RedirectionState {
+    pub cache_directory: Option<std::path::PathBuf>,
+    pub presentation: Arc<Mutex<Option<rustrdp::FrameToken>>>,
     pub audio_muted: Arc<AtomicBool>,
     pub microphone_enabled: Arc<AtomicBool>,
     pub locked: Arc<AtomicBool>,
@@ -105,7 +108,73 @@ pub(super) async fn run(
     mut presented: watch::Receiver<Option<rustrdp::FrameToken>>,
     redirection: RedirectionState,
 ) -> Result<()> {
+    let mut password = Some(password);
+    let mut handoff: Option<super::handoff::Handoff> = None;
+    let mut frame_sequence = 0;
+    for _ in 0..8 {
+        let mut attempt_config = config.clone();
+        if let Some(next) = &handoff {
+            attempt_config.username = next.username.clone();
+            attempt_config.domain = next.domain.clone();
+        }
+        let attempt = ConnectionAttempt {
+            config: attempt_config,
+            password: password.take(),
+            handoff,
+        };
+        handoff = run_connection(
+            attempt,
+            &mut commands,
+            events,
+            frames.clone(),
+            &mut presented,
+            redirection.clone(),
+            &mut frame_sequence,
+        )
+        .await?;
+        if handoff.is_none() {
+            return Ok(());
+        }
+        // Old-session commands and presentation tokens do not belong to the
+        // destination desktop. All connection-owned transfers have been dropped.
+        while commands.try_recv().is_ok() {}
+        *redirection
+            .presentation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        presented.borrow_and_update();
+        frames.send_replace(None);
+        events
+            .send(RdpEvent::Connecting)
+            .await
+            .map_err(|_| RdpError::Disconnected)?;
+    }
+    Err(RdpError::Limit("server redirection count"))
+}
+
+struct ConnectionAttempt {
+    config: RdpConfig,
+    password: Option<Secret>,
+    handoff: Option<super::handoff::Handoff>,
+}
+
+async fn run_connection(
+    attempt: ConnectionAttempt,
+    commands: &mut commands::Receiver,
+    events: &mpsc::Sender<RdpEvent>,
+    frames: watch::Sender<Option<Arc<RdpFrame>>>,
+    presented: &mut watch::Receiver<Option<rustrdp::FrameToken>>,
+    redirection: RedirectionState,
+    frame_sequence: &mut u64,
+) -> Result<Option<super::handoff::Handoff>> {
+    let ConnectionAttempt {
+        config,
+        password,
+        handoff,
+    } = attempt;
     let RedirectionState {
+        cache_directory,
+        presentation,
         audio_muted,
         microphone_enabled,
         locked,
@@ -117,7 +186,21 @@ pub(super) async fn run(
         username: config.username.clone(),
         domain: config.domain.clone().unwrap_or_default(),
         client_name: "RustTerm".into(),
-        width: config.width * u16::from(config.monitor_count),
+        remote_app: config
+            .remote_app
+            .as_ref()
+            .map(|app| rustrdp::remote_app::RemoteApp {
+                program: app.program.clone(),
+                arguments: app.arguments.clone(),
+                working_directory: app.working_directory.clone(),
+                local_move_size: cfg!(target_os = "linux"),
+            }),
+        width: config.width
+            * u16::from(if config.remote_app.is_some() {
+                1
+            } else {
+                config.monitor_count
+            }),
         height: config.height,
         color_depth: match config.color_depth {
             16 => ColorDepth::Bpp16,
@@ -131,10 +214,15 @@ pub(super) async fn run(
         dynamic_resolution: config.uses_dynamic_resolution(),
         bulk_compression: config.compression.then_some(BulkCompression::Rdp5),
         allow_lossy_bitmaps: config.allow_lossy_bitmaps,
-        graphics_pipeline: config.allow_lossy_bitmaps && config.color_depth == 32,
+        // GNOME requires RDPGFX even when AVC/lossy bitmap decoding is disabled.
+        graphics_pipeline: config.color_depth == 32 && config.remote_app.is_none(),
         multitransport: true,
-        frame_acknowledgements: std::num::NonZeroU32::new(3),
-        monitors: if config.monitor_count > 1 {
+        frame_acknowledgements: if config.remote_app.is_some() {
+            None
+        } else {
+            std::num::NonZeroU32::new(3)
+        },
+        monitors: if config.monitor_count > 1 && config.remote_app.is_none() {
             (0..config.monitor_count)
                 .map(|index| rustrdp::Monitor {
                     left: i32::from(config.width) * i32::from(index),
@@ -166,7 +254,26 @@ pub(super) async fn run(
         .validate()
         .map_err(|_| RdpError::InvalidConfig)?;
     let duration = Duration::from_secs(config.timeout_secs);
-    let (mut framed, negotiation, public_key) = begin_trusted(&config, events).await?;
+    let (mut framed, negotiation, public_key) = if let Some(handoff) = &handoff {
+        // The authenticated source supplied the destination certificate. It is
+        // scoped to this attempt and must never replace the saved profile pin.
+        let challenge = Arc::new(Mutex::new(None));
+        let request = Zeroizing::new(rustrdp::connection::redirection_request(&handoff.routing)?);
+        timeout(
+            duration,
+            begin_with_request(
+                &config,
+                Some(handoff.certificate_pin.clone()),
+                challenge,
+                &request,
+                true,
+            ),
+        )
+        .await
+        .map_err(|_| RdpError::Timeout)??
+    } else {
+        begin_trusted(&config, events).await?
+    };
     let (socket, secured) = framed.get_ref().get_ref();
     let peer = socket.peer_addr().map_err(|_| RdpError::Connection)?;
     let certificate = secured
@@ -193,30 +300,42 @@ pub(super) async fn run(
     let mut completed_frame = None;
     let mut completed_acknowledgement = None;
     let handshake_deadline = Instant::now() + duration;
-    let mut session = tokio::time::timeout_at(handshake_deadline, async {
-        nla(
-            &mut framed,
-            negotiation.protocol,
-            &config,
-            &password,
-            public_key,
-        )
-        .await?;
+    let mut pending_handoff = None;
+    let session = tokio::time::timeout_at(handshake_deadline, async {
+        if let Some(handoff) = &handoff {
+            framed.read_rdstls_capabilities().await?;
+            framed.write(&handoff.authentication).await?;
+            framed.read_rdstls_result().await?;
+        } else {
+            nla(
+                &mut framed,
+                negotiation.protocol,
+                &config,
+                password.as_ref().ok_or(RdpError::Authentication)?,
+                public_key,
+            ).await?;
+        }
         let mut connector = Connector::from_negotiation(client_config, negotiation)?;
         framed.write(&connector.start()?).await?;
         loop {
             let output = tokio::select! {
-                packet = framed.read_pdu() => connector.advance_with_frames(&packet?, |completed| {
-                let mut frame = frame_snapshot.capture_graphics(
-                    completed.graphics,
-                    completed.damage,
-                    completed.bits_per_pixel,
-                );
-                completed_acknowledgement = completed.acknowledgement;
-                frame.acknowledgement = completed_acknowledgement.clone();
-                completed_frame = Some(frame);
-
-                })?,
+                packet = framed.read_pdu() => {
+                    let packet = packet?;
+                    if let Some(payload) = connector.server_redirection(&packet)? {
+                        pending_handoff = Some(super::handoff::Handoff::parse(payload)?);
+                        return Ok(None);
+                    }
+                    connector.advance_with_frames(&packet, |completed| {
+                        let mut frame = frame_snapshot.capture_graphics(
+                            completed.graphics,
+                            completed.damage,
+                            completed.bits_per_pixel,
+                        );
+                        completed_acknowledgement = completed.acknowledgement;
+                        frame.acknowledgement = completed_acknowledgement.clone();
+                        completed_frame = Some(frame);
+                    })?
+                },
                 Some(update) = sidebands.next() => match update {
                     sidebands::Update::Connected { request_id, result } => rustrdp::HandshakeOutput {
                         events: connector.complete_multitransport(request_id, if result.is_ok() { 0 } else { 0x8000_4004 })?,
@@ -236,6 +355,7 @@ pub(super) async fn run(
             }
             for event in output.events {
                 match event {
+                    Event::RemoteApp(event) => events.send(RdpEvent::RemoteApp(event)).await.map_err(|_| RdpError::Disconnected)?,
                     Event::ClipboardOffer => events
                         .send(RdpEvent::Clipboard {
                             revision: clipboard_revision,
@@ -311,18 +431,21 @@ pub(super) async fn run(
                 }
             }
             if let Some(session) = output.session {
-                break Ok::<_, RdpError>(session);
+                break Ok::<_, RdpError>(Some(session));
             }
         }
     })
     .await
     .map_err(|_| RdpError::Timeout)??;
     drop(password);
+    drop(handoff);
+    let Some(mut session) = session else {
+        return Ok(pending_handoff);
+    };
     let (mut framed, outgoing) = framed.split();
     let mut writer = Writer::new(outgoing, duration);
     let mut deliveries = Deliveries::new();
     let mut frame_clock = FrameClock::new(frame_interval, Instant::now());
-    let mut frame_sequence = 0u64;
     let mut frame_receive_deadline = session
         .graphics_frame_in_progress()
         .then(|| Instant::now() + duration);
@@ -330,10 +453,12 @@ pub(super) async fn run(
     let mut performance_started = Instant::now();
     let mut performance_deadline = performance_started + Duration::from_secs(5);
     let mut activation_deadline = None;
+    let mut desktop_activity =
+        super::keepalive::DesktopActivity::new(config.prevent_idle, Instant::now());
     let mut clipboard_request: Option<ClipboardRequest> = None;
     let mut queued_paste: Option<CancellationToken> = None;
     let mut files = Transfers::new();
-    let mut downloads = Downloads::new();
+    let mut downloads = Downloads::new(cache_directory);
     let mut remote_files: Option<(u64, Vec<rustrdp::ClipboardFile>)> = None;
     let mut download_deadline = None;
     let mut progress = BTreeMap::new();
@@ -397,6 +522,7 @@ pub(super) async fn run(
             Command(QueuedCommand),
             Publish,
             Performance,
+            DesktopActivity,
             Presented(Option<rustrdp::FrameToken>),
             Progress,
             Download(Option<DownloadCompleted>),
@@ -441,7 +567,7 @@ pub(super) async fn run(
             // owns its feedback; the old ACK or timeout must not overwrite it.
             match commands.recv().await {
                 Some(command) => Incoming::Command(command),
-                None => return Ok(()),
+                None => return Ok(None),
             }
         } else if frame_clock.is_due(Instant::now()) {
             Incoming::Publish
@@ -453,14 +579,15 @@ pub(super) async fn run(
                     sidebands::Update::Data { protocol, packet } => Incoming::Pdu { packet, tunnel: Some(protocol) },
                     sidebands::Update::Closed { protocol } => Incoming::TunnelClosed(protocol),
                 },
-                command = commands.recv() => match command { Some(command) => Incoming::Command(command), None => return Ok(()) },
+                command = commands.recv() => match command { Some(command) => Incoming::Command(command), None => return Ok(None) },
                 changed = presented.changed() => {
-                    if changed.is_err() { return Ok(()); }
+                    if changed.is_err() { return Ok(None); }
                     Incoming::Presented(presented.borrow_and_update().clone())
                 },
                 _ = sleep_until(frame_clock.deadline().unwrap_or_else(Instant::now)), if frame_clock.deadline().is_some() => Incoming::Publish,
                 _ = sleep_until(frame_receive_deadline.unwrap_or_else(Instant::now)), if frame_receive_deadline.is_some() => return Err(RdpError::Timeout),
                 _ = sleep_until(performance_deadline) => Incoming::Performance,
+                _ = sleep_until(desktop_activity.deadline().unwrap_or_else(Instant::now)), if desktop_activity.deadline().is_some() => Incoming::DesktopActivity,
                 _ = sleep_until(progress_deadline.unwrap_or_else(Instant::now)), if progress_deadline.is_some() => Incoming::Progress,
                 _ = sleep_until(download_deadline.unwrap_or_else(Instant::now)), if download_deadline.is_some() => Incoming::DownloadTimedOut,
                 _ = sleep_until(activation_deadline.unwrap_or_else(Instant::now)), if activation_deadline.is_some() => return Err(RdpError::Timeout),
@@ -489,6 +616,16 @@ pub(super) async fn run(
         let mut capture_packet = None;
         let was_active = session.is_active();
         let outputs = match incoming {
+            Incoming::DesktopActivity => {
+                if !desktop_activity.poll(
+                    Instant::now(),
+                    session.is_active(),
+                    locked.load(Ordering::Acquire),
+                ) {
+                    continue;
+                }
+                session.keep_awake()?
+            }
             Incoming::Outputs(outputs) => outputs,
             Incoming::TunnelConnected(id, result) => {
                 session.complete_multitransport(id, if result.is_ok() { 0 } else { 0x8000_4004 })?
@@ -810,9 +947,11 @@ pub(super) async fn run(
                     frame_clock.suspend();
                     continue;
                 };
-                frame_sequence = frame_sequence.wrapping_add(1);
-                frame.sequence = frame_sequence;
+                *frame_sequence = frame_sequence.wrapping_add(1);
+                frame.sequence = *frame_sequence;
                 frame.published_at = std::time::Instant::now();
+                *presentation.lock().unwrap_or_else(|e| e.into_inner()) =
+                    frame.acknowledgement.clone();
                 frames.send_replace(Some(Arc::new(frame)));
                 frame_clock.published(started);
                 performance.frames += 1;
@@ -843,6 +982,11 @@ pub(super) async fn run(
                 continue;
             }
             Incoming::Pdu { packet, tunnel } => {
+                if tunnel.is_none()
+                    && let Some(payload) = session.server_redirection(&packet)?
+                {
+                    return Ok(Some(super::handoff::Handoff::parse(payload)?));
+                }
                 let started = Instant::now();
                 let mut snapshot_time = Duration::ZERO;
                 let on_frame = |completed: rustrdp::GraphicsFrame<'_>| {
@@ -902,6 +1046,7 @@ pub(super) async fn run(
                 continue;
             }
             Incoming::Command(QueuedCommand { command, paste }) => {
+                desktop_activity.observe(&command, Instant::now());
                 if matches!(command, RdpCommand::Clipboard { .. }) {
                     files.cancel_preparation();
                 }
@@ -965,6 +1110,7 @@ pub(super) async fn run(
                         }
                         continue;
                     }
+                    RdpCommand::RemoteApp(command) => session.remote_app(command),
                     RdpCommand::SetMicrophoneEnabled(_) | RdpCommand::SetLocked(_) => {
                         if let Some(capture) = &capture {
                             capture.refresh();
@@ -1101,6 +1247,12 @@ pub(super) async fn run(
         let mut outputs = std::collections::VecDeque::from(outputs);
         while let Some(output) = outputs.pop_front() {
             match output {
+                Event::RemoteApp(event) => {
+                    events
+                        .send(RdpEvent::RemoteApp(event))
+                        .await
+                        .map_err(|_| RdpError::Disconnected)?;
+                }
                 Event::Capture(rustrdp::CaptureEvent::Open(request)) => {
                     capture = None;
                     match audio::Capture::new(
@@ -1338,7 +1490,7 @@ pub(super) async fn run(
                 Event::RequestRejected(error) => {
                     notify_rejection(error, command_revision, events, &mut last_rejection).await?
                 }
-                Event::Disconnected { .. } => return Ok(()),
+                Event::Disconnected { .. } => return Ok(None),
             }
         }
         if session.is_active() {
@@ -1561,16 +1713,36 @@ async fn begin(
     pin: Option<String>,
     challenge: tls::Challenge,
 ) -> Result<(Stream, NegotiationResponse, Vec<u8>)> {
+    begin_with_request(
+        config,
+        pin,
+        challenge,
+        &rustrdp::connection::negotiation_request(),
+        false,
+    )
+    .await
+}
+
+async fn begin_with_request(
+    config: &RdpConfig,
+    pin: Option<String>,
+    challenge: tls::Challenge,
+    request: &[u8],
+    redirected: bool,
+) -> Result<(Stream, NegotiationResponse, Vec<u8>)> {
     let socket = TcpStream::connect((config.host.as_str(), config.port))
         .await
         .map_err(|_| RdpError::Connection)?;
     socket.set_nodelay(true).map_err(|_| RdpError::Connection)?;
+    super::keepalive::configure(&socket, config.keepalive_secs)?;
     let mut framed = Framed::new(socket);
-    framed
-        .write(&rustrdp::connection::negotiation_request())
-        .await?;
-    let negotiation =
-        rustrdp::connection::parse_negotiation_response_details(&framed.read_pdu().await?)?;
+    framed.write(request).await?;
+    let response = framed.read_pdu().await?;
+    let negotiation = if redirected {
+        rustrdp::connection::parse_redirection_negotiation_response(&response)?
+    } else {
+        rustrdp::connection::parse_negotiation_response_details(&response)?
+    };
     let name = rustls::pki_types::ServerName::try_from(config.host.clone())
         .map_err(|_| RdpError::InvalidConfig)?;
     let stream = tokio_rustls::TlsConnector::from(tls::config(pin, challenge)?)
@@ -1696,6 +1868,7 @@ fn input(command: RdpCommand) -> Input {
         | RdpCommand::Clipboard { .. }
         | RdpCommand::SetAudioMuted(_)
         | RdpCommand::SetMicrophoneEnabled(_)
+        | RdpCommand::RemoteApp(_)
         | RdpCommand::SetLocked(_)
         | RdpCommand::ReceiveFiles { .. }
         | RdpCommand::CancelReceiveFiles { .. } => {

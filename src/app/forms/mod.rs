@@ -87,19 +87,7 @@ fn column() -> Div {
     div().flex().flex_col().gap(px(8.))
 }
 fn row(label: &'static str, content: impl IntoElement) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(12.))
-        .child(
-            div()
-                .w(px(150.))
-                .flex_shrink_0()
-                .text_size(px(11.))
-                .text_color(rgb(ui::colors().muted))
-                .child(tr(label)),
-        )
-        .child(div().flex_1().min_w_0().child(content))
+    ui::form_row(tr(label), content)
 }
 fn hint(source: &'static str) -> Div {
     div()

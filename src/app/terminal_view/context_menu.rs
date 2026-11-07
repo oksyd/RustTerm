@@ -1,7 +1,7 @@
 use super::TerminalView;
 use crate::app::{pane::PaneEvent, ui};
 use gpui::{
-    AnyElement, Context, CursorStyle, KeyDownEvent, Pixels, Point, Window, anchored, div, point,
+    AnyElement, Context, CursorStyle, KeyDownEvent, Pixels, Point, Window, anchored, div,
     prelude::*, px, rgb,
 };
 use rustterm::i18n::messages as i18n_key;
@@ -119,17 +119,15 @@ impl TerminalView {
         let key = event.keystroke.key.as_str();
         match key {
             "escape" => self.close_menu(window, cx),
-            "up" | "down" | "tab" => {
-                let backwards = key == "up" || (key == "tab" && event.keystroke.modifiers.shift);
-                let start = if backwards {
-                    (self.menu_index + ACTIONS.len() - 1) % ACTIONS.len()
-                } else {
-                    (self.menu_index + 1) % ACTIONS.len()
-                };
-                self.menu_index = self.context_menu_enabled_index(start, backwards);
+            "up" | "down" | "tab" | "home" | "end" => {
+                let enabled: Vec<_> = ACTIONS
+                    .iter()
+                    .map(|(action, _, _)| self.context_action_enabled(*action))
+                    .collect();
+                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
+                    self.menu_index = index;
+                }
             }
-            "home" => self.menu_index = self.context_menu_enabled_index(0, false),
-            "end" => self.menu_index = self.context_menu_enabled_index(ACTIONS.len() - 1, true),
             "enter" | "return" | "space" => {
                 self.context_menu_action(ACTIONS[self.menu_index].0, window, cx)
             }
@@ -151,30 +149,14 @@ impl TerminalView {
         // The pane can be smaller than the window. Constrain both size and anchor
         // before letting GPUI fit the popup to the window's visible bounds.
         let width = (f32::from(bounds.size.width) - 8.).clamp(1., 296.);
-        let height = (f32::from(bounds.size.height) - 8.).clamp(1., 150.);
-        let position = point(
-            position.x.clamp(
-                bounds.left(),
-                (bounds.right() - px(width)).max(bounds.left()),
-            ),
-            position.y.clamp(
-                bounds.top(),
-                (bounds.bottom() - px(height)).max(bounds.top()),
-            ),
+        let height = (f32::from(bounds.size.height) - 8.).clamp(
+            1.,
+            ACTIONS.len() as f32 * ui::metrics::ROW + 2. * ui::popup::PADDING,
         );
-        let mut popup = div()
-            .id(("terminal-context-menu", self.index))
+        let position = ui::popup::fit(position, gpui::size(px(width), px(height)), bounds).origin;
+        let mut popup = ui::popup::surface(("terminal-context-menu", self.index))
             .w(px(width))
             .max_h(px(height))
-            .flex()
-            .flex_col()
-            .py(px(4.))
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(3.))
-            .shadow_md()
-            .occlude()
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.menu_scroll)
@@ -183,47 +165,33 @@ impl TerminalView {
         for (index, (action, label, shortcut)) in ACTIONS.into_iter().enumerate() {
             let enabled = self.context_action_enabled(action);
             popup = popup.child(
-                div()
-                    .id(("terminal-context-action", index))
-                    .h(px(28.))
-                    .flex_shrink_0()
-                    .px(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .text_size(px(11.))
-                    .text_color(rgb(if enabled {
-                        ui::colors().text
-                    } else {
-                        ui::colors().faint
+                ui::popup::row(
+                    ("terminal-context-action", index),
+                    enabled,
+                    index == self.menu_index,
+                )
+                .when(enabled, |d| {
+                    d.on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.menu_index != index {
+                            this.menu_index = index;
+                            cx.notify();
+                        }
                     }))
-                    .when(enabled && index == self.menu_index, |d| {
-                        d.bg(rgb(ui::colors().selected))
-                    })
-                    .when(enabled, |d| {
-                        d.cursor_pointer()
-                            .hover(|s| s.bg(rgb(ui::colors().selected)))
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                if this.menu_index != index {
-                                    this.menu_index = index;
-                                    cx.notify();
-                                }
-                            }))
-                    })
-                    .child(div().flex_1().min_w_0().truncate().child(tr(label)))
-                    .when(width >= 260., |d| {
-                        d.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(9.))
-                                .text_color(rgb(ui::colors().muted))
-                                .child(shortcut),
-                        )
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.context_menu_action(action, window, cx);
-                    })),
+                })
+                .child(div().flex_1().min_w_0().truncate().child(tr(label)))
+                .when(width >= 260., |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(9.))
+                            .text_color(rgb(ui::colors().muted))
+                            .child(shortcut),
+                    )
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.context_menu_action(action, window, cx);
+                })),
             );
         }
         Some(

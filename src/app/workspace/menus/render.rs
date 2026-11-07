@@ -8,10 +8,10 @@ use gpui::{
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 
-const ROW_HEIGHT: f32 = 30.;
+const ROW_HEIGHT: f32 = ui::metrics::ROW;
 const HEADER_HEIGHT: f32 = 32.;
-const MENU_PADDING: f32 = 5.; // Four pixels of padding and the one-pixel border.
-const MENU_GAP: f32 = 4.;
+const MENU_PADDING: f32 = ui::popup::PADDING; // Four pixels of padding and the one-pixel border.
+const MENU_GAP: f32 = ui::popup::GAP;
 
 impl Workspace {
     pub(in crate::app::workspace) fn render_menu(
@@ -46,7 +46,8 @@ impl Workspace {
             .left_0()
             .right_0()
             .bottom_0()
-            .occlude();
+            .occlude()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation());
         for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
             backdrop = backdrop
                 .on_mouse_down(
@@ -84,6 +85,7 @@ impl Workspace {
 
     fn menu_size(&self, menu: Menu, available: Size<Pixels>) -> Size<Pixels> {
         let width = match menu {
+            Menu::Tab(_) => 240.,
             Menu::File => 320.,
             Menu::Create | Menu::NewConnection | Menu::Profile(_) | Menu::Group(_) => 300.,
             _ => 380.,
@@ -114,28 +116,20 @@ impl Workspace {
         } else {
             &self.menu_scroll
         };
-        let mut popup = div()
-            .id(if child {
-                "connection-submenu"
-            } else {
-                "workspace-menu"
-            })
-            .absolute()
-            .left(bounds.left() - content.left())
-            .top(bounds.top() - content.top() - px(ui::TITLE_HEIGHT))
-            .w(bounds.size.width)
-            .h(bounds.size.height)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .py(px(MENU_PADDING - 1.))
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(3.))
-            .shadow_md()
-            .occlude()
-            .when(active, |d| d.track_focus(&self.menu_focus));
+        let mut popup = ui::popup::surface(if child {
+            "connection-submenu"
+        } else {
+            "workspace-menu"
+        })
+        .absolute()
+        .left(bounds.left() - content.left())
+        .top(bounds.top() - content.top() - px(ui::TITLE_HEIGHT))
+        .w(bounds.size.width)
+        .h(bounds.size.height)
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .when(active, |d| d.track_focus(&self.menu_focus));
         for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
             popup = popup
                 .on_mouse_down(button, |_, window, cx| {
@@ -220,9 +214,15 @@ impl Workspace {
                     } else {
                         ui::colors().text
                     }))
-                    .when(matches!(action, MenuAction::DeleteProfile), |d| {
-                        d.border_t_1().border_color(rgb(ui::colors().border))
-                    })
+                    .when(
+                        matches!(action, MenuAction::DeleteProfile)
+                            || (index > 0
+                                && matches!(
+                                    action,
+                                    MenuAction::CloseTab | MenuAction::CloseTabGroup
+                                )),
+                        |d| d.border_t_1().border_color(rgb(ui::colors().border)),
+                    )
                     .when(selected, |d| d.bg(rgb(ui::colors().selected)))
                     .when(enabled, |d| {
                         d.cursor_pointer()
@@ -272,19 +272,7 @@ impl Workspace {
 }
 
 fn fit_popup(anchor: Point<Pixels>, size: Size<Pixels>, limits: Bounds<Pixels>) -> Bounds<Pixels> {
-    Bounds::new(
-        point(
-            anchor.x.clamp(
-                limits.left(),
-                (limits.right() - size.width).max(limits.left()),
-            ),
-            anchor.y.clamp(
-                limits.top(),
-                (limits.bottom() - size.height).max(limits.top()),
-            ),
-        ),
-        size,
-    )
+    ui::popup::fit(anchor, size, limits)
 }
 
 fn place_submenu(

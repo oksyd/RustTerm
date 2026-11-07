@@ -73,16 +73,25 @@ jobs:
           sudo apt-get install --no-install-recommends -y build-essential dpkg-dev xz-utils cmake ninja-build nasm pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-dpms0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xinput-dev libxcb-xkb-dev libasound2-dev libssl-dev
       - name: Check Rust formatting
         shell: bash
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path crates/rustrdp/Cargo.toml --check
       - name: Test release packaging
         shell: bash
         run: python -m unittest discover -s tools/release -p test_release.py
       - name: Test and package Ubuntu
         if: runner.os == 'Linux'
         run: |
+          cargo test --locked -p rustrdp
+          cargo test --manifest-path crates/rustrdp/Cargo.toml --target-dir target --no-default-features
+          cargo test --manifest-path crates/rustrdp/Cargo.toml --target-dir target --all-features
+          cargo test --locked --lib rdp::
+          cargo test --locked --bin rustterm app::rdp_view::
           cargo test --locked --lib update::
           cargo test --locked --lib config::
           cargo test --locked --lib session::local::
+          cargo test --locked --lib docker::
+          cargo test --locked --test docker
           python3 -m unittest discover -s src/update/installer -p test_install.py
           tools/release/package-linux.sh --release
           python3 tools/release/artifacts.py binary-version target/release/rustterm
@@ -102,6 +111,8 @@ jobs:
           choco install nasm --no-progress --yes
           if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
           $env:PATH = "${env:ProgramFiles}\NASM;$env:PATH"
+          cargo test --locked -p rustrdp
+          if ($LASTEXITCODE -ne 0) { throw 'RDP protocol tests failed' }
           python tools/release/artifacts.py package-windows --release --output dist
           if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
       - if: inputs.upload-artifacts

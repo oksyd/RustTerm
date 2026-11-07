@@ -5,24 +5,15 @@ use gpui::{AnyElement, IntoElement, MouseButton, Render, div, prelude::*, px, rg
 impl Render for ElasticsearchView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let compact = self.viewport_size.0 < 760.;
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(ui::PANE_HEADER_HEIGHT))
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
-            .bg(rgb(ui::colors().surface))
-            .child(ui::icon(Icon::Elasticsearch))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(self.title.clone()),
-            )
+        let header = ui::panel_header()
+            .min_w_0()
+            .child(ui::connection_address(
+                "es-address",
+                Icon::Elasticsearch,
+                "Elasticsearch",
+                self.config.endpoint.clone(),
+                self.title.clone(),
+            ))
             .child(
                 div()
                     .text_size(px(11.))
@@ -90,11 +81,12 @@ impl Render for ElasticsearchView {
             .child(header)
             .when_some(self.error.clone(), |panel, error| {
                 panel.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_color(rgb(ui::colors().danger))
-                        .child(error.render()),
+                    ui::feedback(error.render(), true)
+                        .id("es-error")
+                        .max_h(px(96.))
+                        .overflow_y_scroll()
+                        .map(ui::preserve_scroll_axes)
+                        .map(|content| ui::scrollable(content, None)),
                 )
             })
             .child(body)
@@ -447,13 +439,14 @@ impl ElasticsearchView {
             )
             .child(result_heading)
             .when(self.lines.is_empty(), |panel| {
-                panel.child(div().p_3().text_color(rgb(ui::colors().muted)).child(tr(
-                    if self.task.is_some() {
+                panel.child(ui::empty_state(
+                    Icon::Search,
+                    tr(if self.task.is_some() {
                         msg::ES_LOADING
                     } else {
                         msg::ES_IDLE
-                    },
-                )))
+                    }),
+                ))
             })
             .child(result)
             .into_any_element()

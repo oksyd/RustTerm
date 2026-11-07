@@ -9,7 +9,7 @@ es-auth-none = No authentication
 es-auth-basic = Username and password
 es-auth-api-key = API key
 es-secret = Password or encoded API key
-es-auth-help = API key authentication uses the encoded value returned by Elasticsearch. Saved secrets use the system credential store.
+es-auth-help = Use the encoded API key value returned by Elasticsearch.
 es-endpoint-help = Use HTTPS to verify the server certificate and hostname. A custom CA file can be supplied for private clusters.
 es-invalid-config = Invalid Elasticsearch connection settings.
 es-network = Could not reach Elasticsearch. Check the endpoint, network, and TLS certificate.
@@ -45,3 +45,4 @@ es-tunnel-fingerprint = SSH host: { $host }:{ $port }
     This SSH connection carries Elasticsearch requests.
 es-add-connection = Add Elasticsearch connection
 es-paste = Paste into DSL editor
+es-encoded-api-key = Encoded API key

@@ -72,7 +72,7 @@ connections-cannot-deliver-the-terminal-protocol-response = Cannot deliver the t
 
 connections-cannot-deliver-the-terminal-response-after-file-transfer = Cannot deliver the terminal response after file transfer
 
-connections-cannot-determine-the-configuration-directory-set-home-or-xdg-config = Cannot determine the configuration directory; set HOME or XDG_CONFIG_HOME
+connections-cannot-determine-the-configuration-directory-set-home-or-xdg-config = Cannot determine user storage directories; check your user profile or specify --config-dir
 
 connections-cannot-inspect-the-private-key-file = Cannot inspect the private key file
 
@@ -719,3 +719,18 @@ connections-zmodem-timed-out-waiting-for-the-remote-host = ZMODEM timed out wait
 
 connections-group-parent-missing = A group references a parent that does not exist.
 connections-group-cycle = A group cannot be placed inside itself or one of its subgroups.
+
+connections-display-name-optional = Display name (optional)
+connections-network-advanced = Network & advanced
+connections-timeout-summary = Timeout: { $seconds } s
+connections-custom-ca = Custom CA certificate
+connections-ssh-options-summary = { $jumps } jump hosts · { $forwards } forwards · Timeout: { $seconds } s
+connections-startup-options = Startup options
+connections-startup-summary = { $arguments } arguments · { $variables } environment variables
+connections-credential-help = Saved in the system credential store on save. Leave blank to enter later; tests use an empty secret.
+connections-display-tab = Display
+connections-advanced-tab = Advanced
+connections-launch-options = Optional launch parameters
+connections-configured = Configured
+connections-rdp-resources-summary = Clipboard: { $clipboard } · Audio: { $audio } · Microphone: { $microphone } · Shared folders: { $folders }
+connections-query-timeout-summary = Query timeout: { $seconds } s

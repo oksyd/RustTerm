@@ -21,6 +21,7 @@ impl gpui::Render for Workspace {
         let content_size = frame.content_size(window.viewport_size());
         self.sync_tools(cx);
         self.sync_resources(window, cx);
+        self.sync_docker(window, cx);
         if self.lock_screen.locked {
             self.command_notice = None;
             return frame.wrap(self.render_locked(window, cx), window);
@@ -139,22 +140,15 @@ impl gpui::Render for Workspace {
                     .get(self.active)
                     .map(|tab| self.fitted_layout(tab, cx))
             });
-        let content = node
-            .as_ref()
-            .map(|node| self.render_node(node, self.terminal_size, cx))
-            .unwrap_or_else(|| {
-                div()
-                    .size_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .p_4()
-                    .text_color(rgb(ui::colors().muted))
-                    .child(tr(
+        let content =
+            node.as_ref()
+                .map(|node| self.render_node(node, self.terminal_size, cx))
+                .unwrap_or_else(|| {
+                    ui::empty_state(ui::Icon::Terminal, tr(
                         i18n_key::WORKSPACE_SELECT_A_CONNECTION_PROFILE_OR_CREATE_A_LOCAL_TERMINAL,
-                    ))
+                    )).size_full()
                     .into_any_element()
-            });
+                });
         let weak = cx.weak_entity();
         let mut workspace = div().flex().flex_1().min_h_0();
         if layout.sidebar_inline {

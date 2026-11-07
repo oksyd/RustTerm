@@ -20,6 +20,8 @@ mod files;
 #[path = "unsupported/files.rs"]
 mod files;
 mod frames;
+mod handoff;
+mod keepalive;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod shared_drives;
@@ -202,6 +204,8 @@ impl From<rustrdp::Error> for RdpError {
 /// A complete desktop snapshot. Unchanged tiles are shared with earlier frames,
 /// so skipping a published frame never loses an intervening update.
 pub struct RdpFrame {
+    /// Window state at capture time, to prevent mixing new geometry with older pixels.
+    pub remote_windows: Vec<rustrdp::remote_app::RemoteWindow>,
     /// Assigned when the snapshot is published, independently of server frame IDs.
     pub sequence: u64,
     pub published_at: std::time::Instant,
@@ -260,6 +264,7 @@ pub enum CertificateDecision {
 }
 
 pub enum RdpEvent {
+    RemoteApp(rustrdp::remote_app::RemoteAppEvent),
     Connecting,
     Connected,
     Disconnected,
@@ -350,6 +355,7 @@ pub enum RdpMouseButton {
 }
 
 pub enum RdpCommand {
+    RemoteApp(rustrdp::remote_app::RemoteAppCommand),
     ReceiveFiles {
         offer_id: u64,
     },
@@ -399,7 +405,8 @@ impl RdpCommand {
     fn invalidates_paste(&self) -> bool {
         matches!(
             self,
-            Self::ReleaseAll
+            Self::RemoteApp(_)
+                | Self::ReleaseAll
                 | Self::PasteRemote
                 | Self::Key { pressed: true, .. }
                 | Self::MouseButton { pressed: true, .. }
@@ -418,6 +425,7 @@ struct QueuedCommand {
 
 struct Control {
     stop: CancellationToken,
+    presentation: Arc<Mutex<Option<rustrdp::FrameToken>>>,
     pending_paste: Mutex<Option<CancellationToken>>,
     audio_muted: Arc<AtomicBool>,
     microphone_enabled: Arc<AtomicBool>,
@@ -440,9 +448,21 @@ impl RdpSender {
     /// Reports a submitted desktop snapshot without competing with user input.
     /// Later receipts include earlier frames; only the latest feedback is needed.
     pub fn frame_presented(&self, token: rustrdp::FrameToken) {
-        if !self.control.stop.is_cancelled() {
+        let latest = self
+            .control
+            .presentation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let belongs_to_desktop = latest.as_ref().is_some_and(|latest| token <= *latest);
+        if belongs_to_desktop && !self.control.stop.is_cancelled() {
             self.presented.send_if_modified(|current| {
-                if current.as_ref().is_none_or(|previous| token > *previous) {
+                // A handoff creates a new token namespace. Late callbacks from
+                // the previous desktop are rejected by the published-frame check.
+                if current.as_ref().is_none_or(|previous| {
+                    token
+                        .partial_cmp(previous)
+                        .is_none_or(|order| order.is_gt())
+                }) {
                     *current = Some(token);
                     true
                 } else {
@@ -581,7 +601,16 @@ impl RdpHandle {
 
 pub struct RdpClient;
 impl RdpClient {
-    pub fn connect(mut config: RdpConfig, password: Secret) -> Result<RdpHandle> {
+    pub fn connect(config: RdpConfig, password: Secret) -> Result<RdpHandle> {
+        Self::connect_with_cache_directory(config, password, crate::config::cache_dir().ok())
+    }
+
+    /// Use the application's selected cache root. None disables clipboard file staging.
+    pub fn connect_with_cache_directory(
+        mut config: RdpConfig,
+        password: Secret,
+        cache_directory: Option<std::path::PathBuf>,
+    ) -> Result<RdpHandle> {
         config.validate().map_err(|_| RdpError::InvalidConfig)?;
         config.host = crate::config::known_hosts::normalize_host(&config.host)
             .map_err(|_| RdpError::InvalidConfig)?;
@@ -607,11 +636,13 @@ impl RdpClient {
         let microphone_enabled = Arc::new(AtomicBool::new(config.audio_input));
         let locked = Arc::new(AtomicBool::new(false));
         let capture_transmission = Arc::new(Mutex::new(stop.child_token()));
+        let presentation = Arc::new(Mutex::new(None));
         let sender = RdpSender {
             commands: commands_tx,
             presented: presented_tx,
             control: Arc::new(Control {
                 stop: stop.clone(),
+                presentation: presentation.clone(),
                 pending_paste: Mutex::new(None),
                 audio_muted: audio_muted.clone(),
                 microphone_enabled: microphone_enabled.clone(),
@@ -620,6 +651,8 @@ impl RdpClient {
             }),
         };
         let redirection = protocol::RedirectionState {
+            cache_directory,
+            presentation,
             audio_muted,
             microphone_enabled,
             locked,
@@ -708,6 +741,7 @@ mod tests {
                 presented: watch::channel(None).0,
                 control: Arc::new(Control {
                     stop: CancellationToken::new(),
+                    presentation: Arc::new(Mutex::new(None)),
                     pending_paste: Mutex::new(None),
                     audio_muted: Arc::new(AtomicBool::new(false)),
                     microphone_enabled: Arc::new(AtomicBool::new(false)),

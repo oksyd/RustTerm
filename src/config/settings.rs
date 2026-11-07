@@ -33,6 +33,7 @@ impl AppLockConfig {
 pub struct Settings {
     pub restore_workspace: bool,
     pub auto_reconnect: bool,
+    pub status_bar_monitoring: bool,
     pub check_updates: bool,
     pub update_proxy: String,
     pub language: crate::i18n::Language,
@@ -64,6 +65,7 @@ impl Default for Settings {
             app_theme: AppTheme::default(),
             restore_workspace: true,
             auto_reconnect: true,
+            status_bar_monitoring: true,
             check_updates: true,
             update_proxy: String::new(),
             #[cfg(windows)]
@@ -155,6 +157,15 @@ mod tests {
         let saved = toml::to_string(&settings).unwrap();
         let restored: Settings = toml::from_str(&saved).unwrap();
         assert!(!restored.cache_command_output);
+    }
+
+    #[test]
+    fn status_monitoring_defaults_on_and_preserves_disabled_preference() {
+        let mut settings: Settings = toml::from_str("font_size = 15.0").unwrap();
+        assert!(settings.status_bar_monitoring);
+        settings.status_bar_monitoring = false;
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert!(!restored.status_bar_monitoring);
     }
 
     #[test]

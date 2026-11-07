@@ -1,7 +1,12 @@
 mod chrome;
 mod connection;
+mod dialect;
 mod documents;
+mod explorer;
 mod keyboard;
+mod overview;
+mod processlist;
+mod query;
 mod render;
 mod results;
 mod sizing;
@@ -55,14 +60,24 @@ enum State {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TableAction {
+    Details,
+    Constraints,
+    Parts,
+    Definition,
     Data,
     Columns,
     Indexes,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkspacePage {
+    Overview,
+    Sessions,
+    Document,
+}
+
 pub struct DatabaseView {
     index: usize,
-    title: String,
     pane_close_visible: bool,
     config: DatabaseConfig,
     ssh_route: Option<String>,
@@ -104,6 +119,16 @@ pub struct DatabaseView {
     viewport_size: (f32, f32),
     browser_open: bool,
     browser_width: f32,
+    page: WorkspacePage,
+    monitor: Option<processlist::MonitorState>,
+    object_rows: Vec<explorer::ObjectRow>,
+    collapsed_objects: std::collections::BTreeSet<explorer::GroupKey>,
+    object_menu: Option<explorer::ObjectMenu>,
+    menu_scroll: gpui::ScrollHandle,
+    pane_origin: gpui::Point<gpui::Pixels>,
+    editor_height: f32,
+    results_only: bool,
+    result_search_open: bool,
 }
 
 impl EventEmitter<PaneEvent> for DatabaseView {}
@@ -116,7 +141,6 @@ impl Focusable for DatabaseView {
 impl DatabaseView {
     pub fn new(
         index: usize,
-        title: String,
         launch: DatabaseLaunch,
         window_state: WindowState,
         window: &mut Window,
@@ -135,9 +159,9 @@ impl DatabaseView {
             })
         };
         let database = match &config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => {
-                config.database.as_str()
-            }
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => config.database.as_str(),
             DatabaseConfig::Sqlite(_) => "main",
         };
         let database_input = make(i18n_key::DATABASE_DATABASE_NAME, database, cx);
@@ -167,9 +191,10 @@ impl DatabaseView {
             config.engine(),
             cx,
         );
+        let monitor =
+            (config.engine() == SqlEngine::Mysql).then(|| processlist::MonitorState::new(cx));
         let mut this = Self {
             index,
-            title,
             pane_close_visible: false,
             config,
             ssh_route,
@@ -210,7 +235,17 @@ impl DatabaseView {
             table_scroll: gpui::UniformListScrollHandle::default(),
             viewport_size: (960., 640.),
             browser_open: true,
-            browser_width: 230.,
+            browser_width: 240.,
+            page: WorkspacePage::Overview,
+            monitor,
+            object_rows: Vec::new(),
+            collapsed_objects: Default::default(),
+            object_menu: None,
+            menu_scroll: gpui::ScrollHandle::new(),
+            pane_origin: Default::default(),
+            editor_height: 220.,
+            results_only: false,
+            result_search_open: false,
         };
         this.connect(secret, ssh, window, cx);
         this
@@ -221,7 +256,9 @@ impl DatabaseView {
     }
     pub fn database(&self) -> &str {
         match &self.config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => &config.database,
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => &config.database,
             DatabaseConfig::Sqlite(_) => "main",
         }
     }
@@ -270,13 +307,21 @@ impl DatabaseView {
     }
     pub fn status_details(&self) -> String {
         let mut detail = match &self.config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => format!(
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => format!(
                 "{} · {}:{} · {} · {}",
                 self.engine().label(),
                 config.host,
                 config.port,
                 config.database,
-                if config.tls { "TLS" } else { "TCP" }
+                if self.engine() == SqlEngine::ClickHouse {
+                    if config.tls { "HTTPS" } else { "HTTP" }
+                } else if config.tls {
+                    "TLS"
+                } else {
+                    "TCP"
+                }
             ),
             DatabaseConfig::Sqlite(config) => format!(
                 "SQLite · {} · {}",
@@ -316,6 +361,10 @@ impl DatabaseView {
         .iter()
         .any(|input| input.read(cx).is_composing())
             || self
+                .monitor
+                .as_ref()
+                .is_some_and(|monitor| monitor.composing(cx))
+            || self
                 .table_workspace()
                 .is_some_and(|table| table.composing(cx))
     }
@@ -332,6 +381,7 @@ impl DatabaseView {
     pub fn set_layout_size(&mut self, size: (f32, f32), cx: &mut Context<Self>) {
         if self.viewport_size != size {
             self.viewport_size = size;
+            self.update_editor_height(cx);
             self.resize_drag = None;
             cx.notify();
         }
@@ -353,10 +403,16 @@ impl DatabaseView {
         }
         if self.visible != visible {
             self.visible = visible;
+            if !visible {
+                self.pause_monitor();
+            } else if self.page == WorkspacePage::Sessions {
+                self.start_monitor_poll(cx);
+            }
             if visible {
                 self.unread = false;
             } else {
                 self.menu_open = false;
+                self.object_menu = None;
                 self.menu_return_focus = None;
                 self.resize_drag = None;
                 self.success_notice = None;
@@ -366,6 +422,7 @@ impl DatabaseView {
         }
     }
     pub fn apply_settings(&mut self, _: &Settings, cx: &mut Context<Self>) {
+        self.rebuild_object_tree(cx);
         for input in [
             &self.documents[self.active_document].sql_input,
             &self.database_input,
@@ -430,6 +487,10 @@ impl DatabaseView {
         if !self.interactive() || self.input_composing(cx) {
             return;
         }
+        if self.page != WorkspacePage::Document {
+            self.new_query(window, cx);
+        }
+        self.results_only = false;
         if self.table_workspace().is_some() {
             self.paste_cell(window, cx);
             return;
@@ -472,16 +533,6 @@ impl DatabaseView {
             && !self.window_state.prompts.is_busy()
             && !self.native_pending
     }
-    fn unavailable_reason(&self) -> &'static str {
-        if self.native_pending || self.window_state.prompts.is_busy() {
-            i18n_key::COMMON_FINISH_THE_CURRENT_DIALOG_FIRST
-        } else if self.busy.is_some() {
-            i18n_key::COMMON_WAIT_FOR_THE_CURRENT_DATABASE_REQUEST_OR_CANCEL_IT
-        } else {
-            i18n_key::COMMON_OPEN_A_DATABASE_CONNECTION_FIRST
-        }
-    }
-
     fn available(&self) -> bool {
         self.interactive()
             && self.busy.is_none()
@@ -491,6 +542,7 @@ impl DatabaseView {
                 .is_some_and(DatabaseClient::is_connected)
     }
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        self.close_monitor();
         if self.busy == Some(i18n_key::DATABASE_SUBMITTING_CHANGES)
             && let Some(index) = self.running_document.and_then(|id| self.document_index(id))
             && let Some(table) = &mut self.documents[index].table
@@ -550,6 +602,7 @@ impl DatabaseView {
             })
             .map(|(i, _)| i)
             .collect();
+        self.rebuild_object_tree(cx);
         self.table_scroll
             .scroll_to_item(0, gpui::ScrollStrategy::Top);
         cx.notify();
@@ -610,7 +663,9 @@ impl DatabaseView {
             return;
         }
         let mut config = match &self.config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => config.clone(),
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => config.clone(),
             DatabaseConfig::Sqlite(_) => return,
         };
         let database = self.database_input.read(cx).value().to_owned();
@@ -661,6 +716,9 @@ impl DatabaseView {
     }
 
     fn run_sql_mode(&mut self, entire_script: bool, cx: &mut Context<Self>) {
+        if self.page != WorkspacePage::Document {
+            return;
+        }
         if !self.available()
             || self.input_composing(cx)
             || self.documents[self.active_document].table.is_some()
@@ -854,6 +912,10 @@ impl DatabaseView {
         cx.notify();
     }
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.object_menu.is_some() {
+            self.object_menu_key_down(event, window, cx);
+            return;
+        }
         if self.menu_open {
             self.menu_key_down(event, window, cx);
             return;
@@ -863,7 +925,15 @@ impl DatabaseView {
         }
         let key = event.keystroke.key.as_str();
         let modifiers = event.keystroke.modifiers;
-        if key == "escape" && self.dismiss_table_overlay(window, cx) {
+        if self.page == WorkspacePage::Document
+            && key == "escape"
+            && self.dismiss_table_overlay(window, cx)
+        {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+        if self.monitor_key(event, window, cx) {
             window.prevent_default();
             cx.stop_propagation();
             return;
@@ -873,7 +943,9 @@ impl DatabaseView {
             cx.stop_propagation();
             return;
         }
-        if self.documents[self.active_document].value_view.is_some() {
+        if self.page == WorkspacePage::Document
+            && self.documents[self.active_document].value_view.is_some()
+        {
             let handled = if key == "escape" {
                 self.close_value(window, cx);
                 true
@@ -934,12 +1006,12 @@ impl DatabaseView {
         } else if modifiers.control && !modifiers.alt && !modifiers.platform && key == "tab" {
             cx.emit(PaneEvent::NextTab);
         } else if key == "f5" {
-            if self.table_workspace().is_some() {
+            if self.page == WorkspacePage::Document && self.table_workspace().is_some() {
                 self.refresh_active_table(cx);
             } else {
                 self.refresh_browser(cx);
             }
-        } else if key == "escape" && self.busy.is_some() {
+        } else if key == "escape" && self.busy.is_some() && self.page == WorkspacePage::Document {
             self.cancel_query(cx);
         } else {
             return;
@@ -951,6 +1023,7 @@ impl DatabaseView {
 
 impl Drop for DatabaseView {
     fn drop(&mut self) {
+        self.close_monitor();
         if let Some(client) = &self.client {
             client.close();
         }

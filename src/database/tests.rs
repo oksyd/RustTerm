@@ -9,7 +9,9 @@ fn config(engine: SqlEngine, port: u16) -> SqlConfig {
     let mut config = match engine {
         SqlEngine::Mysql => SqlConfig::mysql(),
         SqlEngine::Postgres => SqlConfig::postgres(),
-        SqlEngine::Sqlite => panic!("server fixture requires a server engine"),
+        SqlEngine::Sqlite | SqlEngine::ClickHouse => {
+            panic!("server fixture requires a server engine")
+        }
     };
     config.host = "127.0.0.1".into();
     config.port = port;
@@ -664,4 +666,160 @@ async fn connection_probes_read_database_versions_without_requiring_metadata_per
             .unwrap();
         }
     }
+}
+
+async fn mysql_fields(stream: &mut TcpStream, names: &[&str], rows: &[Vec<Option<&str>>]) {
+    let mut response = Vec::new();
+    let mut sequence = 1;
+    mysql_named_columns(&mut response, &mut sequence, false, names);
+    for fields in rows {
+        let mut row = Vec::new();
+        for value in fields {
+            if let Some(value) = value {
+                if value.len() < 251 {
+                    row.push(value.len() as u8);
+                } else {
+                    row.push(0xfc);
+                    row.extend_from_slice(&(value.len() as u16).to_le_bytes());
+                }
+                row.extend_from_slice(value.as_bytes());
+            } else {
+                row.push(251);
+            }
+        }
+        mysql_packet(&mut response, &mut sequence, &row);
+    }
+    mysql_eof(&mut response, &mut sequence, false);
+    stream.write_all(&response).await.unwrap();
+}
+
+#[tokio::test]
+async fn mysql_monitor_uses_separate_connection_preserves_transaction_and_closes_with_parent() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = config(SqlEngine::Mysql, listener.local_addr().unwrap().port());
+        let (running, started) = oneshot::channel();
+        let (release, wait) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut main, _) = listener.accept().await.unwrap();
+            mysql_start(&mut main).await;
+            assert_eq!(mysql_read(&mut main).await, b"\x03BEGIN");
+            let mut ok = Vec::new();
+            mysql_ok(&mut ok, &mut 1, 0, false);
+            main.write_all(&ok).await.unwrap();
+            assert_eq!(mysql_read(&mut main).await, b"\x03long query");
+            running.send(()).unwrap();
+            let (mut monitor, _) = listener.accept().await.unwrap();
+            mysql_start(&mut monitor).await;
+            for _ in 0..2 {
+                assert_eq!(mysql_read(&mut monitor).await, b"\x03SHOW FULL PROCESSLIST");
+                mysql_fields(
+                    &mut monitor,
+                    &[
+                        "Id", "User", "Host", "db", "Command", "Time", "State", "Info",
+                    ],
+                    &[vec![
+                        Some("42"),
+                        Some("app"),
+                        Some("localhost"),
+                        None,
+                        Some("Query"),
+                        Some("20"),
+                        Some("executing"),
+                        Some("long query"),
+                    ]],
+                )
+                .await;
+                assert_eq!(mysql_read(&mut monitor).await, b"\x03SHOW GRANTS");
+                mysql_fields(
+                    &mut monitor,
+                    &["Grants"],
+                    &[vec![Some("GRANT SELECT, PROCESS ON *.* TO `app`@`%`")]],
+                )
+                .await;
+            }
+            wait.await.unwrap();
+            main.write_all(&ok).await.unwrap();
+            assert_eq!(mysql_read(&mut main).await, b"\x03ROLLBACK");
+            main.write_all(&ok).await.unwrap();
+            let mut byte = [0];
+            let count = monitor.read(&mut byte).await.unwrap();
+            assert_eq!(count, 0);
+        });
+        let client = DatabaseClient::connect(
+            DatabaseConfig::Mysql(config),
+            Secret::new(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        let monitor = client.mysql_monitor().unwrap();
+        client.begin().await.unwrap();
+        let worker = client.clone();
+        let pending = tokio::spawn(async move { worker.execute("long query".into(), 1).await });
+        started.await.unwrap();
+        for _ in 0..2 {
+            let snapshot = monitor.snapshot().await.unwrap();
+            assert_eq!(snapshot.processes[0].id, 42);
+            assert_eq!(snapshot.visibility, processlist::Visibility::All);
+            assert_eq!(client.transaction_status(), TransactionStatus::Active);
+            assert!(!pending.is_finished());
+        }
+        release.send(()).unwrap();
+        pending.await.unwrap().unwrap();
+        client.rollback().await.unwrap();
+        client.close();
+        assert!(matches!(
+            monitor.snapshot().await,
+            Err(DatabaseError::Disconnected)
+        ));
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_mysql_monitor_never_cancels_the_editor_connection() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = config(SqlEngine::Mysql, listener.local_addr().unwrap().port());
+        let (sent, received) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut main, _) = listener.accept().await.unwrap();
+            mysql_start(&mut main).await;
+            let (mut monitor, _) = listener.accept().await.unwrap();
+            mysql_start(&mut monitor).await;
+            assert_eq!(mysql_read(&mut monitor).await, b"\x03SHOW FULL PROCESSLIST");
+            sent.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(monitor.read(&mut byte).await.unwrap(), 0);
+            assert_eq!(mysql_read(&mut main).await, b"\x03SELECT 1");
+            mysql_fields(&mut main, &["value"], &[vec![Some("1")]]).await;
+        });
+        let client = DatabaseClient::connect(
+            DatabaseConfig::Mysql(config),
+            Secret::new(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        let monitor = client.mysql_monitor().unwrap();
+        let reader = monitor.clone();
+        let pending = tokio::spawn(async move { reader.snapshot().await });
+        received.await.unwrap();
+        assert!(matches!(monitor.snapshot().await, Err(DatabaseError::Busy)));
+        pending.abort();
+        let _ = pending.await;
+        assert_eq!(
+            client.execute("SELECT 1".into(), 1).await.unwrap().results[0].rows[0][0].as_deref(),
+            Some("1")
+        );
+        assert!(client.is_connected());
+        monitor.close();
+        client.close();
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
 }

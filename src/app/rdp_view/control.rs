@@ -37,7 +37,8 @@ impl RdpView {
     }
 
     pub(super) fn remote_input_enabled(&self) -> bool {
-        self.input_enabled()
+        self.config.remote_app.is_none()
+            && self.input_enabled()
             && matches!(
                 self.control,
                 KeyboardControl::Active(_) | KeyboardControl::Limited(_)
@@ -77,7 +78,11 @@ impl RdpView {
     }
 
     pub(super) fn request_control(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.captures_keyboard() || !self.input_enabled() || !window.is_window_active() {
+        if self.config.remote_app.is_some()
+            || self.captures_keyboard()
+            || !self.input_enabled()
+            || !window.is_window_active()
+        {
             return;
         }
         if window.modifiers().modified() || !self.preedit.is_empty() {

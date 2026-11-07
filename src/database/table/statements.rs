@@ -86,6 +86,12 @@ fn filter_sql(schema: &TableSchema, filter: &ColumnFilter) -> Result<String> {
         let CellValue::Text(value) = &filter.value else {
             return Err(DatabaseError::InvalidTableEdit);
         };
+        if schema.engine == SqlEngine::ClickHouse {
+            return Ok(format!(
+                "positionCaseInsensitiveUTF8(toString({name}), {}) > 0",
+                quote_literal(schema.engine, value)
+            ));
+        }
         let pattern = format!(
             "%{}%",
             value
@@ -356,6 +362,7 @@ fn original_predicate(schema: &TableSchema, original: &[CellValue]) -> Result<St
                     )
                 }
                 SqlEngine::Mysql => format!("{name} <=> {value_sql}"),
+                SqlEngine::ClickHouse => return Err(DatabaseError::TableReadOnly),
                 SqlEngine::Sqlite => {
                     let storage = match value {
                         CellValue::Null => "null",

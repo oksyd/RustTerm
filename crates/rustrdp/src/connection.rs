@@ -1,8 +1,9 @@
-//! NLA-only RDP negotiation, channel connection, licensing and activation.
+//! Authenticated RDP negotiation, channel connection, licensing and activation.
 //!
 //! Layouts and state transitions follow [MS-RDPBCGR] sections 2.2.1 and 3.2.5.3:
 //! <https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c>.
-//! The caller verifies TLS and completes CredSSP before calling [`Connector::start`].
+//! The caller verifies TLS and completes CredSSP (or RDSTLS for a trusted handoff)
+//! before calling [`Connector::start`].
 //! No password is accepted, retained or retransmitted by this protocol engine.
 
 mod activation;
@@ -10,6 +11,10 @@ mod gcc;
 #[cfg(feature = "licensing")]
 pub mod licensing;
 mod message_channel;
+mod redirection;
+
+pub(crate) use redirection::payload as redirection_payload;
+pub use redirection::{parse_redirection_negotiation_response, redirection_request};
 
 pub(crate) use activation::{ActivationFinalizer, reactivate};
 pub(crate) use message_channel::{Message, MessageChannel};
@@ -20,7 +25,7 @@ use crate::{
     wire::{self, Reader},
 };
 
-/// NLA security mode selected before the caller performs TLS and CredSSP.
+/// Security mode to authenticate on the TLS transport before starting RDP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum SecurityProtocol {
@@ -28,12 +33,14 @@ pub enum SecurityProtocol {
     Hybrid = 2,
     /// TLS/CredSSP followed by an Early User Authorization Result.
     HybridEx = 8,
+    /// TLS with a server-issued RDSTLS handoff token, after a trusted redirection.
+    RdsTls = 4,
 }
 
 /// Server capabilities selected by the X.224 negotiation response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NegotiationResponse {
-    /// NLA security protocol to authenticate before starting the connector.
+    /// Security protocol to authenticate before starting the connector.
     pub protocol: SecurityProtocol,
     /// Whether initial monitor layout and extended monitor attributes may be sent.
     pub extended_client_data_supported: bool,
@@ -55,6 +62,10 @@ pub fn parse_negotiation_response(packet: &[u8]) -> Result<SecurityProtocol> {
 /// Validate negotiation and retain display capability flags for
 /// [`Connector::from_negotiation`].
 pub fn parse_negotiation_response_details(packet: &[u8]) -> Result<NegotiationResponse> {
+    negotiation_response(packet, false)
+}
+
+fn negotiation_response(packet: &[u8], redirected: bool) -> Result<NegotiationResponse> {
     let mut reader = Reader::new(packet);
     if reader.u8()? != 3 || reader.u8()? != 0 || usize::from(reader.u16_be()?) != packet.len() {
         return Err(Error::Invalid("negotiation TPKT header"));
@@ -77,8 +88,10 @@ pub fn parse_negotiation_response_details(packet: &[u8]) -> Result<NegotiationRe
     let value = reader.u32_le()?;
     reader.finish()?;
     let protocol = match (kind, value) {
-        (2, 2) => SecurityProtocol::Hybrid,
-        (2, 8) => SecurityProtocol::HybridEx,
+        (2, 2) if !redirected => SecurityProtocol::Hybrid,
+        (2, 8) if !redirected => SecurityProtocol::HybridEx,
+        (2, 4) if redirected => SecurityProtocol::RdsTls,
+        (2, _) if redirected => return Err(Error::Unsupported("server did not select RDSTLS")),
         (2, _) => return Err(Error::Unsupported("server selected a protocol without NLA")),
         (3, _) => return Err(Error::Server(value)),
         _ => return Err(Error::Invalid("RDP negotiation response type")),
@@ -138,6 +151,19 @@ pub struct Connector {
 }
 
 impl Connector {
+    /// Inspect an authenticated frame for a server handoff before activation.
+    /// The returned sensitive payload must not be logged. If present, discard
+    /// this connector and its transport before authenticating the new session.
+    pub fn server_redirection<'a>(&self, packet: &'a [u8]) -> Result<Option<&'a [u8]>> {
+        if matches!(
+            self.state,
+            State::License | State::DemandActive | State::Finalizing(_)
+        ) {
+            redirection::payload(packet, self.info.io_channel_id, None)
+        } else {
+            Ok(None)
+        }
+    }
     /// Validate preferences and create a connection without performing I/O.
     ///
     /// `protocol` must be the result of [`parse_negotiation_response`]. Before
@@ -332,6 +358,12 @@ impl Connector {
             return Err(Error::Limit("handshake packet"));
         }
         let mut output = HandshakeOutput::default();
+        if !matches!(state, State::Ready | State::Connected | State::Failed)
+            && let Some(reason) = wire::mcs_disconnect(packet)?
+        {
+            output.events.push(Event::Disconnected { reason });
+            return Ok(output);
+        }
         if matches!(state, State::License | State::DemandActive)
             && let Some(message_channel) = self.info.message_channel_id
         {
@@ -364,7 +396,7 @@ impl Connector {
         }
         self.state = match state {
             State::ConnectResponse => {
-                let server = gcc::connect_response(packet, &self.config)?;
+                let server = gcc::connect_response_for(packet, &self.config, self.protocol)?;
                 self.info.io_channel_id = server.io_channel;
                 self.info.channels = server.channels;
                 self.info.message_channel_id = server.message_channel;
@@ -428,13 +460,44 @@ impl Connector {
                 State::DemandActive
             }
             State::DemandActive => {
-                let data = io_data(packet, &self.info)?;
-                output.packets = activation::activate(&self.config, &mut self.info, data, false)?;
+                let (source, channel, data) = wire::mcs_indication(packet)?;
+                if channel != self.info.io_channel_id {
+                    return Err(Error::Invalid("handshake I/O channel"));
+                }
+                let mut pdus = Reader::new(data);
+                let demand = loop {
+                    let Some(pdu) = wire::next_share_pdu(&mut pdus)? else {
+                        self.state = State::DemandActive;
+                        return Ok(output);
+                    };
+                    if !activation::before_demand(pdu)? {
+                        break pdu;
+                    }
+                };
+                output.packets = activation::activate(&self.config, &mut self.info, demand, false)?;
+                if source != self.info.server_id {
+                    return Err(Error::Invalid("MCS server source"));
+                }
                 let mut session = Session::activating(self.config.clone(), self.info.clone())?;
                 session.multitransport = std::mem::take(&mut self.multitransport);
                 session.message_channel = std::mem::take(&mut self.message_channel);
                 session.initialize_multitransport()?;
-                State::Finalizing(Box::new(session))
+                let mut events = Vec::new();
+                if session.share_pdus(pdus.remaining(), &mut events)? {
+                    events.push(Event::GraphicsChanged);
+                }
+                for event in events {
+                    match event {
+                        Event::Send(packet) => output.packets.push(packet),
+                        event => output.events.push(event),
+                    }
+                }
+                if session.is_active() {
+                    output.session = Some(session);
+                    State::Connected
+                } else {
+                    State::Finalizing(Box::new(session))
+                }
             }
             State::Finalizing(mut session) => {
                 for event in session.process_with_callback(packet, on_frame)? {
@@ -563,6 +626,12 @@ fn client_info(config: &ClientConfig, info: &ConnectionInfo) -> Result<Vec<u8>> 
     if !config.audio_output {
         flags |= 0x0008_0000; // INFO_NOAUDIOPLAYBACK
     }
+    if config.remote_app.is_some() {
+        flags |= 0x0000_8000;
+    } // INFO_RAIL
+    if config.audio_input {
+        flags |= 0x0020_0000; // INFO_AUDIOCAPTURE (MS-RDPEAI)
+    }
     if let Some(compression) = config.bulk_compression {
         flags |= 0x80 | ((compression as u32) << 9);
     }
@@ -580,7 +649,15 @@ fn client_info(config: &ClientConfig, info: &ConnectionInfo) -> Result<Vec<u8>> 
     body.extend_from_slice(&2u16.to_le_bytes()); // AF_INET
     body.extend_from_slice(&(address.len() as u16).to_le_bytes());
     body.extend_from_slice(&address);
-    body.extend_from_slice(&[2, 0, 0, 0]); // empty clientDir; optional time zone omitted
+    body.extend_from_slice(&[2, 0, 0, 0]); // empty clientDir
+    // MS-RDPBCGR 2.2.1.11.1.1.1: performanceFlags requires the preceding
+    // 172-byte time zone and four-byte session ID. Use an unnamed UTC time zone
+    // instead of collecting the caller's local time zone or directory metadata.
+    body.extend_from_slice(&[0; 172]);
+    body.extend_from_slice(&0u32.to_le_bytes()); // clientSessionId (ignored)
+    // Font smoothing is independent of bitmap compression and color quality.
+    // Omitting this opt-in can leave Windows text without ClearType rendering.
+    body.extend_from_slice(&0x0000_0080u32.to_le_bytes()); // PERF_ENABLE_FONT_SMOOTHING
     wire::mcs_send_data(info.user_id, info.io_channel_id, &body)
 }
 
@@ -656,7 +733,7 @@ pub(crate) mod tests {
         wire::mcs_indication(&request).unwrap().2.to_vec()
     }
 
-    fn activated_connector() -> Connector {
+    fn licensed_connector() -> Connector {
         let mut connector =
             Connector::new(ClientConfig::default(), SecurityProtocol::Hybrid).unwrap();
         let initial = connector.start().unwrap();
@@ -692,6 +769,11 @@ pub(crate) mod tests {
             .unwrap();
         assert!(licensed.packets.is_empty());
         assert!(licensed.session.is_none());
+        connector
+    }
+
+    fn activated_connector() -> Connector {
+        let mut connector = licensed_connector();
         let activated = connector
             .advance(&indication_frame(1002, 1003, &demand_active()).unwrap())
             .unwrap();
@@ -735,6 +817,145 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn startup_deactivation_can_be_followed_by_activation_or_disconnect() {
+        for disconnect in [false, true] {
+            let mut connector = licensed_connector();
+            let deactivate = wire::share_control(1002, 6, &[1, 0, 0, 0, 1, 0, 0]).unwrap();
+            let output = connector
+                .advance(&indication_frame(1002, 1003, &deactivate).unwrap())
+                .unwrap();
+            assert!(
+                output.packets.is_empty() && output.events.is_empty() && output.session.is_none()
+            );
+            assert!(matches!(connector.state, State::DemandActive));
+            if disconnect {
+                let output = connector
+                    .advance(&wire::x224_data(&[0x21, 0x80]).unwrap())
+                    .unwrap();
+                assert_eq!(output.events, [Event::Disconnected { reason: 3 }]);
+                assert!(matches!(connector.state, State::Failed));
+            } else {
+                let output = connector
+                    .advance(&indication_frame(1002, 1003, &demand_active()).unwrap())
+                    .unwrap();
+                assert!(!output.packets.is_empty());
+                assert!(matches!(connector.state, State::Finalizing(_)));
+            }
+        }
+        let mut connector = activated_connector();
+        connector.state = State::DemandActive;
+        let malformed = wire::share_control(1002, 6, &[1, 0, 0, 0, 2, 0, 0]).unwrap();
+        assert!(
+            connector
+                .advance(&indication_frame(1002, 1003, &malformed).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn startup_handles_coalesced_notifications_and_demand_without_losing_following_pdus() {
+        let mut connector = licensed_connector();
+        // Ignorable T.128 flow data must not be treated as Demand Active.
+        let flow = connector
+            .advance(&indication_frame(1002, 1003, &[0, 0x80, 0, 0]).unwrap())
+            .unwrap();
+        assert!(flow.packets.is_empty() && flow.events.is_empty() && flow.session.is_none());
+        assert!(matches!(connector.state, State::DemandActive));
+        let mut body = server_share(54, &0x401u32.to_le_bytes(), 0);
+        body.extend(wire::share_control(1002, 6, &[1, 0, 0, 0, 0, 0]).unwrap());
+        body.extend(demand_active());
+        body.extend(server_share(47, &[0; 4], 0));
+        let output = connector
+            .advance(&indication_frame(1002, 1003, &body).unwrap())
+            .unwrap();
+        assert_eq!(output.packets.len(), 5);
+        assert!(output.session.is_none());
+        let mut finish = server_share(31, &[1, 0, 0, 0], 1);
+        finish.extend(server_share(20, &[4, 0, 0, 0, 0, 0, 0, 0], 1));
+        finish.extend(server_share(20, &[2, 0, 0, 0, 0, 0, 0, 0], 1));
+        finish.extend(server_share(40, &[0; 8], 1));
+        assert!(
+            connector
+                .advance(&indication_frame(1002, 1003, &finish).unwrap())
+                .unwrap()
+                .session
+                .unwrap()
+                .is_active()
+        );
+    }
+
+    #[test]
+    fn startup_preserves_server_error_codes_before_and_after_demand() {
+        for after_demand in [false, true] {
+            let mut connector = licensed_connector();
+            let mut body = if after_demand {
+                demand_active()
+            } else {
+                vec![]
+            };
+            body.extend(server_share(47, &0x1193u32.to_le_bytes(), 0));
+            assert_eq!(
+                connector
+                    .advance(&indication_frame(1002, 1003, &body).unwrap())
+                    .err(),
+                Some(Error::Server(0x1193))
+            );
+            assert!(matches!(connector.state, State::Failed));
+        }
+        for tail in [&[5, 0, 0x17, 0, 0][..], &[18, 0, 0x17, 0, 0, 0][..]] {
+            let mut connector = licensed_connector();
+            let mut body = demand_active();
+            body.extend_from_slice(tail);
+            assert!(
+                connector
+                    .advance(&indication_frame(1002, 1003, &body).unwrap())
+                    .is_err()
+            );
+            assert!(matches!(connector.state, State::Failed));
+        }
+    }
+
+    #[test]
+    fn microphone_support_is_advertised_independently_of_playback() {
+        let connector = licensed_connector();
+        for audio_input in [false, true] {
+            for audio_output in [false, true] {
+                let config = ClientConfig {
+                    audio_input,
+                    audio_output,
+                    ..ClientConfig::default()
+                };
+                let mut packet = client_info(&config, &connector.info).unwrap();
+                packet[7] = 0x68;
+                let data = wire::mcs_indication(&packet).unwrap().2;
+                let flags = u32::from_le_bytes(data[8..12].try_into().unwrap());
+                assert_eq!(flags & 0x0020_0000 != 0, audio_input);
+                assert_eq!(flags & 0x0008_0000 == 0, audio_output);
+            }
+        }
+    }
+
+    #[test]
+    fn rdstls_core_echo_must_match_the_redirected_request() {
+        let mut packet = connect_response();
+        let echo = packet
+            .windows(8)
+            .position(|p| p == [4, 0, 8, 0, 10, 0, 0, 0])
+            .unwrap()
+            + 4;
+        assert!(
+            gcc::connect_response_for(&packet, &ClientConfig::default(), SecurityProtocol::RdsTls)
+                .is_err()
+        );
+        packet[echo] = 4;
+        assert!(
+            gcc::connect_response_for(&packet, &ClientConfig::default(), SecurityProtocol::RdsTls)
+                .is_ok()
+        );
+        assert!(gcc::connect_response(&packet, &ClientConfig::default()).is_err());
+    }
+
+    #[test]
     fn message_channel_rtt_survives_handshake_activation_and_resize() {
         let mut connector = activated_connector();
         connector.info.message_channel_id = Some(1006);
@@ -743,7 +964,7 @@ pub(crate) mod tests {
         for state in [State::License, State::DemandActive] {
             connector.state = state;
             let output = connector.advance(&request).unwrap();
-            assert_eq!(output.packets, [response.clone()]);
+            assert_eq!(output.packets, std::slice::from_ref(&response));
             assert!(output.events.is_empty());
             assert!(output.session.is_none());
         }
@@ -754,7 +975,7 @@ pub(crate) mod tests {
         assert!(activation.session.is_none());
         assert_eq!(
             connector.advance(&request).unwrap().packets,
-            [response.clone()]
+            std::slice::from_ref(&response)
         );
         let mut finalization = server_share(31, &[1, 0, 0, 0], 1);
         finalization.extend(server_share(20, &[4, 0, 0, 0, 0, 0, 0, 0], 1));
@@ -919,6 +1140,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn remote_app_uses_rail_flag_and_channel_without_an_alternate_shell() {
+        let config = ClientConfig {
+            remote_app: Some(crate::remote_app::RemoteApp {
+                program: "||app".into(),
+                ..Default::default()
+            }),
+            dynamic_resolution: false,
+            ..Default::default()
+        };
+        assert!(gcc::requested_channels(&config).contains(&"rail"));
+        let mut connector = Connector::new(config.clone(), SecurityProtocol::Hybrid).unwrap();
+        connector.info.user_id = 1001;
+        connector.info.io_channel_id = 1003;
+        let packet = client_info(&config, &connector.info).unwrap();
+        let mut mcs = Reader::new(wire::x224_payload(&packet).unwrap());
+        mcs.skip(6).unwrap();
+        let length = wire::per_length(&mut mcs).unwrap();
+        let mut info = Reader::new(mcs.take(length).unwrap());
+        info.skip(8).unwrap(); // security header and codepage
+        let flags = info.u32_le().unwrap();
+        assert_ne!(flags & 0x8000, 0);
+        assert_eq!(flags & 0x0200_0000, 0); // INFO_HIDEF_RAIL_SUPPORTED
+        info.skip(6).unwrap(); // domain, username, password lengths
+        assert_eq!(info.u16_le().unwrap(), 0); // alternate shell
+        assert_eq!(info.u16_le().unwrap(), 0); // working directory belongs in Execute
+    }
+
+    #[test]
     fn client_info_contains_no_password_or_autologon() {
         for audio_output in [false, true] {
             let config = ClientConfig {
@@ -945,6 +1194,44 @@ pub(crate) mod tests {
                 .skip(4 + usize::from(domain_length + username_length) + 4)
                 .unwrap();
             assert_eq!(reader.take(6).unwrap(), &[0; 6]);
+        }
+    }
+
+    #[test]
+    fn client_info_requests_font_smoothing_for_every_graphics_quality() {
+        for color_depth in [crate::ColorDepth::Bpp16, crate::ColorDepth::Bpp32] {
+            for allow_lossy_bitmaps in [false, true] {
+                let config = ClientConfig {
+                    username: "operator\u{100}".into(),
+                    domain: "example".into(),
+                    color_depth,
+                    allow_lossy_bitmaps,
+                    bulk_compression: allow_lossy_bitmaps.then_some(crate::BulkCompression::Rdp5),
+                    ..ClientConfig::default()
+                };
+                let mut connector =
+                    Connector::new(config.clone(), SecurityProtocol::Hybrid).unwrap();
+                connector.info.user_id = 1001;
+                connector.info.io_channel_id = 1003;
+                let mut packet = client_info(&config, &connector.info).unwrap();
+                packet[7] = 0x68;
+                let mut reader = Reader::new(wire::mcs_indication(&packet).unwrap().2);
+                reader.skip(12).unwrap(); // security header, code page, info flags
+                let mut strings_length = 0;
+                for _ in 0..5 {
+                    strings_length += usize::from(reader.u16_le().unwrap()) + 2;
+                }
+                reader.skip(strings_length).unwrap();
+                assert_eq!(reader.u16_le().unwrap(), 2); // AF_INET
+                let address_length = usize::from(reader.u16_le().unwrap());
+                assert_eq!(reader.take(address_length).unwrap(), utf16z("0.0.0.0"));
+                let directory_length = usize::from(reader.u16_le().unwrap());
+                assert_eq!(reader.take(directory_length).unwrap(), &[0; 2]);
+                assert_eq!(reader.take(172).unwrap(), &[0; 172]);
+                assert_eq!(reader.u32_le().unwrap(), 0); // clientSessionId
+                assert_eq!(reader.u32_le().unwrap(), 0x80); // no shell-disable flags
+                reader.finish().unwrap();
+            }
         }
     }
 

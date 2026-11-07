@@ -2,9 +2,16 @@
 //! Terminal ANSI colors remain owned by the configurable terminal theme.
 
 use rustterm::i18n::messages as i18n_key;
+mod components;
+pub mod metrics;
+pub mod popup;
+pub mod prompt;
 mod scroll_area;
 mod scrollbar;
 mod theme;
+pub use components::{
+    dialog_surface, empty_state, feedback, form_row, panel_header, setting_row, toolbar,
+};
 pub use theme::{Colors, colors, set_theme};
 
 pub use scroll_area::scrollable;
@@ -34,7 +41,7 @@ pub const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
 pub const TITLE_HEIGHT: f32 = 32.0;
 pub const TAB_HEIGHT: f32 = 36.0;
-pub const PANE_HEADER_HEIGHT: f32 = 44.0;
+pub const PANE_HEADER_HEIGHT: f32 = 36.0;
 pub const STATUS_HEIGHT: f32 = 24.0;
 pub const SEARCH_HEIGHT: f32 = 30.0;
 
@@ -66,6 +73,7 @@ icons! {
     Redis => "redis",
     Elasticsearch => "elasticsearch",
     Mysql => "mysql",
+    ClickHouse => "clickhouse",
     Postgres => "postgres",
     Sqlite => "sqlite",
     Table => "table",
@@ -104,6 +112,7 @@ icons! {
     Warning => "warning",
     Disconnect => "disconnect",
     Pulse => "pulse",
+    Container => "container",
     Pin => "pin",
     Unpin => "unpin",
 }
@@ -114,6 +123,7 @@ impl Icon {
             Connection::Redis(_) => Self::Redis,
             Connection::Elasticsearch(_) => Self::Elasticsearch,
             Connection::Mysql(_) => Self::Mysql,
+            Connection::ClickHouse(_) => Self::ClickHouse,
             Connection::Postgres(_) => Self::Postgres,
             Connection::Sqlite(_) => Self::Sqlite,
             Connection::Rdp(_) => Self::Desktop,
@@ -124,6 +134,7 @@ impl Icon {
     pub const fn for_sql_engine(engine: SqlEngine) -> Self {
         match engine {
             SqlEngine::Mysql => Self::Mysql,
+            SqlEngine::ClickHouse => Self::ClickHouse,
             SqlEngine::Postgres => Self::Postgres,
             SqlEngine::Sqlite => Self::Sqlite,
         }
@@ -132,7 +143,7 @@ impl Icon {
     fn color(self) -> u32 {
         match self {
             Self::Redis => colors().danger,
-            Self::Mysql => colors().warning,
+            Self::Mysql | Self::ClickHouse => colors().warning,
             Self::Postgres => colors().blue,
             Self::Sqlite | Self::Desktop => colors().teal,
             _ => colors().muted,
@@ -179,7 +190,7 @@ impl ButtonStyle {
         match self {
             Self::Neutral => (colors().hover, colors().text),
             Self::Primary => (colors().accent_hover, colors().on_accent),
-            Self::Danger => (0x793e48, 0xffffff),
+            Self::Danger => (colors().danger_bg, colors().danger),
         }
     }
 }
@@ -210,12 +221,20 @@ fn icon_button_control(
     div()
         .id(id)
         .group("icon-button")
-        .size(px(28.0))
+        .size(px(metrics::CONTROL))
+        .tab_index(0)
+        .tab_stop(enabled)
         .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(2.0))
+        .rounded(px(metrics::RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(0))
+        .focus(|s| {
+            s.bg(rgb(colors().selected))
+                .border_color(rgb(colors().accent))
+        })
         .text_color(rgb(foreground))
         .when(enabled, |button| {
             button
@@ -290,13 +309,24 @@ fn text_button_control(
     };
     let (background, foreground) = match style {
         ButtonStyle::Primary => (colors().accent, colors().on_accent),
-        _ => (colors().hover, colors().text),
+        ButtonStyle::Danger => (colors().danger_bg, colors().danger),
+        ButtonStyle::Neutral => (colors().hover, colors().text),
     };
     div()
         .id(id)
+        .tab_index(0)
+        .tab_stop(enabled)
+        .min_h(px(metrics::CONTROL))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(metrics::BODY))
         .px_2()
         .py_1()
-        .rounded_sm()
+        .rounded(px(metrics::RADIUS))
+        .border_1()
+        .border_color(gpui::rgba(0))
+        .focus(|s| s.border_color(rgb(colors().accent)))
         .bg(rgb(background))
         .text_color(rgb(foreground))
         .when(enabled, |button| {

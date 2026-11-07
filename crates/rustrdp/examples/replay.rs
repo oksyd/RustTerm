@@ -72,6 +72,9 @@ fn main() -> rustrdp::Result<()> {
                     | Event::DriveRequest(_) => {
                         // This headless replay does not enable files, audio or shared drives.
                     }
+                    Event::RemoteApp(_) => {
+                        return Err(Error::Unsupported("RemoteApp is disabled in this replay"));
+                    }
                     Event::RequestRejected(error) => eprintln!("Local request rejected: {error}"),
                     Event::MultitransportRequest(_)
                     | Event::SendTunnel { .. }

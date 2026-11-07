@@ -117,3 +117,12 @@ resources-unknown-resource-output-record = 资源采集输出包含未知记录
 resources-unpin-resources = 取消固定资源面板
 
 resources-updated-just-now = 刚刚更新
+
+resources-host = 主机
+resources-container = 容器
+resources-stale = 数据已过期
+resources-status-unavailable = 暂不可用
+resources-sample-age = 上次采样：{ $seconds } 秒前
+resources-open-details = 点击打开资源详情
+resources-status-monitoring = 在状态栏显示资源监控
+resources-status-monitoring-help = 每 5 秒采集当前 SSH 主机或容器，隐藏或锁定时暂停。关闭后仍可使用资源面板。

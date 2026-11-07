@@ -17,6 +17,7 @@ include = [
 ]
 
 [dependencies]
+dirs = { version = "5.0.1", default-features = false }
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 gpui = { version = "0.2.2", default-features = false, features = ["x11", "wayland", "windows-manifest"] }
 image = { version = "0.25.9", default-features = false, features = ["png", "bmp"] }
@@ -45,6 +46,9 @@ rustls-native-certs = { version = "0.8.5", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12"] }
 sha2 = { version = "0.10.9", default-features = false }
 ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+hyper = { version = "1.12.0", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
+http-body-util = { version = "0.1.5", default-features = false }
 url = { version = "2.5.8", default-features = false, features = ["std"] }
 semver = { version = "1.0.28", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
@@ -55,10 +59,11 @@ zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 
 tokio = { version = "1.54.1", default-features = false, features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util", "process", "fs"] }
 tokio-util = { version = "0.7.20", default-features = false, features = ["codec"] }
+socket2 = { version = "0.6.5", default-features = false, features = ["all"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "sink"] }
 
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
-serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["alloc", "raw_value"] }
 toml = { version = "1.1.8", default-features = false, features = ["serde", "parse", "display"] }
 uuid = { version = "1.26.1", default-features = false, features = ["v4", "serde"] }
 
@@ -87,6 +92,7 @@ libloading = { version = "0.8.9", default-features = false }
 rand = { version = "0.10.3", default-features = false, features = ["thread_rng"] }
 
 [build-dependencies]
+embed-resource = { version = "3.0.12", default-features = false }
 fluent-syntax = { version = "0.12.0", default-features = false }
 unic-langid = { version = "0.9.6", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }

@@ -120,6 +120,7 @@ pub struct WindowState {
     pub prompts: PromptGate,
     pub visibility: crate::app::window_visibility::WindowVisibility,
     diagnostics_dir: Arc<std::path::Path>,
+    pub cache_dir: Arc<std::path::Path>,
     pub authentication: tokio::sync::mpsc::Sender<rustterm::session::AuthenticationChallenge>,
     authentication_receiver: Arc<
         std::sync::Mutex<
@@ -128,12 +129,13 @@ pub struct WindowState {
     >,
 }
 impl WindowState {
-    pub fn new(window: &gpui::Window, directory: &std::path::Path) -> Self {
+    pub fn new(window: &gpui::Window, paths: &rustterm::config::AppPaths) -> Self {
         let (authentication, receiver) = tokio::sync::mpsc::channel(8);
         Self {
             prompts: PromptGate::default(),
             visibility: crate::app::window_visibility::WindowVisibility::new(window),
-            diagnostics_dir: directory.into(),
+            diagnostics_dir: paths.logs().into(),
+            cache_dir: paths.cache.clone().into(),
             authentication,
             authentication_receiver: Arc::new(std::sync::Mutex::new(Some(receiver))),
         }

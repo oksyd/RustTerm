@@ -37,6 +37,7 @@ enum TerminalKind {
     Local,
     Ssh,
     Telnet,
+    Container,
 }
 
 pub struct TerminalView {
@@ -89,6 +90,7 @@ pub struct TerminalView {
     cell_width: Pixels,
     line_height: Pixels,
     bounds: Option<Bounds<Pixels>>,
+    header_bounds: Option<Bounds<Pixels>>,
     resize: ResizeScheduler,
     resize_receipt: Option<ResizeReceipt>,
     requested_revision: u64,
@@ -113,6 +115,19 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    pub fn is_container(&self) -> bool {
+        self.kind == TerminalKind::Container
+    }
+
+    pub fn set_container(&mut self, name: String, cx: &mut Context<Self>) {
+        self.kind = TerminalKind::Container;
+        self.display_name = name.clone();
+        self.shell = name;
+        self.target = None;
+        self.local_shell = None;
+        cx.notify();
+    }
+
     pub fn set_active_tool(&mut self, tool: Option<SessionTool>, cx: &mut Context<Self>) {
         if self.active_tool != tool {
             self.active_tool = tool;
@@ -131,6 +146,17 @@ impl TerminalView {
         &self.focus
     }
 
+    pub fn display_name(&self) -> &str {
+        &self.display_name
+    }
+    pub fn monitor_session(&self) -> Option<&Session> {
+        if !matches!(self.kind, TerminalKind::Ssh | TerminalKind::Container)
+            || self.viewed_run + 1 != self.runs.len()
+        {
+            return None;
+        }
+        self.runs.last()
+    }
     pub fn resource_session(&self) -> Option<&Session> {
         (self.kind == TerminalKind::Ssh && self.viewed_run + 1 == self.runs.len())
             .then(|| self.runs.last())
@@ -193,6 +219,7 @@ impl TerminalView {
             | Connection::Rdp(_)
             | Connection::Mysql(_)
             | Connection::Postgres(_)
+            | Connection::ClickHouse(_)
             | Connection::Sqlite(_) => return,
         }
         cx.notify();

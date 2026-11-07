@@ -62,7 +62,8 @@ fn avc444_auxiliary_views_follow_their_distinct_plane_layouts() {
     // MS-RDPEGFX 3.3.8.3.2/.3: v1 interleaves eight-row bands; v2
     // partitions full-frame rows and alternates the two chroma planes.
     let fixture = PlanarFixture::new();
-    let cases: [(u8, &[(usize, usize, u8, u8)]); 2] = [
+    type ChromaSample = (usize, usize, u8, u8);
+    let cases: [(u8, &[ChromaSample]); 2] = [
         (
             2,
             &[

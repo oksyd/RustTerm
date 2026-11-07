@@ -384,7 +384,7 @@ mod tests {
                     )
                     .unwrap();
                 let mut expected = vec![0; usize::from(width) * usize::from(height) * 4];
-                for pixel in expected.chunks_exact_mut(4) {
+                for pixel in expected.as_chunks_mut::<4>().0 {
                     pixel[3] = 255;
                 }
                 for (y, shade) in [(1, 200), (2, 80)] {

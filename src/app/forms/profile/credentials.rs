@@ -54,13 +54,28 @@ impl CredentialEditor {
 }
 
 impl ProfileForm {
+    // UI navigation must not cancel an in-flight test or erase its result.
+    // Text changes are also observed directly by the workspace; no secret is
+    // copied into this stamp.
+    pub fn change_stamp(&self, cx: &App) -> impl PartialEq + use<> {
+        (
+            self.draft(cx),
+            self.credentials.mode,
+            self.credentials.cleared_on_lock,
+        )
+    }
+
     fn supports_credential(&self) -> bool {
         if self.kind == ProfileKind::Elasticsearch {
             return self.es_auth != rustterm::config::ElasticsearchAuth::None;
         }
         matches!(
             self.kind,
-            ProfileKind::Redis | ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::Rdp
+            ProfileKind::Redis
+                | ProfileKind::Mysql
+                | ProfileKind::Postgres
+                | ProfileKind::ClickHouse
+                | ProfileKind::Rdp
         ) || self.kind == ProfileKind::Ssh
             && matches!(
                 self.ssh_auth,
@@ -167,14 +182,24 @@ impl ProfileForm {
             return div().into_any_element();
         }
         let saved = self.saved_credential(cx).is_some();
-        let label = if self.kind == ProfileKind::Elasticsearch {
-            i18n_key::ES_SECRET
+        let label = if self.kind == ProfileKind::Elasticsearch
+            && self.es_auth == rustterm::config::ElasticsearchAuth::ApiKey
+        {
+            i18n_key::ES_ENCODED_API_KEY
         } else if self.kind == ProfileKind::Ssh && self.ssh_auth == SshAuthentication::PrivateKey {
             i18n_key::CONNECTIONS_PRIVATE_KEY_PASSPHRASE
         } else {
             i18n_key::WORKSPACE_PASSWORD
         };
+        self.credentials
+            .input
+            .update(cx, |input, cx| input.set_placeholder(label, cx));
         let mut body = column();
+        if self.kind == ProfileKind::Elasticsearch
+            && self.es_auth == rustterm::config::ElasticsearchAuth::ApiKey
+        {
+            body = body.child(hint(i18n_key::ES_AUTH_HELP));
+        }
         match self.credentials.mode {
             Mode::Keep
                 if saved
@@ -232,13 +257,10 @@ impl ProfileForm {
             _ => {
                 body = body
                     .child(self.credentials.input.clone())
-                    .child(hint(
-                        i18n_key::CONNECTIONS_NON_EMPTY_PASSWORDS_ARE_SAVED_IN_THE_SYSTEM_CREDENTIAL_STORE,
-                    ))
                     .child(hint(if self.credentials.mode == Mode::Replace {
                         i18n_key::CONNECTIONS_ENTER_A_REPLACEMENT_TO_SAVE_TESTING_WITH_AN_EMPTY_FIELD
                     } else {
-                        i18n_key::CONNECTIONS_LEAVE_BLANK_TO_ENTER_A_PASSWORD_WHEN_CONNECTING_TESTING_WITH
+                        i18n_key::CONNECTIONS_CREDENTIAL_HELP
                     }));
             }
         }

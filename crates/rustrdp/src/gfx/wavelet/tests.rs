@@ -32,7 +32,13 @@ fn inverse_constant_tiles_and_full_range_color() {
         inverse(&mut coefficients, reduced);
         assert!(coefficients.iter().all(|value| *value == -4096));
         let pixels = colors(&[coefficients, vec![0; 4096], vec![0; 4096]]);
-        assert!(pixels.chunks_exact(4).all(|pixel| pixel == [0, 0, 0, 255]));
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| *pixel == [0, 0, 0, 255])
+        );
     }
 }
 

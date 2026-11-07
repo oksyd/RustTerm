@@ -308,6 +308,9 @@ async fn connect(
     let (resources, resource_requests) =
         crate::session::ResourceClient::new(shared.io_stop.clone());
     *shared.resources.lock().unwrap_or_else(|e| e.into_inner()) = Some(resources);
+    let (exec, exec_requests) = crate::session::exec::ExecClient::new(shared.io_stop.clone());
+    *shared.docker.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some(crate::docker::DockerClient::new(exec));
     let (forwarding, forwarding_task) = forwarding::start(options, shared.io_stop.clone());
     *shared.forwarding.lock().unwrap_or_else(|e| e.into_inner()) = Some(forwarding);
     let monitor_shared = shared.clone();
@@ -320,6 +323,7 @@ async fn connect(
             &handle,
             sftp_open,
             resource_requests,
+            exec_requests,
             &monitor_shared.io_stop,
         )
         .await;
@@ -330,6 +334,11 @@ async fn connect(
             .take();
         monitor_shared
             .resources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        monitor_shared
+            .docker
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();

@@ -80,7 +80,10 @@ impl FrameSnapshot {
 
     pub fn capture(&mut self, session: &mut rustrdp::Session) -> RdpFrame {
         let damage = session.take_graphics_damage();
-        self.capture_graphics(session.graphics(), damage, session.info().color_depth())
+        let mut frame =
+            self.capture_graphics(session.graphics(), damage, session.info().color_depth());
+        frame.remote_windows = session.remote_windows();
+        frame
     }
 
     pub fn capture_graphics(
@@ -96,6 +99,7 @@ impl FrameSnapshot {
             damage,
         );
         RdpFrame {
+            remote_windows: Vec::new(),
             sequence: 0,
             published_at: std::time::Instant::now(),
             acknowledgement: None,

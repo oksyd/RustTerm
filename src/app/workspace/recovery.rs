@@ -769,7 +769,9 @@ fn profile_at_position(position: &PanePosition, profiles: &[Profile]) -> Option<
                     .unwrap_or(redis.database)
             };
         }
-        Connection::Mysql(config) | Connection::Postgres(config) => {
+        Connection::Mysql(config)
+        | Connection::Postgres(config)
+        | Connection::ClickHouse(config) => {
             if let Some(database) = &position.sql_database {
                 config.database = database.clone();
             }
@@ -982,6 +984,10 @@ mod tests {
                 SqlEngine::Postgres,
                 Profile::postgres("PostgreSQL", SqlConfig::postgres()),
             ),
+            (
+                SqlEngine::ClickHouse,
+                Profile::clickhouse("ClickHouse", SqlConfig::clickhouse()),
+            ),
         ] {
             let mut position = PanePosition {
                 profile: profile.id,
@@ -1000,6 +1006,7 @@ mod tests {
                 &match engine {
                     SqlEngine::Mysql => SqlConfig::mysql(),
                     SqlEngine::Postgres => SqlConfig::postgres(),
+                    SqlEngine::ClickHouse => SqlConfig::clickhouse(),
                     SqlEngine::Sqlite => unreachable!(),
                 }
             );

@@ -148,6 +148,10 @@ impl Graphics {
         !matches!(self.pointer, Pointer::Default)
     }
 
+    pub(crate) fn pointer_position(&self) -> (u16, u16) {
+        (self.pointer_x, self.pointer_y)
+    }
+
     pub(crate) fn take_damage(&mut self) -> Option<Damage> {
         self.damage.take()
     }

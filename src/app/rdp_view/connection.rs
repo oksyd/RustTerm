@@ -6,6 +6,8 @@ use std::time::Duration;
 
 impl RdpView {
     pub(super) fn connect(&mut self, secret: Secret, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_application_windows(cx);
+        self.applications = remote_app::Applications::default();
         self.cancel_file_clipboard_read();
         self.file_transfer = None;
         self.audio_muted = false;
@@ -14,7 +16,11 @@ impl RdpView {
         // Resolve automatic DPI for this session without changing the saved profile.
         let mut config = self.config.clone();
         config.desktop_scale = Some(self.desktop_scale);
-        let handle = match RdpClient::connect(config, secret) {
+        let handle = match RdpClient::connect_with_cache_directory(
+            config,
+            secret,
+            Some(self.window_state.cache_dir.to_path_buf()),
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 self.window_state.record_with_context(
@@ -57,6 +63,7 @@ impl RdpView {
                             }
                             this.negotiated_color_depth = Some(depth);
                         }
+                        this.refresh_application_frames(cx);
                         if this.surface_visible() {
                             cx.notify();
                         } else if !this.unread {
@@ -103,12 +110,26 @@ impl RdpView {
             return;
         }
         match event {
+            RdpEvent::RemoteApp(event) => self.remote_app_event(event, window, cx),
             RdpEvent::Performance(sample) => {
                 performance::record_backend(&self.window_state, self.index, &sample);
                 self.performance.flush(&self.window_state, self.index);
                 return;
             }
-            RdpEvent::Connecting => self.state = State::Connecting,
+            RdpEvent::Connecting => {
+                self.close_application_windows(cx);
+                self.applications = remote_app::Applications::default();
+                self.resize_task = None;
+                self.last_resize = None;
+                self.cancel_file_clipboard_read();
+                self.content_publication = None;
+                self.incoming_files = None;
+                self.file_export_snapshot = None;
+                self.clipboard = clipboard::ClipboardState::default();
+                self.file_transfer = None;
+                self.release_control(cx);
+                self.state = State::Connecting;
+            }
             RdpEvent::Connected => {
                 self.retry_allowed = false;
                 self.state = State::Connected;
@@ -124,6 +145,7 @@ impl RdpView {
                 self.request_resize(cx);
             }
             RdpEvent::Disconnected => {
+                self.close_application_windows(cx);
                 self.content_publication = None;
                 self.performance.flush(&self.window_state, self.index);
                 self.retry_allowed = false;
@@ -136,6 +158,7 @@ impl RdpView {
                 self.file_transfer = None;
             }
             RdpEvent::Failed(error) => {
+                self.close_application_windows(cx);
                 self.content_publication = None;
                 self.performance.flush(&self.window_state, self.index);
                 self.retry_allowed = matches!(

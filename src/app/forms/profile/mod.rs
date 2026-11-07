@@ -3,6 +3,7 @@ use rustterm::i18n::messages as i18n_key;
 mod credentials;
 mod elasticsearch;
 mod group;
+mod layout;
 mod local;
 mod rdp;
 mod redis;
@@ -16,13 +17,12 @@ mod validation;
 
 pub use credentials::CredentialChange;
 
-use self::{
-    redis::REDIS_FIELDS,
-    ssh::{SSH_ADVANCED, SshAuthentication},
-};
+use self::ssh::SshAuthentication;
 use super::{Fields, column, hint, input, parse_value};
 use crate::app::{interaction::PromptGate, text_input::TextInput, ui};
-use gpui::{App, Context, Entity, FocusHandle, ScrollHandle, Window, prelude::*, px, rgb};
+use gpui::{
+    App, Context, Entity, FocusHandle, ScrollHandle, Subscription, Window, prelude::*, px, rgb,
+};
 use rustterm::config::{
     Connection, Group, Profile, SqlConfig, SqlEngine, SshConfig, TelnetConfig, Uuid,
 };
@@ -36,16 +36,11 @@ pub enum ProfileKind {
     Redis,
     Elasticsearch,
     Mysql,
+    ClickHouse,
     Postgres,
     Sqlite,
     Rdp,
 }
-
-const TELNET_FIELDS: &[&str] = &[
-    i18n_key::WORKSPACE_HOST,
-    i18n_key::WORKSPACE_PORT,
-    i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
-];
 
 struct ArgumentRow {
     id: usize,
@@ -97,6 +92,7 @@ pub struct ProfileForm {
     sqlite_creating: bool,
     redis_topology: rustterm::config::RedisTopology,
     rdp: rdp::RdpFormState,
+    rdp_view: rdp::RdpFormView,
     ssh_profiles: Vec<Profile>,
     ssh_profile: Option<Uuid>,
     tunnel_open: bool,
@@ -115,6 +111,8 @@ pub struct ProfileForm {
     ssh_import_error: Option<Message>,
     imported_ssh: Option<SshConfig>,
     credentials: credentials::CredentialEditor,
+    input_subscriptions: Vec<Subscription>,
+    name_suggestion: String,
 }
 impl ProfileForm {
     pub fn new(
@@ -122,6 +120,7 @@ impl ProfileForm {
         kind: ProfileKind,
         groups: Vec<Group>,
         profiles: Vec<Profile>,
+        default_group: Option<Uuid>,
         prompts: PromptGate,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -131,7 +130,7 @@ impl ProfileForm {
             .into_iter()
             .map(|node| (node.group.id, node.path))
             .collect();
-        let group = profile.as_ref().and_then(|p| p.group);
+        let group = profile.as_ref().map_or(default_group, |p| p.group);
         let mut values = vec![(
             i18n_key::COMMON_NAME,
             profile.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
@@ -260,9 +259,11 @@ impl ProfileForm {
                     ),
                 ]);
             }
-            ProfileKind::Mysql | ProfileKind::Postgres => {
+            ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::ClickHouse => {
                 let engine = if kind == ProfileKind::Mysql {
                     SqlEngine::Mysql
+                } else if kind == ProfileKind::ClickHouse {
+                    SqlEngine::ClickHouse
                 } else {
                     SqlEngine::Postgres
                 };
@@ -270,6 +271,7 @@ impl ProfileForm {
                     .as_ref()
                     .and_then(|profile| match (&profile.connection, engine) {
                         (Connection::Mysql(settings), SqlEngine::Mysql)
+                        | (Connection::ClickHouse(settings), SqlEngine::ClickHouse)
                         | (Connection::Postgres(settings), SqlEngine::Postgres) => {
                             Some(settings.clone())
                         }
@@ -278,6 +280,8 @@ impl ProfileForm {
                     .unwrap_or_else(|| {
                         if kind == ProfileKind::Mysql {
                             SqlConfig::mysql()
+                        } else if kind == ProfileKind::ClickHouse {
+                            SqlConfig::clickhouse()
                         } else {
                             SqlConfig::postgres()
                         }
@@ -346,6 +350,7 @@ impl ProfileForm {
             sqlite_notice: None,
             sqlite_creating: false,
             redis_topology,
+            rdp_view: rdp::RdpFormView::new(&rdp, cx),
             rdp,
             ssh_profiles: profiles
                 .into_iter()
@@ -368,7 +373,19 @@ impl ProfileForm {
             ssh_import_error: None,
             imported_ssh: None,
             credentials: credentials::CredentialEditor::new(cx),
+            input_subscriptions: Vec::new(),
+            name_suggestion: String::new(),
         };
+        // Parent summaries and the suggested name follow edits without changing
+        // the stored draft or overwriting a name supplied by the user.
+        for (_, input) in &form.fields.0 {
+            form.input_subscriptions
+                .push(cx.subscribe(input, |_, _, event, cx| {
+                    if matches!(event, crate::app::text_input::InputEvent::Changed) {
+                        cx.notify();
+                    }
+                }));
+        }
         form.initial = form.draft(cx);
         form
     }
@@ -411,89 +428,9 @@ impl ProfileForm {
         self.id
     }
 
-    pub fn inputs(&self, cx: &App) -> Vec<Entity<TextInput>> {
-        let mut inputs = self.fields.selected_inputs(&[i18n_key::COMMON_NAME]);
-        match self.kind {
-            ProfileKind::Ssh => {
-                inputs.extend(self.fields.selected_inputs(&[
-                    i18n_key::WORKSPACE_HOST,
-                    i18n_key::WORKSPACE_PORT,
-                    i18n_key::WORKSPACE_USERNAME,
-                ]));
-                if self.ssh_auth == SshAuthentication::PrivateKey {
-                    inputs.push(
-                        self.fields
-                            .field(i18n_key::CONNECTIONS_PRIVATE_KEY_PATH)
-                            .clone(),
-                    );
-                }
-                if self.ssh_auth == SshAuthentication::Agent {
-                    inputs.push(
-                        self.fields
-                            .field(i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL)
-                            .clone(),
-                    );
-                }
-                if self.credential_input_visible(cx) {
-                    inputs.push(self.credentials.input.clone());
-                }
-                if self.advanced {
-                    inputs.extend(self.fields.selected_inputs(SSH_ADVANCED));
-                }
-            }
-            ProfileKind::Local => {
-                inputs.push(self.fields.field(i18n_key::WORKSPACE_SHELL).clone());
-                inputs.extend(self.arguments.iter().map(|row| row.value.clone()));
-                inputs.push(
-                    self.fields
-                        .field(i18n_key::COMMON_WORKING_DIRECTORY)
-                        .clone(),
-                );
-                for row in &self.environment {
-                    inputs.push(row.key.clone());
-                    inputs.push(row.value.clone());
-                }
-            }
-            ProfileKind::Redis => {
-                inputs.extend(self.fields.selected_inputs(REDIS_FIELDS));
-                if self.redis_topology != rustterm::config::RedisTopology::Standalone {
-                    inputs.extend(
-                        self.fields
-                            .selected_inputs(&[i18n_key::REDIS_ADDITIONAL_REDIS_NODES]),
-                    );
-                }
-                if self.redis_topology == rustterm::config::RedisTopology::Sentinel {
-                    inputs.extend(self.fields.selected_inputs(&[
-                        i18n_key::REDIS_SENTINEL_SERVICE_NAME,
-                        i18n_key::REDIS_SENTINEL_USERNAME,
-                    ]));
-                }
-            }
-            ProfileKind::Mysql | ProfileKind::Postgres => {
-                inputs.extend(self.fields.selected_inputs(sql::FIELDS))
-            }
-            ProfileKind::Elasticsearch => {
-                inputs.extend(self.fields.selected_inputs(&self.es_fields()))
-            }
-            ProfileKind::Sqlite => inputs.extend(self.fields.selected_inputs(sqlite::FIELDS)),
-            ProfileKind::Telnet => inputs.extend(self.fields.selected_inputs(TELNET_FIELDS)),
-            ProfileKind::Rdp => inputs.extend(self.rdp_inputs(cx)),
-        }
-        if !matches!(self.kind, ProfileKind::Ssh | ProfileKind::Rdp)
-            && self.credential_input_visible(cx)
-        {
-            inputs.push(self.credentials.input.clone());
-        }
-        inputs
-    }
-
-    pub fn focus(&self, window: &mut Window, cx: &App) {
-        self.fields.focus(window, cx);
-    }
-
     pub fn profile(&self, current_profiles: &[Profile], cx: &App) -> anyhow::Result<Profile> {
         let get = |key| self.fields.get(key, cx);
-        let name = get(i18n_key::COMMON_NAME);
+        let name = self.profile_name(cx);
         let connection = match self.kind {
             ProfileKind::Ssh => Connection::Ssh(self.ssh_config(current_profiles, cx)?),
             ProfileKind::Telnet => {
@@ -513,6 +450,11 @@ impl ProfileForm {
                 Connection::Elasticsearch(self.elasticsearch_config(current_profiles, cx)?)
             }
             ProfileKind::Redis => Connection::Redis(self.redis_config(current_profiles, cx)?),
+            ProfileKind::ClickHouse => Connection::ClickHouse(self.sql_config(
+                SqlEngine::ClickHouse,
+                current_profiles,
+                cx,
+            )?),
             ProfileKind::Mysql => {
                 Connection::Mysql(self.sql_config(SqlEngine::Mysql, current_profiles, cx)?)
             }
@@ -533,22 +475,23 @@ impl ProfileForm {
 
 impl Render for ProfileForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_name_suggestion(cx);
         column().text_size(px(12.)).text_color(rgb(ui::colors().text))
-            .child(self.fields.selected_rows(&[i18n_key::COMMON_NAME]))
-            .child(self.group_picker(cx))
+            .when(self.kind == ProfileKind::Rdp, |form| form.h_full().min_h_0())
             .child(match self.kind {
                 ProfileKind::Local => self.local_body(cx),
                 ProfileKind::Ssh => self.ssh_body(cx),
-                ProfileKind::Telnet => column().child(self.fields.selected_rows(TELNET_FIELDS))
+                ProfileKind::Telnet => column().child(self.host_port())
                     .child(hint(i18n_key::CONNECTIONS_TELNET_IS_UNENCRYPTED_ENTER_LOGIN_CREDENTIALS_IN_THE_TERMINAL_WHEN))
+                    .child(self.network_options(cx))
                     .into_any_element(),
                 ProfileKind::Redis => self.redis_body(cx),
                 ProfileKind::Elasticsearch => self.elasticsearch_body(cx),
-                ProfileKind::Mysql | ProfileKind::Postgres => self.sql_body(cx),
+                ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::ClickHouse => self.sql_body(cx),
                 ProfileKind::Sqlite => self.sqlite_body(cx),
                 ProfileKind::Rdp => self.rdp_body(cx),
             })
-            .when(self.kind == ProfileKind::Local, |form| form.child(hint(i18n_key::CONNECTIONS_ENVIRONMENT_VARIABLES_AND_STARTUP_ARGUMENTS_ARE_SAVED_AS_PLAIN_CONFIGURATION)))
+            .when(self.kind != ProfileKind::Rdp, |form| form.child(self.profile_details(cx)))
     }
 }
 

@@ -44,6 +44,12 @@ rdp-confirm-the-server-certificate-to-continue = 确认服务器证书后继续�
 
 rdp-connection = 连接
 
+rdp-network-keepalive-seconds = 网络保活（秒，0 关闭）
+rdp-network-keepalive-help = 默认 30 秒。TCP 探测帮助维持空闲网络连接并检测连接失效，不阻止远端息屏、锁屏、休眠或服务器的会话时限。保存后重新连接生效。
+rdp-keepalive-invalid = 网络保活间隔须为 1–3600 秒，设为 0 可关闭。
+rdp-prevent-idle = 保持远端桌面唤醒
+rdp-prevent-idle-help = 空闲 30 秒后轻移远端鼠标并立即归位，防止因空闲而息屏或锁屏。切换标签后仍生效；按住按键、拖拽或锁定 RustTerm 时暂停。保存后重新连接生效，无法解锁已锁定的桌面。
+
 rdp-connection-information = 连接信息
 
 rdp-control-clipboard-help = 点击远程桌面取得控制权，单独按下并松开 Ctrl+Alt 返回本机。控制期间，快捷键交给 Windows。Ctrl+V 粘贴剪贴板或选中的文件；Ctrl+Shift+V 强制使用本机剪贴板。
@@ -357,3 +363,31 @@ rdp-waiting-for-the-first-desktop-frame = 正在等待首个桌面画面…
 rdp-zoom-pane-ctrl-shift-enter = 放大或还原分区 · Ctrl+Shift+Enter
 
 rdp-send-folders = 发送文件夹…
+
+rdp-remote-app-mode = 会话类型
+
+rdp-remote-app-desktop = 完整桌面
+
+rdp-remote-app = RemoteApp
+
+rdp-remote-app-program = 应用别名或路径
+
+rdp-remote-app-arguments = 启动参数（可选）
+
+rdp-remote-app-directory = 工作目录（可选）
+
+rdp-remote-app-hint = 输入服务器已发布的应用，例如 ||notepad。应用将在独立窗口中打开。
+
+rdp-remote-app-invalid-parameters = 请输入应用别名或路径（最多 260 个 UTF-16 单元）。工作目录最多 260 个，参数最多 8000 个；不允许控制字符。
+
+rdp-remote-app-waiting = 正在等待远程应用启动…
+
+rdp-remote-app-windows = 远程应用窗口
+
+rdp-remote-app-launch-failed = RemoteApp 启动失败（结果码 { $result }，状态码 { $status }）。请检查发布的应用别名及服务器权限。
+
+rdp-remote-app-suspended = 远程应用桌面暂不可用或已锁定。
+
+rdp-remote-app-window-failed = 无法创建本地应用窗口。
+
+rdp-remote-app-no-windows = 应用当前没有可见窗口。关闭此连接可结束会话。

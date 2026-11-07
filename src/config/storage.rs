@@ -4,10 +4,35 @@ use super::{ConfigError, Result};
 use std::{
     fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Move legacy diagnostics across filesystems without overwriting newer logs.
+pub(super) fn migrate_file(source: &Path, destination: &Path) -> Result<()> {
+    if destination.try_exists()? {
+        return Ok(());
+    }
+    let Some(contents) = read_optional(source)? else {
+        return Ok(());
+    };
+    let parent = destination.parent().expect("log destination has a parent");
+    ensure_directory(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(contents.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(destination) {
+        Ok(_) => {
+            #[cfg(unix)]
+            fs::File::open(parent)?.sync_all()?;
+            fs::remove_file(source)?;
+        }
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.error.into()),
+    }
+    Ok(())
+}
 
 /// Keep this guard alive for the application lifetime. OS locks are released on crashes.
 pub struct ConfigLock {
@@ -131,7 +156,7 @@ fn check_file(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     check_owner(path, metadata)
 }
 
-fn ensure_directory(directory: &Path) -> Result<()> {
+pub(crate) fn ensure_directory(directory: &Path) -> Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -154,30 +179,4 @@ fn check_owner(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     #[cfg(not(unix))]
     let _ = (path, metadata);
     Ok(())
-}
-
-pub fn config_dir() -> Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        return std::env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .map(|value| PathBuf::from(value).join("RustTerm"))
-            .filter(|path| path.is_absolute())
-            .ok_or(ConfigError::MissingConfigDirectory);
-    }
-    #[cfg(not(windows))]
-    config_dir_unix()
-}
-#[cfg(not(windows))]
-fn config_dir_unix() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty()) {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return Ok(path.join("rustterm"));
-        }
-    }
-    std::env::var_os("HOME")
-        .filter(|s| !s.is_empty())
-        .map(|home| PathBuf::from(home).join(".config/rustterm"))
-        .ok_or(ConfigError::MissingConfigDirectory)
 }

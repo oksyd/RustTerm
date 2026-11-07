@@ -257,6 +257,9 @@ impl Workspace {
                 Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
                 Connection::Redis(s) => format!("Redis {}:{}", s.host, s.port),
                 Connection::Mysql(s) => format!("MySQL {}:{} {}", s.host, s.port, s.database),
+                Connection::ClickHouse(s) => {
+                    format!("ClickHouse {}:{} {}", s.host, s.port, s.database)
+                }
                 Connection::Postgres(s) => {
                     format!("PostgreSQL {}:{} {}", s.host, s.port, s.database)
                 }

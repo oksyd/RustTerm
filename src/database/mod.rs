@@ -1,8 +1,11 @@
 //! Bounded SQL sessions with an explicit lifetime and no automatic query replay.
 use crate::i18n::messages as i18n_key;
 
+mod clickhouse;
 mod mysql;
+mod objects;
 mod postgres;
+pub mod processlist;
 mod session;
 pub mod sql;
 mod sqlite;
@@ -101,6 +104,10 @@ pub enum DatabaseError {
         )
     )]
     Protocol,
+    #[error("{}", crate::i18n::tr(i18n_key::DATABASE_CLICKHOUSE_RESULT_FORMAT))]
+    ResultFormat,
+    #[error("{}", crate::i18n::tr(i18n_key::DATABASE_CLICKHOUSE_NO_TRANSACTIONS))]
+    TransactionsUnsupported,
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::DATABASE_THE_DATABASE_IS_BUSY_WAIT_FOR_THE_CURRENT_REQUEST)
@@ -257,6 +264,8 @@ struct Inner {
     read_only: bool,
     active: Arc<Mutex<Option<CancellationToken>>>,
     transaction: Arc<AtomicU8>,
+    mysql_options: Option<sqlx::mysql::MySqlConnectOptions>,
+    monitor_timeout: Duration,
 }
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -293,6 +302,8 @@ impl DatabaseClient {
         let worker_active = active.clone();
         let transaction = Arc::new(AtomicU8::new(TransactionStatus::Idle as u8));
         let worker_transaction = transaction.clone();
+        let monitor_timeout =
+            Duration::from_secs(config.server().map_or(10, |c| c.timeout_secs).clamp(1, 30));
         runtime()?.spawn(async move {
             let guard = CancelOnDrop(Some(worker_stop.clone()));
             let query_timeout = Duration::from_secs(config.query_timeout_secs());
@@ -322,7 +333,11 @@ impl DatabaseClient {
             };
             match opened {
                 Ok(connection) => {
-                    if connected.send(Ok(())).is_ok() {
+                    let mysql_options = match &connection {
+                        Connection::Mysql(connection) => Some(connection.monitor_options()),
+                        _ => None,
+                    };
+                    if connected.send(Ok(mysql_options)).is_ok() {
                         actor(
                             connection,
                             receive,
@@ -341,7 +356,7 @@ impl DatabaseClient {
             }
             drop(guard);
         });
-        ready.await.map_err(|_| DatabaseError::Disconnected)??;
+        let mysql_options = ready.await.map_err(|_| DatabaseError::Disconnected)??;
         cancellation.0 = None;
         Ok(Self(Arc::new(Inner {
             queue,
@@ -350,6 +365,8 @@ impl DatabaseClient {
             read_only,
             active,
             transaction,
+            mysql_options,
+            monitor_timeout,
         })))
     }
     pub fn close(&self) {
@@ -456,7 +473,7 @@ impl DatabaseClient {
     }
     pub async fn databases(&self) -> Result<Vec<String>> {
         let sql = match self.0.engine {
-            SqlEngine::Mysql => "SHOW DATABASES",
+            SqlEngine::Mysql | SqlEngine::ClickHouse => "SHOW DATABASES",
             SqlEngine::Postgres => {
                 "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname"
             }
@@ -473,6 +490,9 @@ impl DatabaseClient {
     }
     pub async fn tables(&self) -> Result<Vec<TableInfo>> {
         let sql = match self.0.engine {
+            SqlEngine::ClickHouse => {
+                "SELECT database, name, engine FROM system.tables WHERE database = currentDatabase() ORDER BY name"
+            }
             SqlEngine::Mysql => {
                 "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_SCHEMA, TABLE_NAME"
             }
@@ -503,7 +523,11 @@ impl DatabaseClient {
         check_table(&table)?;
         let schema = quote_literal(self.0.engine, &table.schema);
         let name = quote_literal(self.0.engine, &table.name);
-        let sql = if self.0.engine == SqlEngine::Sqlite {
+        let sql = if self.0.engine == SqlEngine::ClickHouse {
+            format!(
+                "SELECT position, name, type, default_kind, default_expression, is_in_primary_key, comment FROM system.columns WHERE database={schema} AND table={name} ORDER BY position"
+            )
+        } else if self.0.engine == SqlEngine::Sqlite {
             check_sqlite_schema(&table.schema)?;
             format!(
                 "SELECT cid, name, type, \"notnull\", dflt_value, pk, hidden FROM pragma_table_xinfo({name}, {schema}) ORDER BY cid"
@@ -520,6 +544,9 @@ impl DatabaseClient {
         let schema = quote_literal(self.0.engine, &table.schema);
         let name = quote_literal(self.0.engine, &table.name);
         let sql = match self.0.engine {
+            SqlEngine::ClickHouse => format!(
+                "SELECT name, type, expr, granularity FROM system.data_skipping_indices WHERE database={schema} AND table={name} ORDER BY name"
+            ),
             SqlEngine::Mysql => format!(
                 "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, INDEX_TYPE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = {schema} AND TABLE_NAME = {name} ORDER BY INDEX_NAME, SEQ_IN_INDEX"
             ),
@@ -574,8 +601,11 @@ fn ensure_complete(output: &QueryOutput) -> Result<()> {
     }
 }
 pub fn quote_identifier(engine: SqlEngine, value: &str) -> String {
+    if engine == SqlEngine::ClickHouse {
+        return format!("`{}`", value.replace('\\', "\\\\").replace('`', "\\`"));
+    }
     let quote = match engine {
-        SqlEngine::Mysql => '`',
+        SqlEngine::Mysql | SqlEngine::ClickHouse => '`',
         SqlEngine::Postgres | SqlEngine::Sqlite => '"',
     };
     format!(
@@ -585,6 +615,7 @@ pub fn quote_identifier(engine: SqlEngine, value: &str) -> String {
 }
 fn quote_literal(engine: SqlEngine, value: &str) -> String {
     match engine {
+        SqlEngine::ClickHouse => format!("unhex('{}')", hex(value.as_bytes())),
         SqlEngine::Mysql => format!("CONVERT(X'{}' USING utf8mb4)", hex(value.as_bytes())),
         SqlEngine::Postgres => format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''")),
         SqlEngine::Sqlite => format!("'{}'", value.replace('\'', "''")),

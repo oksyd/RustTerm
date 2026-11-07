@@ -6,6 +6,7 @@ mod clipboard;
 mod device;
 mod display;
 mod dynamic;
+mod rail;
 
 use crate::{
     Channel, ClientConfig, ClipboardContent, ClipboardFile, ClipboardFileRequest, Error, Limits,
@@ -63,6 +64,7 @@ pub(crate) enum ChannelEvent {
     Capture(audio_input::CaptureEvent),
     DriveRequest(crate::DriveRequest),
     DisplayReady,
+    RemoteApp(crate::remote_app::RemoteAppEvent),
     #[cfg(feature = "graphics")]
     GraphicsOpened,
     #[cfg(feature = "graphics")]
@@ -78,6 +80,7 @@ pub(crate) struct Channels {
     dynamic: DynamicChannels,
     audio: Audio,
     device: Device,
+    rail: rail::Rail,
     limits: Limits,
     chunk_size: usize,
     suspended: bool,
@@ -97,6 +100,7 @@ enum Kind {
     Dynamic,
     Audio,
     Device,
+    Rail,
 }
 
 struct Fragment {
@@ -122,6 +126,7 @@ impl Channels {
         let mut dynamic = false;
         let mut audio = false;
         let mut device = false;
+        let mut rail = false;
         for channel in channels {
             if entries
                 .iter()
@@ -134,6 +139,7 @@ impl Channels {
                 "drdynvc" => (Kind::Dynamic, &mut dynamic),
                 "rdpsnd" => (Kind::Audio, &mut audio),
                 "rdpdr" => (Kind::Device, &mut device),
+                "rail" => (Kind::Rail, &mut rail),
                 _ => return Err(Error::Unsupported("static channel")),
             };
             if *seen {
@@ -156,6 +162,7 @@ impl Channels {
             dynamic: DynamicChannels::new(limits),
             audio: Audio::new(limits.max_channel_message),
             device: Device::new(&config.client_name, config.shared_drives.clone()),
+            rail: rail::Rail::new(config),
             limits,
             chunk_size: 0,
             suspended: false,
@@ -228,6 +235,7 @@ impl Channels {
             Kind::Dynamic => self.dynamic.receive(&message)?,
             Kind::Audio => self.audio.receive(&message)?,
             Kind::Device => self.device.receive(&message)?,
+            Kind::Rail => self.rail.receive(&message)?,
         };
         self.events(channel_id, actions)
     }
@@ -398,6 +406,15 @@ impl Channels {
         self.events(id, actions)
     }
 
+    pub fn remote_app(
+        &mut self,
+        command: crate::remote_app::RemoteAppCommand,
+    ) -> Result<Vec<ChannelEvent>> {
+        let id = self.channel_id(Kind::Rail)?;
+        let actions = self.rail.command(command)?;
+        self.events(id, actions)
+    }
+
     fn channel_id(&self, kind: Kind) -> Result<u16> {
         self.channels
             .iter()
@@ -416,7 +433,7 @@ impl Channels {
         // on single-chunk messages; the dynamic-channel endpoint does not.
         let protocol_flag = match channel.kind {
             Kind::Clipboard => SHOW_PROTOCOL,
-            Kind::Dynamic | Kind::Audio | Kind::Device => 0,
+            Kind::Dynamic | Kind::Audio | Kind::Device | Kind::Rail => 0,
         };
         let mut events = Vec::new();
         for action in actions {

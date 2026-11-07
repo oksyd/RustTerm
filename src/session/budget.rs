@@ -59,7 +59,10 @@ fn evict(session: &Shared) {
     session.changed();
 }
 pub(super) fn rebalance() {
-    let mut registry = registry().lock().unwrap_or_else(|e| e.into_inner());
+    balance(&mut registry().lock().unwrap_or_else(|e| e.into_inner()));
+}
+
+fn balance(registry: &mut Registry) {
     registry
         .sessions
         .retain(|s| s.upgrade().is_some_and(|s| !s.actor_stop.is_cancelled()));
@@ -117,12 +120,27 @@ mod tests {
     use crate::session::Session;
     #[test]
     fn global_budget_reclaims_hidden_history_then_oldest_archive_base() {
-        let (active, _, _) = Session::create(80, 24, 100).unwrap();
-        let (older, _, _) = Session::create(80, 24, 100).unwrap();
-        let (newer, _, _) = Session::create(80, 24, 100).unwrap();
-        older.set_visible(false);
-        newer.set_visible(false);
-        Session::set_global_history_budget(128 * 1024 * 1024);
+        // This policy test must not resize or evict sessions from concurrent tests.
+        let session = || {
+            let (commands, _) = tokio::sync::mpsc::channel(1);
+            Session {
+                commands,
+                shared: Shared::new(&Terminal::new(80, 24, 100)),
+            }
+        };
+        let active = session();
+        let older = session();
+        let newer = session();
+        older.shared.visible.store(false, Ordering::Release);
+        newer.shared.visible.store(false, Ordering::Release);
+        let mut registry = Registry {
+            sessions: [&active, &older, &newer]
+                .iter()
+                .map(|session| Arc::downgrade(&session.shared))
+                .collect(),
+            bytes: 128 * 1024 * 1024,
+        };
+        balance(&mut registry);
         assert_eq!(active.allocated_history_budget(), 64 * 1024 * 1024);
         assert_eq!(older.allocated_history_budget(), 32 * 1024 * 1024);
         assert_eq!(newer.allocated_history_budget(), 32 * 1024 * 1024);
@@ -133,7 +151,7 @@ mod tests {
                 .retained_base
                 .store(40 * 1024 * 1024, Ordering::Release);
         }
-        rebalance();
+        balance(&mut registry);
         assert!(older.is_evicted());
         assert!(!newer.is_evicted());
         assert_eq!(newer.allocated_history_budget(), 64 * 1024 * 1024);
@@ -141,7 +159,7 @@ mod tests {
         newer.shared.read_only.store(false, Ordering::Release);
         newer.shared.retained_base.store(0, Ordering::Release);
         // Keep both live sessions in the same priority group for the overflow case.
-        newer.set_visible(true);
+        newer.shared.visible.store(true, Ordering::Release);
         active
             .shared
             .requested_budget
@@ -150,9 +168,9 @@ mod tests {
             .shared
             .requested_budget
             .store(usize::MAX, Ordering::Release);
-        Session::set_global_history_budget(1024);
+        registry.bytes = 1024;
+        balance(&mut registry);
         assert_eq!(active.allocated_history_budget(), 512);
         assert_eq!(newer.allocated_history_budget(), 512);
-        Session::set_global_history_budget(512 * 1024 * 1024);
     }
 }

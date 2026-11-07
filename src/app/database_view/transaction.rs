@@ -74,8 +74,7 @@ impl DatabaseView {
         };
         let enabled = self.available();
         div()
-            .min_w(px(220.))
-            .flex_1()
+            .flex_shrink_0()
             .flex()
             .items_center()
             .gap_1()
@@ -93,39 +92,45 @@ impl DatabaseView {
                     }))
                     .child(tr(label)),
             )
-            .child(
-                render::action(
-                    "begin-transaction",
-                    i18n_key::DATABASE_BEGIN,
-                    enabled && state == TransactionStatus::Idle,
-                    ui::ButtonStyle::Neutral,
+            .when(state == TransactionStatus::Idle, |bar| {
+                bar.child(
+                    render::action(
+                        "begin-transaction",
+                        i18n_key::DATABASE_BEGIN,
+                        enabled && state == TransactionStatus::Idle,
+                        ui::ButtonStyle::Neutral,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transaction_action(TransactionAction::Begin, cx)
+                    })),
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transaction_action(TransactionAction::Begin, cx)
-                })),
-            )
-            .child(
-                render::action(
-                    "commit-transaction",
-                    i18n_key::DATABASE_COMMIT,
-                    enabled && state == TransactionStatus::Active,
-                    ui::ButtonStyle::Neutral,
+            })
+            .when(state != TransactionStatus::Idle, |bar| {
+                bar.child(
+                    render::action(
+                        "commit-transaction",
+                        i18n_key::DATABASE_COMMIT,
+                        enabled && state == TransactionStatus::Active,
+                        ui::ButtonStyle::Neutral,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transaction_action(TransactionAction::Commit, cx)
+                    })),
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transaction_action(TransactionAction::Commit, cx)
-                })),
-            )
-            .child(
-                render::action(
-                    "rollback-transaction",
-                    i18n_key::DATABASE_ROLLBACK,
-                    enabled && state != TransactionStatus::Idle,
-                    ui::ButtonStyle::Neutral,
+            })
+            .when(state != TransactionStatus::Idle, |bar| {
+                bar.child(
+                    render::action(
+                        "rollback-transaction",
+                        i18n_key::DATABASE_ROLLBACK,
+                        enabled && state != TransactionStatus::Idle,
+                        ui::ButtonStyle::Neutral,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transaction_action(TransactionAction::Rollback, cx)
+                    })),
                 )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.transaction_action(TransactionAction::Rollback, cx)
-                })),
-            )
+            })
             .into_any_element()
     }
 }

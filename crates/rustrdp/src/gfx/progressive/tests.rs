@@ -88,8 +88,10 @@ fn first_upgrade_and_difference_preserve_reference_after_context_deletion() {
     assert!(
         tiles[0]
             .pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel == [128, 128, 128, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [128, 128, 128, 255])
     );
     decoder.end_frame();
     decoder.begin_frame();
@@ -103,8 +105,10 @@ fn first_upgrade_and_difference_preserve_reference_after_context_deletion() {
     assert!(
         tiles[0]
             .pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel == [129, 129, 129, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [129, 129, 129, 255])
     );
     decoder.end_frame();
     decoder.delete_context(1, 10);
@@ -119,8 +123,10 @@ fn first_upgrade_and_difference_preserve_reference_after_context_deletion() {
     assert!(
         tiles[0]
             .pixels
-            .chunks_exact(4)
-            .all(|pixel| pixel == [129, 129, 129, 255])
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [129, 129, 129, 255])
     );
     decoder.delete_surface(1);
     assert_eq!(decoder.bytes, 0);
@@ -216,7 +222,7 @@ fn later_progressive_bitmap_does_not_overwrite_an_intervening_repaint() {
     let mut decoder = Decoder::new(64 * 64 * 4);
     decoder.begin_frame();
     let tile = initial(0xccc5, false, 255, &[0; 4]);
-    let left = packet(&[tile.clone()], [0, 0, 32, 64], 6, None);
+    let left = packet(std::slice::from_ref(&tile), [0, 0, 32, 64], 6, None);
     let right = packet(&[tile], [32, 0, 32, 64], 6, None);
     let mut surface = super::super::Surface {
         width: 64,

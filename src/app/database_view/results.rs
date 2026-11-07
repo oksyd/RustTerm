@@ -10,6 +10,9 @@ const COPY_BYTES: usize = 8 * 1024 * 1024;
 
 impl DatabaseView {
     pub(super) fn current_result(&self) -> Option<&ResultSet> {
+        if self.page != WorkspacePage::Document {
+            return None;
+        }
         self.documents[self.active_document]
             .output
             .as_ref()?
@@ -63,7 +66,7 @@ impl DatabaseView {
     }
 
     pub fn copy_selection(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !self.interactive() {
+        if self.page != WorkspacePage::Document || !self.interactive() {
             return;
         }
         let input = self.documents[self.active_document].sql_input.read(cx);

@@ -74,6 +74,18 @@ impl SettingsForm {
                     cx.notify();
                 })),
             )
+            .child(
+                toggle(
+                    "status-bar-monitoring",
+                    i18n_key::RESOURCES_STATUS_MONITORING,
+                    Some(i18n_key::RESOURCES_STATUS_MONITORING_HELP),
+                    self.values.status_bar_monitoring,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.values.status_bar_monitoring = !this.values.status_bar_monitoring;
+                    cx.notify();
+                })),
+            )
     }
 
     pub(super) fn appearance(&self, cx: &Context<Self>) -> Div {

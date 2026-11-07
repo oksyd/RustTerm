@@ -1,4 +1,5 @@
-use super::{ProfileForm, ProfileKind, rdp, ssh::SSH_ADVANCED};
+use super::local::{StartupError, StartupField};
+use super::{ProfileForm, ProfileKind};
 use crate::app::forms::FieldError;
 use gpui::{Context, Window};
 use rustterm::i18n::messages as i18n_key;
@@ -11,6 +12,31 @@ impl ProfileForm {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let Some(error) = error.downcast_ref::<StartupError>() {
+            let input = match error.field {
+                StartupField::Argument(index) => {
+                    self.arguments.get(index).map(|row| row.value.clone())
+                }
+                StartupField::EnvironmentKey(index) => {
+                    self.environment.get(index).map(|row| row.key.clone())
+                }
+                StartupField::EnvironmentValue(index) => {
+                    self.environment.get(index).map(|row| row.value.clone())
+                }
+            };
+            if let Some(input) = input {
+                self.advanced = true;
+                for input in self.inputs(cx) {
+                    input.update(cx, |input, cx| input.clear_validation_error(cx));
+                }
+                input.update(cx, |input, cx| {
+                    input.set_validation_error(error.message.clone(), cx)
+                });
+                input.read(cx).focus(window);
+                cx.notify();
+                return true;
+            }
+        }
         let (field, message) = if let Some(error) = error.downcast_ref::<FieldError>() {
             (error.field, error.message.clone())
         } else if let Some(rustterm::config::ConfigError::FieldValidation { field, message }) =
@@ -33,9 +59,9 @@ impl ProfileForm {
         self.credentials
             .input
             .update(cx, |input, cx| input.clear_validation_error(cx));
-        if (self.kind == ProfileKind::Ssh && SSH_ADVANCED.contains(&field))
-            || (self.kind == ProfileKind::Rdp && rdp::ADVANCED.contains(&field))
-        {
+        if self.kind == ProfileKind::Rdp {
+            self.reveal_rdp_field(field);
+        } else if self.advanced_fields().contains(&field) {
             self.advanced = true;
         }
         input.update(cx, |input, cx| input.set_validation_error(message, cx));

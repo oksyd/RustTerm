@@ -1,5 +1,6 @@
 use rustterm::i18n::messages as i18n_key;
 mod render;
+mod tabs;
 
 use super::{Modal, Workspace};
 use crate::app::forms::{Fields, ProfileKind, SettingsSection};
@@ -20,6 +21,7 @@ pub(super) enum Menu {
     Create,
     Profile(Uuid),
     Group(Uuid),
+    Tab(tabs::TabMenu),
 }
 pub(super) const APPLICATION_MENUS: [(Menu, &str); 5] = [
     (Menu::File, i18n_key::COMMON_FILE),
@@ -40,6 +42,7 @@ pub(super) enum MenuAction {
     NewRedis,
     NewElasticsearch,
     NewMysql,
+    NewClickHouse,
     NewPostgres,
     NewSqlite,
     NewRdp,
@@ -75,6 +78,11 @@ pub(super) enum MenuAction {
     OpenProfileRight,
     OpenProfileBelow,
     DeleteProfile,
+    NewTabSession,
+    CloseTab,
+    CloseOtherTabs,
+    CloseTabsToRight,
+    CloseTabGroup,
 }
 struct MenuItem {
     label: &'static str,
@@ -95,7 +103,7 @@ impl Menu {
         match self {
             Self::File | Self::NewConnection => Some(Self::File),
             Self::Edit | Self::View | Self::Session | Self::Help => Some(self),
-            Self::Create | Self::Profile(_) | Self::Group(_) => None,
+            Self::Create | Self::Profile(_) | Self::Group(_) | Self::Tab(_) => None,
         }
     }
 
@@ -109,6 +117,7 @@ impl Menu {
     fn items(self) -> &'static [MenuItem] {
         use MenuAction::*;
         match self {
+            Self::Tab(menu) => menu.items(),
             Self::File => {
                 const {
                     &[
@@ -211,6 +220,11 @@ impl Menu {
                         MenuItem::new(i18n_key::REDIS_ADD_REDIS_CONNECTION, "", NewRedis),
                         MenuItem::new(i18n_key::ES_ADD_CONNECTION, "", NewElasticsearch),
                         MenuItem::new(i18n_key::DATABASE_ADD_MYSQL_CONNECTION, "", NewMysql),
+                        MenuItem::new(
+                            i18n_key::DATABASE_ADD_CLICKHOUSE_CONNECTION,
+                            "",
+                            NewClickHouse,
+                        ),
                         MenuItem::new(
                             i18n_key::DATABASE_ADD_POSTGRESQL_CONNECTION,
                             "",
@@ -466,8 +480,7 @@ impl Workspace {
         let enabled: Vec<_> = menu
             .items()
             .iter()
-            .enumerate()
-            .filter_map(|(index, item)| self.action_enabled(item.action, cx).then_some(index))
+            .map(|item| self.action_enabled(item.action, cx))
             .collect();
         match event.keystroke.key.as_str() {
             "escape" | "left" if menu == Menu::NewConnection => {
@@ -477,23 +490,9 @@ impl Workspace {
                 self.menu = None;
                 self.restore_popup_focus(window, cx);
             }
-            "up" | "tab" if event.keystroke.key == "up" || event.keystroke.modifiers.shift => {
-                if let Some(index) = enabled
-                    .iter()
-                    .rev()
-                    .find(|index| **index < self.menu_index)
-                    .or(enabled.last())
-                {
-                    self.menu_index = *index;
-                }
-            }
-            "down" | "tab" => {
-                if let Some(index) = enabled
-                    .iter()
-                    .find(|index| **index > self.menu_index)
-                    .or(enabled.first())
-                {
-                    self.menu_index = *index;
+            "up" | "down" | "tab" | "home" | "end" => {
+                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
+                    self.menu_index = index;
                 }
             }
             "right" if menu.items()[self.menu_index].action == MenuAction::NewConnection => {
@@ -508,16 +507,6 @@ impl Workspace {
                         (index + 1) % count
                     };
                     self.switch_application_menu(APPLICATION_MENUS[next].0, window, cx);
-                }
-            }
-            "home" => {
-                if let Some(index) = enabled.first() {
-                    self.menu_index = *index;
-                }
-            }
-            "end" => {
-                if let Some(index) = enabled.last() {
-                    self.menu_index = *index;
                 }
             }
             "f2" if matches!(menu, Menu::Profile(_)) => {
@@ -554,6 +543,9 @@ impl Workspace {
             return false;
         }
         use MenuAction::*;
+        if action.is_tab_action() {
+            return self.tab_action_enabled(action, cx);
+        }
         if matches!(action, NewSubgroup | EditGroup | DeleteGroup | GroupToRoot) {
             return self
                 .menu
@@ -671,6 +663,10 @@ impl Workspace {
             }
             return;
         }
+        if action.is_tab_action() {
+            self.tab_menu_action(action, window, cx);
+            return;
+        }
         let menu = self.menu.take();
         let group = menu.and_then(|menu| match menu {
             Menu::Group(id) => Some(id),
@@ -696,6 +692,9 @@ impl Workspace {
             self.restore_focus(window, cx);
         }
         match action {
+            NewTabSession | CloseTab | CloseOtherTabs | CloseTabsToRight | CloseTabGroup => {
+                unreachable!("tab actions are dispatched with their explicit context")
+            }
             NewConnection => unreachable!("submenu navigation is handled before command dispatch"),
             Palette => self.toggle_palette(window, cx),
             Forwards => self.open_tunnels(window, cx),
@@ -710,6 +709,7 @@ impl Workspace {
                             Connection::Redis(_) => ProfileKind::Redis,
                             Connection::Elasticsearch(_) => ProfileKind::Elasticsearch,
                             Connection::Mysql(_) => ProfileKind::Mysql,
+                            Connection::ClickHouse(_) => ProfileKind::ClickHouse,
                             Connection::Postgres(_) => ProfileKind::Postgres,
                             Connection::Sqlite(_) => ProfileKind::Sqlite,
                             Connection::Rdp(_) => ProfileKind::Rdp,
@@ -734,6 +734,7 @@ impl Workspace {
             NewElasticsearch => self.edit_profile(None, ProfileKind::Elasticsearch, window, cx),
             NewRedis => self.edit_profile(None, ProfileKind::Redis, window, cx),
             NewMysql => self.edit_profile(None, ProfileKind::Mysql, window, cx),
+            NewClickHouse => self.edit_profile(None, ProfileKind::ClickHouse, window, cx),
             NewPostgres => self.edit_profile(None, ProfileKind::Postgres, window, cx),
             NewSqlite => self.edit_profile(None, ProfileKind::Sqlite, window, cx),
             NewRdp => self.edit_profile(None, ProfileKind::Rdp, window, cx),

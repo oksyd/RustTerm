@@ -9,7 +9,7 @@ es-auth-none = 无需认证
 es-auth-basic = 用户名和密码
 es-auth-api-key = API Key
 es-secret = 密码或编码后的 API Key
-es-auth-help = API Key 认证使用 Elasticsearch 返回的 encoded 值。选择保存的密码和密钥使用系统凭据存储。
+es-auth-help = 使用 Elasticsearch 返回的 encoded API key 值。
 es-endpoint-help = HTTPS 会验证服务器证书及主机名。私有集群可以指定自定义 CA 证书。
 es-invalid-config = Elasticsearch 连接配置无效。
 es-network = 无法连接 Elasticsearch，请检查地址、网络和 TLS 证书。
@@ -45,3 +45,4 @@ es-tunnel-fingerprint = SSH 主机：{ $host }:{ $port }
     此 SSH 连接用于传输 Elasticsearch 请求。
 es-add-connection = 添加 Elasticsearch 连接
 es-paste = 粘贴到 DSL 编辑器
+es-encoded-api-key = 编码后的 API 密钥

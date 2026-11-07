@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(&pixels[20..24], &[0, 0, 0, 255]);
         assert!(pixels[24..83 * 4].iter().all(|&v| v == 255));
         assert_eq!(&pixels[83 * 4..84 * 4], &[0, 0, 0, 255]);
-        assert!(pixels.chunks_exact(4).all(|p| p[3] == 255));
+        assert!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
     }
 
     #[test]

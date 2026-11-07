@@ -18,24 +18,13 @@ pub(super) struct TileImage {
 
 impl Render for RdpView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.refresh_images(window);
+        if self.config.remote_app.is_none() {
+            self.refresh_images(window);
+        }
         let index = self.index;
         let fullscreen = window.is_fullscreen();
-        let header = div()
-            .h(px(ui::PANE_HEADER_HEIGHT))
+        let header = ui::panel_header()
             .min_w_0()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .bg(rgb(ui::colors().surface))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, _| this.focus.focus(window)),
-            )
             .child(ui::connection_address(
                 ("rdp-address", index),
                 Icon::Desktop,
@@ -43,22 +32,58 @@ impl Render for RdpView {
                 self.target(),
                 self.title.clone(),
             ))
-            .child(
-                ui::text_button(("rdp-fit", index), i18n_key::RDP_FIT, ButtonStyle::Neutral)
-                    .tab_index(0)
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .when(self.zoom == Zoom::Fit, |button| {
-                        button
-                            .bg(rgb(ui::colors().selected))
-                            .text_color(rgb(ui::colors().accent))
-                    })
-                    .tooltip(|_, cx| {
-                        cx.new(|_| {
-                            ui::Tooltip(tr(i18n_key::RDP_SCALE_DESKTOP_TO_FIT_THE_PANE).to_owned())
+            .when(self.config.remote_app.is_none(), |header| {
+                header.child(
+                    ui::text_button(("rdp-fit", index), i18n_key::RDP_FIT, ButtonStyle::Neutral)
+                        .tab_index(0)
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .when(self.zoom == Zoom::Fit, |button| {
+                            button
+                                .bg(rgb(ui::colors().selected))
+                                .text_color(rgb(ui::colors().accent))
                         })
-                        .into()
-                    })
+                        .tooltip(|_, cx| {
+                            cx.new(|_| {
+                                ui::Tooltip(
+                                    tr(i18n_key::RDP_SCALE_DESKTOP_TO_FIT_THE_PANE).to_owned(),
+                                )
+                            })
+                            .into()
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.display_action_available(window) {
+                                this.release_control(cx);
+                                this.zoom = Zoom::Fit;
+                                this.pan = (0., 0.);
+                                this.focus.focus(window);
+                                cx.emit(PaneEvent::Activity);
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .when(self.config.remote_app.is_none(), |header| {
+                header.child(
+                    ui::icon_button(
+                        ("rdp-fullscreen", index),
+                        if fullscreen {
+                            Icon::ExitFullscreen
+                        } else {
+                            Icon::Maximize
+                        },
+                        if fullscreen {
+                            i18n_key::WORKSPACE_EXIT_FULLSCREEN
+                        } else {
+                            i18n_key::WORKSPACE_ENTER_FULLSCREEN
+                        },
+                    )
+                    .when(fullscreen, |button| button.bg(rgb(ui::colors().selected)))
+                    .tab_index(0)
                     .on_mouse_down(MouseButton::Left, |_, window, cx| {
                         window.prevent_default();
                         cx.stop_propagation();
@@ -66,44 +91,14 @@ impl Render for RdpView {
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.display_action_available(window) {
                             this.release_control(cx);
-                            this.zoom = Zoom::Fit;
-                            this.pan = (0., 0.);
+                            window.toggle_fullscreen();
                             this.focus.focus(window);
                             cx.emit(PaneEvent::Activity);
                             cx.notify();
                         }
                     })),
-            )
-            .child(
-                ui::icon_button(
-                    ("rdp-fullscreen", index),
-                    if fullscreen {
-                        Icon::ExitFullscreen
-                    } else {
-                        Icon::Maximize
-                    },
-                    if fullscreen {
-                        i18n_key::WORKSPACE_EXIT_FULLSCREEN
-                    } else {
-                        i18n_key::WORKSPACE_ENTER_FULLSCREEN
-                    },
                 )
-                .when(fullscreen, |button| button.bg(rgb(ui::colors().selected)))
-                .tab_index(0)
-                .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                })
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this.display_action_available(window) {
-                        this.release_control(cx);
-                        window.toggle_fullscreen();
-                        this.focus.focus(window);
-                        cx.emit(PaneEvent::Activity);
-                        cx.notify();
-                    }
-                })),
-            )
+            })
             .child(self.render_menu_button(cx))
             .when(self.pane_close_visible, |header| {
                 header.child(
@@ -127,7 +122,7 @@ impl Render for RdpView {
             .overflow_hidden()
             .bg(rgb(0x151619))
             .cursor(CursorStyle::Arrow);
-        if self.surface_visible() {
+        if self.config.remote_app.is_none() && self.surface_visible() {
             for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
                 body = body
                     .on_mouse_down(
@@ -216,7 +211,9 @@ impl Render for RdpView {
                     .size_full(),
                 );
         }
-        if self.images.is_empty() || self.state != State::Connected {
+        if self.config.remote_app.is_some() && self.state == State::Connected {
+            body = body.child(self.application_panel(cx));
+        } else if self.images.is_empty() || self.state != State::Connected {
             body = body.child(self.render_connection_state(cx));
         }
         if !self.preedit.is_empty() {
@@ -695,7 +692,7 @@ impl RdpView {
 // reuses texture IDs after drop_image. Removing an image immediately can make
 // those queued uploads target a different texture. Keep every retired batch
 // alive through an intervening submission, including consecutive redraws.
-fn retire_images(window: &Window, images: Vec<Arc<RenderImage>>) {
+pub(super) fn retire_images(window: &Window, images: Vec<Arc<RenderImage>>) {
     if images.is_empty() {
         return;
     }
@@ -739,7 +736,7 @@ fn desktop_bounds(
     )
 }
 
-fn tile_buffer(tile: &RdpTile) -> image::RgbaImage {
+pub(super) fn tile_buffer(tile: &RdpTile) -> image::RgbaImage {
     let stride = usize::from(tile.width) * 4;
     let mut pixels = Vec::with_capacity((stride + 8) * (usize::from(tile.height) + 2));
     let first_row = &tile.pixels[..stride];
@@ -764,7 +761,7 @@ fn tile_buffer(tile: &RdpTile) -> image::RgbaImage {
     .expect("RDP tile dimensions match its pixel buffer")
 }
 
-fn tile_bounds(
+pub(super) fn tile_bounds(
     region: Bounds<u16>,
     desktop: Bounds<Pixels>,
     dimensions: (u16, u16),
@@ -783,7 +780,10 @@ fn tile_bounds(
     Bounds::from_corners(map(region.origin), map(region.bottom_right()))
 }
 
-fn padded_tile_bounds(core: Bounds<Pixels>, dimensions: gpui::Size<u16>) -> Bounds<Pixels> {
+pub(super) fn padded_tile_bounds(
+    core: Bounds<Pixels>,
+    dimensions: gpui::Size<u16>,
+) -> Bounds<Pixels> {
     let gutter = point(
         core.size.width / f32::from(dimensions.width),
         core.size.height / f32::from(dimensions.height),

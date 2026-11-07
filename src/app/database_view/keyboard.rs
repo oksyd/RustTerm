@@ -70,7 +70,9 @@ impl DatabaseView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.focus.is_focused(window)
+        if self.page != WorkspacePage::Document
+            || self.object_menu.is_some()
+            || !self.focus.is_focused(window)
             || self.documents[self.active_document].value_view.is_some()
         {
             return false;

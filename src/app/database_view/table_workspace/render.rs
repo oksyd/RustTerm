@@ -14,59 +14,98 @@ impl DatabaseView {
         let toolbar = div()
             .flex_shrink_0()
             .flex()
-            .items_center()
-            .flex_wrap()
-            .gap_1()
-            .px_2()
-            .py_1()
+            .flex_col()
             .border_b_1()
             .border_color(rgb(ui::colors().border))
-            .children(
-                [
-                    (TableAction::Data, "Data"),
-                    (TableAction::Columns, i18n_key::DATABASE_STRUCTURE),
-                    (TableAction::Indexes, "Indexes"),
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(index, (section, label))| {
-                    super::super::render::action(
-                        ("table-section", index),
-                        label,
-                        enabled,
-                        ButtonStyle::Neutral,
-                    )
-                    .when(table.section == section, |button| {
-                        button
-                            .bg(rgb(ui::colors().selected))
-                            .text_color(rgb(ui::colors().accent))
-                    })
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_table_section(section, cx)),
-                    )
-                }),
-            )
-            .child(self.render_transaction(cx))
             .child(
-                ui::icon_button_enabled(
-                    "refresh-table",
-                    Icon::Refresh,
-                    i18n_key::DATABASE_REFRESH_TABLE,
-                    enabled && !table.has_local_edit(),
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_active_table(cx))),
-            )
-            .when(self.busy.is_some(), |bar| {
-                bar.child(
-                    super::super::render::action(
-                        "cancel-table-query",
-                        i18n_key::DATABASE_CANCEL_QUERY,
-                        self.interactive(),
-                        ButtonStyle::Neutral,
+                div()
+                    .px_3()
+                    .h(px(36.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        ui::icon(if super::super::dialect::is_view(&table.info) {
+                            Icon::View
+                        } else {
+                            Icon::Table
+                        })
+                        .text_color(rgb(self.engine_color())),
                     )
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
-                )
-            });
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{} / {}", table.info.schema, table.info.name)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(ui::colors().muted))
+                            .child(table.info.kind.clone()),
+                    )
+                    .child(
+                        ui::icon_button_enabled(
+                            "refresh-table",
+                            Icon::Refresh,
+                            i18n_key::DATABASE_REFRESH_TABLE,
+                            enabled && !table.has_local_edit(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_active_table(cx))),
+                    )
+                    .when(self.busy.is_some(), |d| {
+                        d.child(
+                            ui::icon_button(
+                                "cancel-table-query",
+                                Icon::Stop,
+                                i18n_key::DATABASE_CANCEL_QUERY,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("table-section-tabs")
+                    .h(px(34.))
+                    .flex()
+                    .overflow_x_scroll()
+                    .map(ui::preserve_scroll_axes)
+                    .children(
+                        super::super::dialect::sections(self.engine(), &table.info)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, section)| {
+                                div()
+                                    .id(("table-section", index))
+                                    .h_full()
+                                    .px_3()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .cursor_pointer()
+                                    .tab_index(0)
+                                    .border_b_2()
+                                    .border_color(rgb(if table.section == section {
+                                        self.engine_color()
+                                    } else {
+                                        ui::colors().bg
+                                    }))
+                                    .text_color(rgb(if table.section == section {
+                                        ui::colors().text
+                                    } else {
+                                        ui::colors().muted
+                                    }))
+                                    .hover(|s| s.bg(rgb(ui::colors().hover)))
+                                    .child(tr(section.label(self.engine())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_table_section(section, cx)
+                                    }))
+                            }),
+                    )
+                    .map(|d| ui::scrollable(d, None)),
+            );
         let mut body = div()
             .relative()
             .flex_1()
@@ -74,77 +113,94 @@ impl DatabaseView {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(toolbar);
+            .child(toolbar)
+            .when(self.supports_transactions(), |d| {
+                d.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .flex_shrink_0()
+                        .flex()
+                        .justify_end()
+                        .child(self.render_transaction(cx)),
+                )
+            });
         if table.section == TableAction::Data {
             body = body.child(self.render_table_filter(cx));
             let selected = self.documents[self.active_document].selected_cell;
             let deleted = selected.is_some_and(|(row, _)| {
                 matches!(table.changes.get(&row), Some(RowChange::Delete { .. }))
             });
-            body = body.child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        super::super::render::action(
-                            "table-add-row",
-                            i18n_key::DATABASE_ADD_ROW,
-                            editable,
-                            ButtonStyle::Neutral,
+            if table
+                .schema
+                .as_ref()
+                .is_some_and(|schema| schema.editable())
+            {
+                body = body.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            super::super::render::action(
+                                "table-add-row",
+                                i18n_key::DATABASE_ADD_ROW,
+                                editable,
+                                ButtonStyle::Neutral,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_table_row(window, cx)),
+                            ),
                         )
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.add_table_row(window, cx)),
+                        .child(
+                            super::super::render::action(
+                                "table-delete-row",
+                                if deleted {
+                                    i18n_key::DATABASE_RESTORE_ROW
+                                } else {
+                                    i18n_key::DATABASE_DELETE_ROW
+                                },
+                                editable && selected.is_some(),
+                                ButtonStyle::Neutral,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.delete_table_row(cx))),
+                        )
+                        .child(div().flex_1())
+                        .when(!table.changes.is_empty(), |bar| {
+                            bar.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(ui::colors().warning))
+                                    .child(rustterm::trf!(
+                                        i18n_key::DATABASE_PENDING_ROW_COUNT,
+                                        count = table.changes.len()
+                                    )),
+                            )
+                        })
+                        .child(
+                            super::super::render::action(
+                                "table-discard",
+                                i18n_key::COMMON_DISCARD,
+                                enabled && !table.changes.is_empty(),
+                                ButtonStyle::Neutral,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.discard_table_changes(cx))),
+                        )
+                        .child(
+                            super::super::render::action(
+                                "table-review",
+                                i18n_key::DATABASE_REVIEW_CHANGES,
+                                editable && !table.changes.is_empty(),
+                                ButtonStyle::Primary,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.review_table_changes(cx))),
                         ),
-                    )
-                    .child(
-                        super::super::render::action(
-                            "table-delete-row",
-                            if deleted {
-                                i18n_key::DATABASE_RESTORE_ROW
-                            } else {
-                                i18n_key::DATABASE_DELETE_ROW
-                            },
-                            editable && selected.is_some(),
-                            ButtonStyle::Neutral,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.delete_table_row(cx))),
-                    )
-                    .child(div().flex_1())
-                    .when(!table.changes.is_empty(), |bar| {
-                        bar.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(ui::colors().warning))
-                                .child(rustterm::trf!(
-                                    i18n_key::DATABASE_PENDING_ROW_COUNT,
-                                    count = table.changes.len()
-                                )),
-                        )
-                    })
-                    .child(
-                        super::super::render::action(
-                            "table-discard",
-                            i18n_key::COMMON_DISCARD,
-                            enabled && !table.changes.is_empty(),
-                            ButtonStyle::Neutral,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.discard_table_changes(cx))),
-                    )
-                    .child(
-                        super::super::render::action(
-                            "table-review",
-                            i18n_key::DATABASE_REVIEW_CHANGES,
-                            editable && !table.changes.is_empty(),
-                            ButtonStyle::Primary,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.review_table_changes(cx))),
-                    ),
-            );
+                );
+            }
             let reason = if matches!(&self.config, DatabaseConfig::Sqlite(config) if config.read_only)
             {
                 Some(i18n_key::COMMON_READ_ONLY_BADGE)
@@ -168,7 +224,11 @@ impl DatabaseView {
         if table.review {
             body = body.child(self.render_change_review(cx));
         } else {
-            body = body.child(self.render_results(cx));
+            body = body.child(match table.section {
+                TableAction::Definition => self.render_object_definition(cx),
+                TableAction::Details => self.render_object_details(),
+                _ => self.render_results(cx),
+            });
             if table.section == TableAction::Data {
                 body = body.child(self.render_table_pagination(cx));
                 if table.edit.as_ref().is_some_and(|edit| edit.expanded) {
@@ -319,7 +379,11 @@ impl DatabaseView {
             div()
                 .id("table-filter-picker")
                 .absolute()
-                .top(px(68.))
+                .top(px(if self.supports_transactions() {
+                    144.
+                } else {
+                    106.
+                }))
                 .left(px(if picker == Picker::Column { 8. } else { 154. }))
                 .w(px(240.))
                 .max_h(px(240.))
@@ -738,5 +802,135 @@ impl DatabaseView {
                     ),
             )
             .into_any_element()
+    }
+}
+
+impl DatabaseView {
+    fn render_object_definition(&self, cx: &Context<Self>) -> AnyElement {
+        let sql = self
+            .current_result()
+            .and_then(|r| r.rows.first())
+            .and_then(|r| r.first())
+            .and_then(Option::as_ref)
+            .cloned();
+        let text = sql
+            .clone()
+            .unwrap_or_else(|| tr(i18n_key::DATABASE_DEFINITION_EMPTY).into());
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_3()
+                    .h(px(38.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui::colors().muted))
+                            .child("SQL"),
+                    )
+                    .child(
+                        ui::icon_button_enabled(
+                            "copy-definition",
+                            Icon::Copy,
+                            i18n_key::DATABASE_COPY_DEFINITION,
+                            sql.is_some(),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.interactive()
+                                && let Some(sql) = &sql
+                            {
+                                cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
+                            }
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .id("object-definition-sql")
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_scroll()
+                    .map(ui::preserve_scroll_axes)
+                    .p_4()
+                    .font_family(ui::MONOSPACE_FONT)
+                    .text_size(px(12.))
+                    .text_color(rgb(ui::colors().text))
+                    .child(text)
+                    .map(|d| ui::scrollable(d, None)),
+            )
+            .into_any_element()
+    }
+    fn render_object_details(&self) -> AnyElement {
+        let result = self.current_result();
+        let row = result.and_then(|r| r.rows.first());
+        let panel = div()
+            .id("object-details")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .map(ui::preserve_scroll_axes)
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(ui::colors().border))
+                    .overflow_hidden()
+                    .children(
+                        result
+                            .into_iter()
+                            .flat_map(|r| r.columns.iter().enumerate())
+                            .map(|(i, name)| {
+                                let value = row
+                                    .and_then(|r| r.get(i))
+                                    .and_then(Option::as_deref)
+                                    .filter(|v| !v.is_empty())
+                                    .unwrap_or("—");
+                                div()
+                                    .px_3()
+                                    .py_3()
+                                    .flex()
+                                    .gap_3()
+                                    .when(i % 2 == 0, |d| d.bg(rgb(ui::colors().surface)))
+                                    .child(
+                                        div()
+                                            .w(px(140.))
+                                            .flex_shrink_0()
+                                            .text_color(rgb(ui::colors().muted))
+                                            .child(name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .font_family(ui::MONOSPACE_FONT)
+                                            .child(value.to_owned()),
+                                    )
+                            }),
+                    ),
+            )
+            .when(row.is_none(), |d| {
+                d.child(
+                    div()
+                        .mt_3()
+                        .text_color(rgb(ui::colors().muted))
+                        .child(tr(i18n_key::DATABASE_DETAILS_EMPTY)),
+                )
+            });
+        ui::scrollable(panel, None).into_any_element()
     }
 }

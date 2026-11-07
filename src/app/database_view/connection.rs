@@ -46,6 +46,7 @@ impl DatabaseView {
                                     return;
                                 }
                                 this.state = State::Disconnected;
+                                this.close_monitor();
                                 cx.emit(PaneEvent::Activity);
                                 cx.notify();
                             });
@@ -53,6 +54,10 @@ impl DatabaseView {
                         this.client = Some(client);
                         this.state = State::Connected;
                         this.load_browser(cx);
+                        if this.page == WorkspacePage::Sessions {
+                            this.start_monitor_poll(cx);
+                            this.refresh_sessions(cx);
+                        }
                     }
                     Err(error) => {
                         this.state = State::Failed;
@@ -152,7 +157,9 @@ impl DatabaseView {
             return None;
         }
         let config = match &self.config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => config,
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => config,
             DatabaseConfig::Sqlite(_) => return None,
         };
         let (finished, done) = oneshot::channel();

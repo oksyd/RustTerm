@@ -295,3 +295,41 @@ async fn views_and_tables_without_keys_cannot_generate_mutations() {
         ));
     }
 }
+
+#[tokio::test]
+async fn sqlite_object_details_definition_and_foreign_keys_use_quoted_names() {
+    let (_directory, client) = sqlite().await;
+    client.execute("CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE \"child'quoted\"(id INTEGER PRIMARY KEY,parent_id INTEGER REFERENCES parent(id)); CREATE VIEW summary AS SELECT * FROM \"child'quoted\";".into(), 10).await.unwrap();
+    let table = table("child'quoted");
+    let details = client.table_details(table.clone()).await.unwrap();
+    assert_eq!(details.results[0].rows[0][0].as_deref(), Some("table"));
+    let definition = client.definition(table.clone()).await.unwrap();
+    assert!(
+        definition.results[0].rows[0][0]
+            .as_ref()
+            .unwrap()
+            .contains("REFERENCES parent(id)")
+    );
+    let keys = client.constraints(table.clone()).await.unwrap();
+    assert_eq!(keys.results[0].rows.len(), 1);
+    assert!(keys.results[0].rows[0].contains(&Some("parent".into())));
+    let mut view = table.clone();
+    view.name = "summary".into();
+    view.kind = "VIEW".into();
+    assert!(
+        client.definition(view).await.unwrap().results[0].rows[0][0]
+            .as_ref()
+            .unwrap()
+            .starts_with("CREATE VIEW")
+    );
+    let mut invalid = table;
+    invalid.schema = "main; DROP TABLE parent".into();
+    assert_eq!(
+        client.table_details(invalid.clone()).await.unwrap_err(),
+        DatabaseError::InvalidConfig
+    );
+    assert_eq!(
+        client.definition(invalid).await.unwrap_err(),
+        DatabaseError::InvalidConfig
+    );
+}

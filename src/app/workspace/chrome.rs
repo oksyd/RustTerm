@@ -7,7 +7,8 @@ use crate::app::ui::{Icon, icon, icon_button};
 use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Decorations, MouseButton, Window, canvas, div, px, rgb, rgba,
+    AnyElement, App, Context, Decorations, Div, MouseButton, Stateful, Window, WindowControlArea,
+    canvas, div, px, rgb, rgba,
 };
 use rustterm::config::{Connection, Uuid};
 use rustterm::i18n::messages as i18n_key;
@@ -20,6 +21,7 @@ fn pane_icon(pane: Option<&Pane>, cx: &App) -> Icon {
         Some(Pane::Elasticsearch(_)) => Icon::Elasticsearch,
         Some(Pane::Database(view)) => Icon::for_sql_engine(view.read(cx).engine()),
         Some(Pane::Rdp(_)) => Icon::Desktop,
+        Some(Pane::Terminal(view)) if view.read(cx).is_container() => Icon::Container,
         Some(Pane::Terminal(_)) | None => Icon::Terminal,
     }
 }
@@ -32,9 +34,25 @@ fn toggle_window_size(window: &Window) {
     }
 }
 
+fn native_window_control(button: Stateful<Div>, area: WindowControlArea) -> Stateful<Div> {
+    button.when(cfg!(target_os = "windows"), |button| {
+        button
+            .window_control_area(area)
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                // Keep native hover hit testing (including Snap Layouts), while
+                // our click handler performs the action exactly once.
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+    })
+}
+
 impl Workspace {
     pub(super) fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let client = matches!(window.window_decorations(), Decorations::Client { .. });
+        // GPUI's Windows backend reports Server even with its caption hidden.
+        // Keep its native resize frame/shadow, but draw our own title and controls.
+        let custom_titlebar = cfg!(target_os = "windows")
+            || matches!(window.window_decorations(), Decorations::Client { .. });
         let corners = WindowFrame::new(window).corners;
         let application_menu = self.application_menu().filter(|_| !self.lock_screen.locked);
         let mut bar = div()
@@ -79,8 +97,29 @@ impl Workspace {
                             )
                             .child("RustTerm")
                     })
+                    .when(cfg!(target_os = "windows"), |title| {
+                        title.child(
+                            div()
+                                .id("window-drag-region")
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .bottom_0()
+                                // Leave the top sizing band to Windows while floating.
+                                .top(px(if window.is_maximized() || window.is_fullscreen() {
+                                    0.
+                                } else {
+                                    8.
+                                }))
+                                .window_control_area(WindowControlArea::Drag),
+                        )
+                    })
                     .on_mouse_down(MouseButton::Left, move |event, window, _| {
-                        if client {
+                        // Windows handles caption dragging and double-clicks through
+                        // native hit testing, except in fullscreen mode.
+                        if custom_titlebar
+                            && (!cfg!(target_os = "windows") || window.is_fullscreen())
+                        {
                             if event.click_count == 2 {
                                 toggle_window_size(window);
                             } else {
@@ -89,7 +128,7 @@ impl Workspace {
                         }
                     })
                     .on_mouse_down(MouseButton::Right, move |event, window, _| {
-                        if client {
+                        if custom_titlebar && !cfg!(target_os = "windows") {
                             window.show_window_menu(event.position);
                         }
                     }),
@@ -186,7 +225,7 @@ impl Workspace {
             }
         }
         bar = bar.child(div().flex_1());
-        if client {
+        if custom_titlebar {
             let controls = window.window_controls();
             if controls.minimize {
                 bar = bar.child(
@@ -199,7 +238,11 @@ impl Workspace {
                     .occlude()
                     .w(px(38.))
                     .h_full()
-                    .on_click(|_, window, _| window.minimize_window()),
+                    .map(|button| native_window_control(button, WindowControlArea::Min))
+                    .on_click(|_, window, cx| {
+                        cx.stop_propagation();
+                        window.minimize_window();
+                    }),
                 );
             }
             if controls.maximize || window.is_fullscreen() {
@@ -216,7 +259,11 @@ impl Workspace {
                         .occlude()
                         .w(px(38.))
                         .h_full()
-                        .on_click(|_, window, _| toggle_window_size(window)),
+                        .map(|button| native_window_control(button, WindowControlArea::Max))
+                        .on_click(|_, window, cx| {
+                            cx.stop_propagation();
+                            toggle_window_size(window);
+                        }),
                 );
             }
             bar = bar.child(
@@ -231,7 +278,9 @@ impl Workspace {
                 .w(px(38.))
                 .h_full()
                 .rounded_tr(corners.top_right)
+                .map(|button| native_window_control(button, WindowControlArea::Close))
                 .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
                     this.request_exit(window, cx);
                 })),
             );
@@ -415,6 +464,14 @@ impl Workspace {
                     this.set_active(index, window, cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.open_tab_menu(id, event.position, window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
             .on_drag(
                 TabDrag {
                     id,
@@ -588,6 +645,14 @@ impl Workspace {
                 this.restore_focus(window, cx);
                 cx.stop_propagation();
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.open_tab_group_menu(profile, event.position, window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }),
+            )
             .on_drag(
                 TabDrag {
                     id: first,
@@ -736,6 +801,9 @@ impl Workspace {
                 Connection::Local(_) => tr(i18n_key::COMMON_LOCAL_TERMINAL).into(),
                 Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
                 Connection::Redis(redis) => format!("Redis  {}:{}", redis.host, redis.port),
+                Connection::ClickHouse(sql) => {
+                    format!("ClickHouse  {}:{} / {}", sql.host, sql.port, sql.database)
+                }
                 Connection::Mysql(sql) => {
                     format!("MySQL  {}:{} / {}", sql.host, sql.port, sql.database)
                 }
@@ -747,21 +815,33 @@ impl Workspace {
                 Connection::Rdp(rdp) => rdp_target(rdp),
             })
             .unwrap_or_default();
-        let name = profile
-            .map(|profile| profile.name.clone())
+        let name = self
+            .pane_display_name(self.focused)
+            .or_else(|| match pane {
+                Some(Pane::Terminal(view)) => Some(view.read(cx).display_name().to_owned()),
+                _ => None,
+            })
             .unwrap_or_default();
         let tooltip = format!("{name} · {state}\n{target}\n{detail}");
-        let protocol = profile.map_or("", |profile| match &profile.connection {
-            Connection::Ssh(_) => "SSH",
-            Connection::Telnet(_) => "Telnet",
-            Connection::Local(_) => tr(i18n_key::TERMINAL_LOCAL),
-            Connection::Redis(_) => "Redis",
-            Connection::Elasticsearch(_) => "Elasticsearch",
-            Connection::Mysql(_) => "MySQL",
-            Connection::Postgres(_) => "PostgreSQL",
-            Connection::Sqlite(_) => "SQLite",
-            Connection::Rdp(_) => "RDP",
-        });
+        let protocol = profile.map_or(
+            if matches!(pane, Some(Pane::Terminal(view)) if view.read(cx).is_container()) {
+                "Docker"
+            } else {
+                ""
+            },
+            |profile| match &profile.connection {
+                Connection::Ssh(_) => "SSH",
+                Connection::Telnet(_) => "Telnet",
+                Connection::Local(_) => tr(i18n_key::TERMINAL_LOCAL),
+                Connection::Redis(_) => "Redis",
+                Connection::Elasticsearch(_) => "Elasticsearch",
+                Connection::Mysql(_) => "MySQL",
+                Connection::ClickHouse(_) => "ClickHouse",
+                Connection::Postgres(_) => "PostgreSQL",
+                Connection::Sqlite(_) => "SQLite",
+                Connection::Rdp(_) => "RDP",
+            },
+        );
         let label = if protocol.is_empty() {
             state
         } else {
@@ -800,9 +880,11 @@ impl Workspace {
                             .rounded_full()
                             .bg(rgb(color)),
                     )
-                    .child(div().min_w_0().truncate().child(label))
+                    .child(div().flex_shrink_0().child(label))
+                    .child(div().min_w_0().truncate().child(name))
                     .into_any_element(),
             })
+            .when_some(self.resource_summary(), |bar, summary| bar.child(summary))
             .when(self.saving || self.pending_credentials > 0, |bar| {
                 bar.child(
                     div()

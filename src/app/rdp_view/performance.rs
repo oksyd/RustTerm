@@ -213,6 +213,7 @@ mod tests {
     fn repainting_a_frame_does_not_inflate_fps_or_count_the_initial_gap() {
         let mut performance = Performance::default();
         let mut frame = RdpFrame {
+            remote_windows: Vec::new(),
             sequence: 7,
             published_at: Instant::now(),
             acknowledgement: None,

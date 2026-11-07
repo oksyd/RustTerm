@@ -116,13 +116,9 @@ impl RedisView {
             );
         if self.keys.is_empty() {
             browser = browser.child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .p(px(12.))
-                    .text_color(rgb(ui::colors().muted))
-                    .text_size(px(11.))
-                    .child(tr(if self.busy.is_some() {
+                ui::empty_state(
+                    Icon::Database,
+                    tr(if self.busy.is_some() {
                         i18n_key::REDIS_SCANNING_KEYS
                     } else if self.scanned && self.scan_next != 0 {
                         i18n_key::REDIS_NO_MATCHES_IN_THIS_BATCH_CONTINUE_SCANNING
@@ -130,7 +126,9 @@ impl RedisView {
                         i18n_key::REDIS_NO_KEYS_IN_THIS_BATCH
                     } else {
                         i18n_key::REDIS_CONNECT_TO_BROWSE_KEYS
-                    })),
+                    }),
+                )
+                .flex_1(),
             );
         } else {
             browser = browser.child(
@@ -344,17 +342,8 @@ impl RedisView {
             detail.push('\n');
             detail.push_str(&rustterm::trf!(i18n_key::REDIS_VIA_SSH_HOST, host = host));
         }
-        div()
-            .h(px(ui::PANE_HEADER_HEIGHT))
+        ui::panel_header()
             .min_w_0()
-            .flex_shrink_0()
-            .px(px(if self.compact { 8. } else { 12. }))
-            .flex()
-            .items_center()
-            .gap(px(if self.compact { 4. } else { 8. }))
-            .bg(rgb(ui::colors().surface))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
             .child(ui::connection_address(
                 "redis-address",
                 Icon::Redis,
@@ -520,87 +509,70 @@ impl RedisView {
     pub(super) fn render_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let menu = self.menu?;
         let actions = self.menu_actions(menu);
-        let mut top = if matches!(menu, RedisMenu::Pane | RedisMenu::Section) {
+        let top = if matches!(menu, RedisMenu::Pane | RedisMenu::Section) {
             ui::PANE_HEADER_HEIGHT - 2.
         } else {
             ui::PANE_HEADER_HEIGHT + if self.compact { 40. } else { 48. } - 2.
         };
-        if let Some(position) = self.menu_position {
-            let height = actions.len() as f32 * 32. + 10.;
-            top = f32::from(position.y).clamp(4., (self.viewport_size.1 - height).max(4.));
-        }
-        let max_height = self.viewport_size.1 - top - 8.;
-        let mut popup = div()
-            .id("redis-actions-popup")
+        let bounds = ui::popup::fit(
+            self.menu_position
+                .unwrap_or(gpui::point(px(self.viewport_size.0 - 218.), px(top))),
+            gpui::size(
+                px(210.),
+                px(actions.len() as f32 * ui::metrics::ROW + 2. * ui::popup::PADDING),
+            ),
+            gpui::Bounds::new(
+                gpui::point(px(4.), px(4.)),
+                gpui::size(
+                    px((self.viewport_size.0 - 8.).max(0.)),
+                    px((self.viewport_size.1 - 8.).max(0.)),
+                ),
+            ),
+        );
+        let popup = ui::popup::surface("redis-actions-popup")
             .absolute()
-            .top(px(top))
-            .w(px(210.))
-            .max_h(px(max_height.max(70.)))
+            .left(bounds.origin.x)
+            .top(bounds.origin.y)
+            .w(bounds.size.width)
+            .max_h(bounds.size.height)
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .track_scroll(&self.menu_scroll)
-            .py(px(4.))
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(4.))
-            .shadow_md()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .children(actions.into_iter().enumerate().map(|(index, action)| {
                 let (label, glyph, enabled, danger) = self.menu_item(action);
-                div()
-                    .id(("redis-menu-action", index))
-                    .tab_index(0)
-                    .tab_stop(enabled)
-                    .h(px(32.))
-                    .px(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .text_color(rgb(if !enabled {
-                        ui::colors().faint
-                    } else if danger {
-                        ui::colors().danger
-                    } else {
-                        ui::colors().text
-                    }))
-                    .when(enabled, |d| {
-                        d.cursor_pointer().hover(|s| s.bg(rgb(ui::colors().hover)))
-                    })
-                    .when(enabled, |d| d.focus(|s| s.bg(rgb(ui::colors().selected))))
-                    .when(enabled && index == self.menu_index, |d| {
-                        d.bg(rgb(ui::colors().selected))
-                    })
-                    .when(!enabled, |button| {
-                        let reason = self.disabled_reason().unwrap_or(match action {
-                            MenuAction::CopyEntry
-                            | MenuAction::EditEntry
-                            | MenuAction::DeleteEntry => {
-                                i18n_key::COMMON_SELECT_AN_AVAILABLE_ENTRY_FIRST
-                            }
-                            _ => i18n_key::COMMON_SELECT_AN_EXISTING_KEY_FIRST,
-                        });
-                        button
-                            .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tr(reason).into())).into())
-                    })
-                    .child(icon(glyph).text_color(rgb(if danger && enabled {
-                        ui::colors().danger
-                    } else {
-                        ui::colors().muted
-                    })))
-                    .child(tr(label))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_menu_action(index, window, cx);
-                    }))
+                ui::popup::row(
+                    ("redis-menu-action", index),
+                    enabled,
+                    index == self.menu_index,
+                )
+                .when(danger && enabled, |row| {
+                    row.text_color(rgb(ui::colors().danger))
+                })
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if enabled && this.menu_index != index {
+                        this.menu_index = index;
+                        cx.notify();
+                    }
+                }))
+                .when(!enabled, |button| {
+                    let reason = self.disabled_reason().unwrap_or(match action {
+                        MenuAction::CopyEntry | MenuAction::EditEntry | MenuAction::DeleteEntry => {
+                            i18n_key::COMMON_SELECT_AN_AVAILABLE_ENTRY_FIRST
+                        }
+                        _ => i18n_key::COMMON_SELECT_AN_EXISTING_KEY_FIRST,
+                    });
+                    button.tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tr(reason).into())).into())
+                })
+                .child(icon(glyph).text_color(rgb(if danger && enabled {
+                    ui::colors().danger
+                } else {
+                    ui::colors().muted
+                })))
+                .child(tr(label))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_menu_action(index, window, cx);
+                }))
             }));
-        popup = if let Some(position) = self.menu_position {
-            popup.left(px(
-                f32::from(position.x).clamp(4., (self.viewport_size.0 - 214.).max(4.))
-            ))
-        } else {
-            popup.right(px(8.))
-        };
         Some(
             div()
                 .absolute()
@@ -609,6 +581,7 @@ impl RedisView {
                 .right_0()
                 .bottom_0()
                 .occlude()
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -839,41 +812,16 @@ impl RedisView {
         let enabled: Vec<_> = self
             .menu_actions(menu)
             .into_iter()
-            .enumerate()
-            .filter_map(|(index, action)| self.menu_item(action).2.then_some(index))
+            .map(|action| self.menu_item(action).2)
             .collect();
         match event.keystroke.key.as_str() {
             "escape" => self.close_menu(window, cx),
-            "up" | "down" | "tab" => {
-                let backwards = event.keystroke.key == "up"
-                    || (event.keystroke.key == "tab" && event.keystroke.modifiers.shift);
-                let next = if backwards {
-                    enabled
-                        .iter()
-                        .rev()
-                        .find(|index| **index < self.menu_index)
-                        .or_else(|| enabled.last())
-                } else {
-                    enabled
-                        .iter()
-                        .find(|index| **index > self.menu_index)
-                        .or_else(|| enabled.first())
-                };
-                if let Some(index) = next {
-                    self.menu_index = *index;
+            "up" | "down" | "tab" | "home" | "end" => {
+                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
+                    self.menu_index = index;
                 }
             }
-            "home" => {
-                if let Some(index) = enabled.first() {
-                    self.menu_index = *index;
-                }
-            }
-            "end" => {
-                if let Some(index) = enabled.last() {
-                    self.menu_index = *index;
-                }
-            }
-            "enter" | "space" => self.run_menu_action(self.menu_index, window, cx),
+            "enter" | "return" | "space" => self.run_menu_action(self.menu_index, window, cx),
             _ => return,
         }
         self.menu_scroll.scroll_to_item(self.menu_index);

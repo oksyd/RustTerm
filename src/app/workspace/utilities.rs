@@ -65,6 +65,7 @@ impl Workspace {
         match tool {
             SessionTool::Files => self.open_files(window, cx),
             SessionTool::Resources => self.open_resources(window, cx),
+            SessionTool::Docker => self.open_docker(window, cx),
             SessionTool::Commands => self.open_commands(window, cx),
         }
     }
@@ -126,6 +127,7 @@ impl Workspace {
         self.tools.remove(&self.focused);
         self.utility_overlay = false;
         self.sync_resources(window, cx);
+        self.sync_docker(window, cx);
         self.sync_visibility(cx);
         self.restore_focus(window, cx);
         cx.notify();
@@ -133,11 +135,17 @@ impl Workspace {
 
     pub(super) fn render_utility_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let tool = *self.tools.get(&self.focused)?;
-        let name = self.pane_profiles.get(&self.focused)?.name.clone();
+        let name = self.pane_display_name(self.focused).or_else(|| {
+            match self.panes.get(&self.focused)? {
+                Pane::Terminal(view) => Some(view.read(cx).display_name().to_owned()),
+                _ => None,
+            }
+        })?;
         let (icon, label) = match tool {
             SessionTool::Files => (Icon::Folder, "SFTP"),
             SessionTool::Commands => (Icon::Terminal, i18n_key::WORKSPACE_COMMANDS),
             SessionTool::Resources => (Icon::Pulse, i18n_key::RESOURCES_RESOURCES),
+            SessionTool::Docker => (Icon::Container, i18n_key::DOCKER_TITLE),
         };
         let content = match tool {
             SessionTool::Files => self
@@ -149,6 +157,7 @@ impl Workspace {
                 .cloned()
                 .map(IntoElement::into_any_element),
             SessionTool::Resources => self.active_resources().map(IntoElement::into_any_element),
+            SessionTool::Docker => self.active_docker().map(IntoElement::into_any_element),
         }
         .unwrap_or_else(|| {
             div()

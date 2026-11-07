@@ -27,6 +27,7 @@ pub(super) enum Command {
 
 pub(super) enum Connection {
     Mysql(mysql::Connection),
+    ClickHouse(clickhouse::Connection),
     Postgres(postgres::Connection),
     Sqlite(sqlite::Connection),
 }
@@ -38,6 +39,11 @@ impl Connection {
         stop: CancellationToken,
     ) -> Result<Self> {
         match config {
+            DatabaseConfig::ClickHouse(config) => {
+                clickhouse::Connection::open(config, secret, tunnel, stop)
+                    .await
+                    .map(Self::ClickHouse)
+            }
             DatabaseConfig::Mysql(config) => mysql::Connection::open(config, secret, tunnel, stop)
                 .await
                 .map(Self::Mysql),
@@ -63,7 +69,7 @@ impl Connection {
         marker: &str,
     ) -> Result<QueryOutput> {
         let tagged;
-        let sql = if matches!(self, Self::Sqlite(_)) {
+        let sql = if matches!(self, Self::Sqlite(_) | Self::ClickHouse(_)) {
             sql
         } else {
             // Never rewrite statement boundaries: SQL quoting modes belong to
@@ -74,6 +80,7 @@ impl Connection {
         let start = Instant::now();
         let results = match self {
             Self::Mysql(connection) => connection.execute(sql, limit).await?,
+            Self::ClickHouse(connection) => connection.execute(sql, limit, cancel, marker).await?,
             Self::Postgres(connection) => connection.execute(sql, limit).await?,
             Self::Sqlite(connection) => connection.execute(sql, limit, cancel.clone()).await?,
         };
@@ -85,6 +92,7 @@ impl Connection {
     fn cancellation(&self, marker: String) -> CancelHandle {
         match self {
             Self::Mysql(connection) => connection.cancellation(marker),
+            Self::ClickHouse(connection) => connection.cancellation(marker),
             Self::Postgres(connection) => connection.cancellation(marker),
             Self::Sqlite(connection) => connection.cancellation(),
         }
@@ -92,6 +100,7 @@ impl Connection {
     fn transaction_status(&self) -> Option<TransactionStatus> {
         match self {
             Self::Sqlite(connection) => connection.transaction_status(),
+            Self::ClickHouse(_) => Some(TransactionStatus::Idle),
             _ => None,
         }
     }
@@ -99,7 +108,7 @@ impl Connection {
         match self {
             Self::Mysql(connection) => connection.synchronize().await,
             Self::Postgres(connection) => connection.synchronize().await,
-            Self::Sqlite(_) => Ok(()),
+            Self::Sqlite(_) | Self::ClickHouse(_) => Ok(()),
         }
     }
     async fn run(
@@ -111,6 +120,9 @@ impl Connection {
     ) -> Result<QueryOutput> {
         if cancel.is_cancelled() {
             return Err(DatabaseError::Cancelled);
+        }
+        if matches!(self, Self::ClickHouse(_)) && !matches!(command, Command::Sql { .. }) {
+            return Err(DatabaseError::TransactionsUnsupported);
         }
         match command {
             Command::Sql { sql, row_limit } => self.execute(sql, *row_limit, cancel, marker).await,
@@ -198,6 +210,7 @@ impl Connection {
 
 #[derive(Clone)]
 pub(super) enum CancelHandle {
+    ClickHouse(clickhouse::Connection, String),
     Mysql(sqlx::mysql::MySqlConnectOptions, String),
     Postgres(sqlx::postgres::PgConnectOptions, String),
     Sqlite(Arc<rusqlite::InterruptHandle>),
@@ -262,6 +275,7 @@ impl CancelHandle {
                 let _ = control.close().await;
                 result
             }
+            Self::ClickHouse(connection, marker) => connection.cancel(marker).await,
             Self::Sqlite(interrupt) => {
                 interrupt.interrupt();
                 Ok(true)
@@ -369,7 +383,7 @@ fn interrupted_result(reason: DatabaseError, observed: Result<QueryOutput>) -> R
     match observed {
         Err(DatabaseError::Cancelled) => Err(reason),
         Err(DatabaseError::Server { code, .. })
-            if matches!(code.as_str(), "57014" | "70100" | "1317") =>
+            if matches!(code.as_str(), "57014" | "70100" | "1317" | "394") =>
         {
             Err(reason)
         }

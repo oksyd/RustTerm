@@ -35,7 +35,6 @@ impl Connection {
             .host(&host)
             .port(config.port)
             .username(&config.username)
-            .password(secret.expose())
             .ssl_mode(if config.tls {
                 MySqlSslMode::VerifyIdentity
             } else {
@@ -48,6 +47,11 @@ impl Connection {
             .no_engine_substitution(false)
             .enable_cleartext_plugin(false)
             .disable_statement_logging();
+        // SQLx treats Some("") as a password to hash for caching_sha2_password.
+        // Passwordless accounts must send an empty authentication response.
+        if !secret.expose().is_empty() {
+            options = options.password(secret.expose());
+        }
         if !config.database.is_empty() {
             options = options.database(&config.database);
         }
@@ -61,6 +65,21 @@ impl Connection {
             connection,
             options,
             _bridge: bridge,
+        })
+    }
+    pub(super) fn monitor_options(&self) -> MySqlConnectOptions {
+        self.options.clone()
+    }
+    pub(super) async fn open_monitor(options: MySqlConnectOptions) -> Result<Self> {
+        // A tunneled connection keeps the original verified local bridge socket.
+        // It must never fall back to a direct TCP connection.
+        let connection = sqlx::MySqlConnection::connect_with(&options)
+            .await
+            .map_err(classify)?;
+        Ok(Self {
+            connection,
+            options,
+            _bridge: None,
         })
     }
     pub(super) fn cancellation(&self, marker: String) -> super::CancelHandle {

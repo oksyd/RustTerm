@@ -154,7 +154,10 @@ impl Workspace {
                 };
                 self.add_rdp(profile, launch, Some(id), None, window, cx);
             }
-            Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_) => {
+            Connection::Mysql(_)
+            | Connection::Postgres(_)
+            | Connection::ClickHouse(_)
+            | Connection::Sqlite(_) => {
                 let launch = DatabaseLaunch {
                     config: profile.connection.database().unwrap(),
                     secret,
@@ -263,7 +266,7 @@ impl Workspace {
                 match profile.connection {
                     Connection::Redis(_) => i18n_key::REDIS_REDIS_PASSWORD,
                     Connection::Elasticsearch(_) => i18n_key::ES_SECRET,
-                    Connection::Mysql(_) | Connection::Postgres(_) => {
+                    Connection::Mysql(_) | Connection::Postgres(_) | Connection::ClickHouse(_) => {
                         i18n_key::DATABASE_DATABASE_PASSWORD
                     }
                     Connection::Rdp(_) => i18n_key::RDP_RDP_PASSWORD,
@@ -481,7 +484,10 @@ impl Workspace {
                 };
                 self.add_rdp(profile, launch, reconnect, split, window, cx);
             }
-            Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_) => {
+            Connection::Mysql(_)
+            | Connection::Postgres(_)
+            | Connection::ClickHouse(_)
+            | Connection::Sqlite(_) => {
                 let launch = DatabaseLaunch {
                     config: profile.connection.database().unwrap(),
                     secret: value,
@@ -619,7 +625,8 @@ fn attach_credential(
         (Connection::Ssh(current), Connection::Ssh(before)) => current.same_auth_identity(before),
         (Connection::Rdp(current), Connection::Rdp(before)) => current.same_auth_identity(before),
         (Connection::Mysql(current), Connection::Mysql(before))
-        | (Connection::Postgres(current), Connection::Postgres(before)) => {
+        | (Connection::Postgres(current), Connection::Postgres(before))
+        | (Connection::ClickHouse(current), Connection::ClickHouse(before)) => {
             current.same_auth_identity(before)
         }
         (Connection::Elasticsearch(current), Connection::Elasticsearch(before)) => {
@@ -645,9 +652,9 @@ fn attach_credential(
         },
         Connection::Redis(config) => config.credential = Some(reference),
         Connection::Elasticsearch(config) => config.credential = Some(reference),
-        Connection::Mysql(config) | Connection::Postgres(config) => {
-            config.credential = Some(reference)
-        }
+        Connection::Mysql(config)
+        | Connection::Postgres(config)
+        | Connection::ClickHouse(config) => config.credential = Some(reference),
         Connection::Rdp(config) => config.credential = Some(reference),
         Connection::Local(_) | Connection::Telnet(_) | Connection::Sqlite(_) => return false,
     }

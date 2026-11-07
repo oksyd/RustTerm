@@ -29,6 +29,9 @@ pub(super) fn requested_channels(config: &ClientConfig) -> Vec<&'static str> {
     if config.audio_output {
         channels.push("rdpsnd");
     }
+    if config.remote_app.is_some() {
+        channels.push("rail");
+    }
     channels
 }
 
@@ -258,7 +261,16 @@ pub(super) struct ServerData {
     pub multitransport_flags: u32,
 }
 
+#[cfg(test)]
 pub(super) fn connect_response(packet: &[u8], config: &ClientConfig) -> Result<ServerData> {
+    connect_response_for(packet, config, SecurityProtocol::Hybrid)
+}
+
+pub(super) fn connect_response_for(
+    packet: &[u8],
+    config: &ClientConfig,
+    protocol: SecurityProtocol,
+) -> Result<ServerData> {
     let mut outer = Reader::new(wire::x224_payload(packet)?);
     let mut mcs = Reader::new(ber_value(&mut outer, &[0x7f, 0x66])?);
     if !outer.is_empty() {
@@ -305,10 +317,14 @@ pub(super) fn connect_response(packet: &[u8], config: &ClientConfig) -> Result<S
     if !gcc.is_empty() {
         return Err(Error::Invalid("trailing GCC conference data"));
     }
-    server_blocks(data, config)
+    server_blocks(data, config, protocol)
 }
 
-fn server_blocks(data: &[u8], config: &ClientConfig) -> Result<ServerData> {
+fn server_blocks(
+    data: &[u8],
+    config: &ClientConfig,
+    protocol: SecurityProtocol,
+) -> Result<ServerData> {
     let mut reader = Reader::new(data);
     let mut core_seen = false;
     let mut security_seen = false;
@@ -329,7 +345,12 @@ fn server_blocks(data: &[u8], config: &ClientConfig) -> Result<ServerData> {
                     return Err(Error::Invalid("GCC server core"));
                 }
                 core_seen = true;
-                if block.remaining_len() >= 4 && block.u32_le()? != REQUESTED_PROTOCOLS {
+                let requested = if protocol == SecurityProtocol::RdsTls {
+                    4
+                } else {
+                    REQUESTED_PROTOCOLS
+                };
+                if block.remaining_len() >= 4 && block.u32_le()? != requested {
                     return Err(Error::Invalid("GCC security negotiation mismatch"));
                 }
                 // earlyCapabilityFlags are optional; channel-join skipping

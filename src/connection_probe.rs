@@ -174,7 +174,9 @@ async fn run(
         Connection::Ssh(_) => true,
         Connection::Redis(config) => config.ssh_profile.is_some(),
         Connection::Elasticsearch(config) => config.ssh_profile.is_some(),
-        Connection::Mysql(config) | Connection::Postgres(config) => config.ssh_profile.is_some(),
+        Connection::Mysql(config)
+        | Connection::Postgres(config)
+        | Connection::ClickHouse(config) => config.ssh_profile.is_some(),
         _ => false,
     };
     if expects_ssh != ssh.is_some() {
@@ -262,7 +264,10 @@ async fn run(
             client.close();
             Ok(outcome)
         }
-        connection @ (Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_)) => {
+        connection @ (Connection::Mysql(_)
+        | Connection::Postgres(_)
+        | Connection::ClickHouse(_)
+        | Connection::Sqlite(_)) => {
             let local = matches!(connection, Connection::Sqlite(_));
             let config = connection.database().expect("database connection");
             let engine = config.engine();
@@ -275,7 +280,7 @@ async fn run(
                 return Err(DatabaseError::Protocol.into());
             }
             let query = match engine {
-                SqlEngine::Mysql => "SELECT VERSION()",
+                SqlEngine::Mysql | SqlEngine::ClickHouse => "SELECT VERSION()",
                 SqlEngine::Postgres => "SHOW server_version",
                 SqlEngine::Sqlite => "SELECT sqlite_version()",
             };

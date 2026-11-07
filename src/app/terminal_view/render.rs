@@ -123,27 +123,23 @@ impl TerminalView {
             detail.push('\n');
             detail.push_str(directory);
         }
-        div()
+        ui::panel_header()
             .relative()
-            .h(px(ui::PANE_HEADER_HEIGHT))
             .min_w_0()
             .overflow_hidden()
-            .flex_shrink_0()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .bg(rgb(ui::colors().chrome))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
             .child(
                 ui::connection_address(
                     ("terminal-address", pane_index),
-                    Icon::Terminal,
+                    if self.is_container() {
+                        Icon::Container
+                    } else {
+                        Icon::Terminal
+                    },
                     match self.kind {
                         TerminalKind::Local => "Local",
                         TerminalKind::Ssh => "SSH",
                         TerminalKind::Telnet => "Telnet",
+                        TerminalKind::Container => "Docker",
                     },
                     address,
                     detail,
@@ -156,6 +152,12 @@ impl TerminalView {
                 canvas(
                     move |bounds, _, cx| {
                         header_entity.update(cx, |this, cx| {
+                            if this.header_bounds != Some(bounds) {
+                                this.header_bounds = Some(bounds);
+                                if this.menu_open {
+                                    cx.notify();
+                                }
+                            }
                             let threshold = if this.kind == TerminalKind::Ssh {
                                 560.
                             } else {

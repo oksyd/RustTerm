@@ -46,7 +46,7 @@ fn profile_matches(profile: &Profile, group: &str, query: &str) -> bool {
             s.port,
             s.username.as_deref().unwrap_or_default()
         ),
-        Connection::Mysql(s) | Connection::Postgres(s) => format!(
+        Connection::Mysql(s) | Connection::Postgres(s) | Connection::ClickHouse(s) => format!(
             "{} {} {} {} {}",
             profile.connection.sql().unwrap().0.label(),
             s.host,
@@ -307,6 +307,7 @@ impl Workspace {
                             Connection::Redis(_) => ProfileKind::Redis,
                             Connection::Elasticsearch(_) => ProfileKind::Elasticsearch,
                             Connection::Mysql(_) => ProfileKind::Mysql,
+                            Connection::ClickHouse(_) => ProfileKind::ClickHouse,
                             Connection::Postgres(_) => ProfileKind::Postgres,
                             Connection::Sqlite(_) => ProfileKind::Sqlite,
                             Connection::Rdp(_) => ProfileKind::Rdp,
@@ -686,6 +687,9 @@ impl Workspace {
                         format!("Elasticsearch {}", config.endpoint)
                     }
                     Connection::Redis(redis) => format!("Redis  {}:{}", redis.host, redis.port),
+                    Connection::ClickHouse(sql) => {
+                        format!("ClickHouse  {}:{} / {}", sql.host, sql.port, sql.database)
+                    }
                     Connection::Mysql(sql) => {
                         format!("MySQL  {}:{} / {}", sql.host, sql.port, sql.database)
                     }

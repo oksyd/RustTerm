@@ -44,6 +44,12 @@ rdp-confirm-the-server-certificate-to-continue = Confirm the server certificate 
 
 rdp-connection = Connection
 
+rdp-network-keepalive-seconds = Network keepalive (s, 0 = off)
+rdp-network-keepalive-help = Default: 30 seconds. TCP probes help maintain idle network connections and detect an unresponsive peer. This does not prevent remote screen blanking, locking, sleep, or server session limits. Reconnect after saving to apply.
+rdp-keepalive-invalid = Use a network keepalive interval of 1–3600 seconds, or 0 to disable it.
+rdp-prevent-idle = Keep remote desktop awake
+rdp-prevent-idle-help = After 30 seconds without input, briefly move the remote pointer and restore it to prevent idle blanking or locking. Continues in background tabs; pauses while keys or buttons are held or RustTerm is locked. Reconnect after saving. Does not unlock a locked desktop.
+
 rdp-connection-information = Connection information
 
 rdp-control-clipboard-help = Click the remote desktop to take control. Press and release Ctrl+Alt alone to return to this computer. While controlling, shortcuts go to Windows. Ctrl+V pastes the clipboard or selected files; Ctrl+Shift+V forces the local clipboard.
@@ -369,3 +375,31 @@ rdp-waiting-for-the-first-desktop-frame = Waiting for the first desktop frame…
 rdp-zoom-pane-ctrl-shift-enter = Zoom pane · Ctrl+Shift+Enter
 
 rdp-send-folders = Send folders…
+
+rdp-remote-app-mode = Session type
+
+rdp-remote-app-desktop = Full desktop
+
+rdp-remote-app = RemoteApp
+
+rdp-remote-app-program = Application alias or path
+
+rdp-remote-app-arguments = Arguments (optional)
+
+rdp-remote-app-directory = Working directory (optional)
+
+rdp-remote-app-hint = Enter an application published by the server, for example ||notepad. Applications open in separate windows.
+
+rdp-remote-app-invalid-parameters = Enter an application alias/path (up to 260 UTF-16 units). The working directory allows 260 units and arguments 8000; control characters are not allowed.
+
+rdp-remote-app-waiting = Waiting for the remote application…
+
+rdp-remote-app-windows = Remote application windows
+
+rdp-remote-app-launch-failed = RemoteApp launch failed (result { $result }, status { $status }). Check the published alias and server permissions.
+
+rdp-remote-app-suspended = The remote application desktop is unavailable or locked.
+
+rdp-remote-app-window-failed = Could not create the local application window.
+
+rdp-remote-app-no-windows = The application has no visible windows. Close this connection to end the session.

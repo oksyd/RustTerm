@@ -8,8 +8,14 @@ use ui::{ButtonStyle, Icon};
 
 impl Render for DatabaseView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let entity = cx.entity().downgrade();
+        let document_error = if self.page != WorkspacePage::Document {
+            None
+        } else {
+            self.documents[self.active_document].error.clone()
+        };
         let compact = self.viewport_size.0 < BROWSER_MIN_WIDTH;
-        let browser = self.browser_open;
+        let browser = self.browser_open && self.page != WorkspacePage::Sessions;
         let mut body = div().flex_1().min_w_0().min_h_0().flex();
         if browser {
             body = body.child(self.render_browser(compact, cx));
@@ -79,6 +85,7 @@ impl Render for DatabaseView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
+                    this.object_menu = None;
                     this.focus.focus(window);
                     cx.stop_propagation();
                 }),
@@ -97,44 +104,32 @@ impl Render for DatabaseView {
             .child(self.render_header(cx))
             .child(body)
             .when_some(
-                self.documents[self.active_document]
-                    .error
-                    .clone()
-                    .or_else(|| self.error.clone()),
+                document_error.clone().or_else(|| self.error.clone()),
                 |panel, error| {
                     panel.child(
-                        div()
+                        ui::feedback(error.render(), true)
                             .id("database-error")
                             .max_h(px(64.))
                             .overflow_y_scroll()
                             .map(ui::preserve_scroll_axes)
-                            .px_3()
-                            .py_2()
                             .flex_shrink_0()
                             .border_t_1()
                             .border_color(rgb(ui::colors().border))
-                            .text_color(rgb(ui::colors().danger))
-                            .child(error.render())
                             .map(|content| ui::scrollable(content, None)),
                     )
                 },
             )
+            .when(self.error.is_none() && document_error.is_none(), |panel| {
+                if let Some(busy) = self.busy {
+                    panel.child(notice(tr(busy).to_owned(), ui::colors().muted))
+                } else if let Some(message) = &self.notice {
+                    panel.child(notice(message.render(), ui::colors().muted))
+                } else {
+                    panel
+                }
+            })
             .when(
-                self.error.is_none() && self.documents[self.active_document].error.is_none(),
-                |panel| {
-                    if let Some(busy) = self.busy {
-                        panel.child(notice(tr(busy).to_owned(), ui::colors().muted))
-                    } else if let Some(message) = &self.notice {
-                        panel.child(notice(message.render(), ui::colors().muted))
-                    } else {
-                        panel
-                    }
-                },
-            )
-            .when(
-                self.error.is_none()
-                    && self.documents[self.active_document].error.is_none()
-                    && self.busy.is_none(),
+                self.error.is_none() && document_error.is_none() && self.busy.is_none(),
                 |panel| {
                     panel.when_some(self.success_notice.as_ref(), |panel, message| {
                         panel.child(
@@ -159,13 +154,28 @@ impl Render for DatabaseView {
                 },
             )
             .children(self.render_menu(cx))
+            .children(self.render_object_menu(cx))
+            .child(
+                gpui::canvas(
+                    move |bounds, _, cx| {
+                        let _ = entity.update(cx, |this, _| this.pane_origin = bounds.origin);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
     }
 }
 
 impl DatabaseView {
     fn render_header(&self, cx: &Context<Self>) -> Div {
         let address = match &self.config {
-            DatabaseConfig::Mysql(config) | DatabaseConfig::Postgres(config) => {
+            DatabaseConfig::Mysql(config)
+            | DatabaseConfig::Postgres(config)
+            | DatabaseConfig::ClickHouse(config) => {
                 let host = if config.host.contains(':') && !config.host.starts_with('[') {
                     format!("[{}]", config.host)
                 } else {
@@ -173,6 +183,8 @@ impl DatabaseView {
                 };
                 let scheme = if self.engine() == SqlEngine::Mysql {
                     "mysql"
+                } else if self.engine() == SqlEngine::ClickHouse {
+                    if config.tls { "https" } else { "http" }
                 } else {
                     "postgresql"
                 };
@@ -183,24 +195,38 @@ impl DatabaseView {
             }
             DatabaseConfig::Sqlite(config) => config.path.display().to_string(),
         };
-        div()
-            .h(px(ui::PANE_HEADER_HEIGHT))
+        ui::panel_header()
             .min_w_0()
-            .flex_shrink_0()
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_1()
-            .bg(rgb(ui::colors().surface))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
-            .child(ui::connection_address(
-                "database-address",
-                Icon::for_sql_engine(self.engine()),
-                self.engine().label(),
-                address,
-                format!("{}\n{}", self.title, self.status_details()),
-            ))
+            .child(
+                ui::icon(Icon::for_sql_engine(self.engine())).text_color(rgb(self.engine_color())),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .px_2()
+                    .text_size(px(11.))
+                    .text_color(rgb(self.engine_color()))
+                    .child(self.engine().label()),
+            )
+            .child(
+                div()
+                    .id("database-identity")
+                    .flex_1()
+                    .min_w_0()
+                    .px_1()
+                    .truncate()
+                    .child(address.clone())
+                    .tooltip({
+                        let address = address.clone();
+                        move |_, cx| cx.new(|_| ui::Tooltip(address.clone())).into()
+                    }),
+            )
+            .child(
+                ui::icon_button("database-copy-address", Icon::Copy, i18n_key::COMMON_COPY)
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(address.clone()))
+                    })),
+            )
             .when_some(
                 match &self.config {
                     DatabaseConfig::Sqlite(config) => Some(if config.read_only {
@@ -230,11 +256,14 @@ impl DatabaseView {
                 .tab_index(0)
                 .flex_shrink_0()
                 .whitespace_nowrap()
-                .when(self.browser_open, |button| {
-                    button
-                        .bg(rgb(ui::colors().selected))
-                        .text_color(rgb(ui::colors().accent))
-                })
+                .when(
+                    self.browser_open && self.page != WorkspacePage::Sessions,
+                    |button| {
+                        button
+                            .bg(rgb(ui::colors().selected))
+                            .text_color(rgb(ui::colors().accent))
+                    },
+                )
                 .tooltip(|_, cx| {
                     cx.new(|_| {
                         ui::Tooltip(tr(i18n_key::DATABASE_TOGGLE_DATABASE_BROWSER).to_owned())
@@ -243,10 +272,19 @@ impl DatabaseView {
                 })
                 .on_click(cx.listener(|this, _, window, cx| {
                     if this.interactive() {
-                        this.browser_open = !this.browser_open;
+                        if this.page == WorkspacePage::Sessions {
+                            this.pause_monitor();
+                            this.page = WorkspacePage::Overview;
+                            this.browser_open = true;
+                        } else {
+                            this.browser_open = !this.browser_open;
+                        }
                         if this.browser_open {
                             this.table_filter.read(cx).focus(window);
-                        } else if this.documents[this.active_document].editor_open {
+                        } else if this.page == WorkspacePage::Document
+                            && !this.results_only
+                            && this.documents[this.active_document].editor_open
+                        {
                             this.documents[this.active_document]
                                 .sql_input
                                 .read(cx)
@@ -287,363 +325,6 @@ impl DatabaseView {
             })
     }
 
-    fn render_browser(&self, compact: bool, cx: &Context<Self>) -> AnyElement {
-        let mut browser = div()
-            .min_h_0()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .border_r_1()
-            .border_color(rgb(ui::colors().border))
-            .when(compact, |body| body.flex_1())
-            .when(!compact, |body| {
-                body.w(px(self.browser_width())).flex_shrink_0()
-            })
-            .child(
-                div()
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .when(self.engine() != SqlEngine::Sqlite, |header| {
-                        header.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .child(div().flex_1().min_w_0().child(self.database_input.clone()))
-                                .child(
-                                    ui::icon_button(
-                                        "database-list-toggle",
-                                        Icon::ChevronDown,
-                                        i18n_key::DATABASE_CHOOSE_DATABASE,
-                                    )
-                                    .tab_index(0)
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            if this.interactive() {
-                                                this.database_open = !this.database_open;
-                                                cx.notify();
-                                            }
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    action(
-                                        "database-switch",
-                                        i18n_key::COMMON_GO,
-                                        self.available(),
-                                        ButtonStyle::Neutral,
-                                    )
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.change_database(cx)),
-                                    ),
-                                ),
-                        )
-                    })
-                    .child(self.table_filter.clone())
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(tr(i18n_key::DATABASE_TABLES_AND_VIEWS))
-                            .child(
-                                ui::icon_button_enabled(
-                                    "database-refresh",
-                                    Icon::Refresh,
-                                    if self.available() {
-                                        i18n_key::DATABASE_REFRESH_DATABASE_OBJECTS
-                                    } else {
-                                        self.unavailable_reason()
-                                    },
-                                    self.available(),
-                                )
-                                .on_click(cx.listener(|this, _, _, cx| this.refresh_browser(cx))),
-                            ),
-                    ),
-            );
-        if self.engine() != SqlEngine::Sqlite && self.database_open {
-            browser = browser.child(
-                div()
-                    .id("database-choices")
-                    .relative()
-                    .h(px((self.databases.len() as f32 * 28.).min(150.)))
-                    .pr(px(ui::SCROLLBAR_WIDTH))
-                    .flex_shrink_0()
-                    .border_b_1()
-                    .border_color(rgb(ui::colors().border))
-                    .child(
-                        uniform_list(
-                            "database-choice-list",
-                            self.databases.len(),
-                            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                range
-                                    .map(|index| this.render_database_choice(index, cx))
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .map(ui::preserve_scroll_axes)
-                        .track_scroll(self.database_scroll.clone())
-                        .h_full()
-                        .w_full(),
-                    )
-                    .child(ui::scrollbars(
-                        "database-choice-bars",
-                        None,
-                        Some(self.database_scroll.0.borrow().base_handle.clone()),
-                    )),
-            );
-        }
-        if self.visible_tables.is_empty() {
-            browser = browser.child(
-                div()
-                    .flex_1()
-                    .p_3()
-                    .text_color(rgb(ui::colors().muted))
-                    .child(tr(if self.busy.is_some() {
-                        i18n_key::DATABASE_LOADING_DATABASE_OBJECTS
-                    } else if self.state == State::Connected {
-                        i18n_key::DATABASE_NO_MATCHING_TABLES_OR_VIEWS
-                    } else if self.engine() == SqlEngine::Sqlite {
-                        i18n_key::DATABASE_OPEN_THE_DATABASE_TO_BROWSE_ITS_TABLES_AND_VIEWS
-                    } else {
-                        i18n_key::DATABASE_CONNECT_TO_BROWSE_DATABASE_OBJECTS
-                    })),
-            );
-        } else {
-            browser = browser.child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .pr(px(ui::SCROLLBAR_WIDTH))
-                    .child(
-                        uniform_list(
-                            "database-tables",
-                            self.visible_tables.len(),
-                            cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
-                                range
-                                    .map(|index| this.render_table(index, cx))
-                                    .collect::<Vec<_>>()
-                            }),
-                        )
-                        .map(ui::preserve_scroll_axes)
-                        .track_scroll(self.table_scroll.clone())
-                        .w_full()
-                        .min_w_0()
-                        .flex_1()
-                        .min_h_0(),
-                    )
-                    .child(ui::scrollbars(
-                        "database-table-bars",
-                        None,
-                        Some(self.table_scroll.0.borrow().base_handle.clone()),
-                    )),
-            );
-        }
-        browser
-            .child(
-                div()
-                    .p_2()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .border_t_1()
-                    .border_color(rgb(ui::colors().border))
-                    .children(
-                        [
-                            (TableAction::Data, "Data"),
-                            (TableAction::Columns, "Columns"),
-                            (TableAction::Indexes, "Indexes"),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, (kind, label))| {
-                            action(
-                                ("database-table-action", index),
-                                label,
-                                self.available() && self.selected_table.is_some(),
-                                ButtonStyle::Neutral,
-                            )
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.table_action(kind, cx)),
-                            )
-                        }),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_database_choice(&self, index: usize, cx: &Context<Self>) -> AnyElement {
-        let name = self.databases[index].clone();
-        div()
-            .id(("database-choice", index))
-            .h(px(28.))
-            .px_3()
-            .flex()
-            .items_center()
-            .cursor_pointer()
-            .tab_index(0)
-            .hover(|style| style.bg(rgb(ui::colors().hover)))
-            .when(name == self.database(), |item| {
-                item.bg(rgb(ui::colors().selected))
-            })
-            .child(div().truncate().child(name.clone()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.available() {
-                    this.database_input
-                        .update(cx, |input, cx| input.set_value(name.clone(), cx));
-                    this.change_database(cx);
-                }
-            }))
-            .into_any_element()
-    }
-
-    fn render_table(&self, visible_index: usize, cx: &Context<Self>) -> AnyElement {
-        let table = &self.tables[self.visible_tables[visible_index]];
-        let selected = self.selected_table.as_ref() == Some(table);
-        let is_view = table.kind.to_ascii_lowercase().contains("view");
-        let table = table.clone();
-        let name = if table.schema.is_empty() {
-            table.name.clone()
-        } else {
-            format!("{}.{}", table.schema, table.name)
-        };
-        div()
-            .id(("database-table", visible_index))
-            .w_full()
-            .min_w_0()
-            .h(px(36.))
-            .px_2()
-            .flex()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .tab_index(0)
-            .when(selected, |row| row.bg(rgb(ui::colors().selected)))
-            .hover(|style| style.bg(rgb(ui::colors().hover)))
-            .focus(|style| style.bg(rgb(ui::colors().selected)))
-            .child(ui::icon(if is_view { Icon::View } else { Icon::Table }))
-            .child(div().min_w_0().flex_1().truncate().child(name))
-            .child(
-                div()
-                    .text_size(px(9.))
-                    .text_color(rgb(ui::colors().muted))
-                    .child(if is_view {
-                        tr(i18n_key::WORKSPACE_VIEW)
-                    } else {
-                        tr(i18n_key::DATABASE_TABLE)
-                    }),
-            )
-            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                if this.interactive() {
-                    this.selected_table = Some(table.clone());
-                    if event.click_count() == 2 {
-                        this.table_action(TableAction::Data, cx);
-                    }
-                    cx.notify();
-                }
-            }))
-            .into_any_element()
-    }
-
-    fn render_editor(&self, cx: &Context<Self>) -> AnyElement {
-        let document = &self.documents[self.active_document];
-        if document.value_view.is_some() {
-            return self.render_value(cx);
-        }
-        if document.table.is_some() {
-            return self.render_table_workspace(cx);
-        }
-        div()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        action(
-                            "database-run",
-                            i18n_key::DATABASE_RUN_STATEMENT,
-                            self.available(),
-                            ButtonStyle::Primary,
-                        )
-                        .tooltip(|_, cx| {
-                            cx.new(|_| {
-                                ui::Tooltip(
-                                    tr(i18n_key::DATABASE_EXECUTE_SELECTION_OR_STATEMENT_AT_CURSOR_CTRL_ENTER)
-                                        .into(),
-                                )
-                            })
-                            .into()
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.run_sql(cx))),
-                    )
-                    .child(
-                        action(
-                            "database-run-script",
-                            i18n_key::DATABASE_RUN_SCRIPT,
-                            self.available(),
-                            ButtonStyle::Neutral,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.run_script(cx))),
-                    )
-                    .when(self.busy.is_some(), |bar| {
-                        bar.child(
-                            action(
-                                "database-cancel",
-                                i18n_key::DATABASE_CANCEL_QUERY,
-                                self.interactive(),
-                                ButtonStyle::Neutral,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.cancel_query(cx))),
-                        )
-                    })
-                    .child(
-                        ui::icon_button_enabled(
-                            "database-history-previous",
-                            Icon::ChevronUp,
-                            i18n_key::DATABASE_PREVIOUS_QUERY,
-                            self.interactive() && !document.history.is_empty(),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.recall(true, cx))),
-                    )
-                    .child(
-                        ui::icon_button_enabled(
-                            "database-history-next",
-                            Icon::ChevronDown,
-                            i18n_key::DATABASE_NEXT_QUERY,
-                            self.interactive() && document.history_index.is_some(),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.recall(false, cx))),
-                    )
-                    .child(self.render_transaction(cx))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(ui::colors().muted))
-                            .child(tr(i18n_key::DATABASE_ROW_LIMIT)),
-                    )
-                    .child(div().w(px(64.)).child(document.row_limit.clone())),
-            )
-            .child(document.sql_input.clone())
-            .child(self.render_results(cx))
-            .into_any_element()
-    }
-
     pub(super) fn render_results(&self, cx: &Context<Self>) -> AnyElement {
         let Some(result) = self.current_result() else {
             return div()
@@ -654,9 +335,24 @@ impl DatabaseView {
                 .justify_center()
                 .p_3()
                 .text_color(rgb(ui::colors().muted))
-                .child(tr(
-                    i18n_key::DATABASE_RUN_SQL_OR_SELECT_A_TABLE_TO_INSPECT_DATA,
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            ui::icon(Icon::Table)
+                                .size(px(28.))
+                                .text_color(rgb(ui::colors().faint)),
+                        )
+                        .child(tr(i18n_key::DATABASE_QUERY_READY))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .child(tr(i18n_key::DATABASE_QUERY_READY_HINT)),
+                        ),
+                )
                 .into_any_element();
         };
         let output = self.documents[self.active_document]
@@ -675,26 +371,30 @@ impl DatabaseView {
         if output.results.len() > 1 {
             results = results.child(
                 div()
-                    .id("database-results-tabs")
+                    .id("database-result-tabs")
+                    .h(px(30.))
                     .flex()
                     .flex_shrink_0()
                     .overflow_x_scroll()
                     .map(ui::preserve_scroll_axes)
-                    .gap_1()
-                    .p_1()
                     .children(output.results.iter().enumerate().map(|(index, _)| {
                         div()
                             .id(("database-result-tab", index))
-                            .px_2()
-                            .py_1()
+                            .h_full()
+                            .px_3()
+                            .flex()
+                            .items_center()
                             .flex_shrink_0()
                             .cursor_pointer()
                             .tab_index(0)
                             .when(
                                 index == self.documents[self.active_document].result_index,
-                                |item| item.bg(rgb(ui::colors().selected)),
+                                |d| {
+                                    d.bg(rgb(ui::colors().selected))
+                                        .text_color(rgb(ui::colors().accent))
+                                },
                             )
-                            .hover(|style| style.bg(rgb(ui::colors().hover)))
+                            .hover(|s| s.bg(rgb(ui::colors().hover)))
                             .child(rustterm::trf!(
                                 i18n_key::DATABASE_RESULT_NUMBER,
                                 number = index + 1
@@ -703,61 +403,89 @@ impl DatabaseView {
                                 cx.listener(move |this, _, _, cx| this.select_result(index, cx)),
                             )
                     }))
-                    .map(|content| ui::scrollable(content, None)),
+                    .map(|d| ui::scrollable(d, None)),
             );
         }
-        results = results.child(
-            div()
-                .px_2()
-                .py_1()
-                .flex_shrink_0()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(
+        let document = &self.documents[self.active_document];
+        let filtered = !document.result_filter.read(cx).value().is_empty();
+        results = results
+            .child(
+                div()
+                    .h(px(38.))
+                    .px_2()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui::colors().muted))
+                            .child(if result.columns.is_empty() {
+                                rustterm::trf!(
+                                    i18n_key::DATABASE_AFFECTED_STATUS,
+                                    rows = result.affected_rows,
+                                    elapsed = output.elapsed.as_millis()
+                                )
+                            } else {
+                                rustterm::trf!(
+                                    i18n_key::DATABASE_QUERY_STATUS,
+                                    rows = document.visible_rows.len(),
+                                    elapsed = output.elapsed.as_millis()
+                                )
+                            })
+                            .when(result.truncated, |d| {
+                                d.child(format!(" · {}", tr(i18n_key::DATABASE_RESULT_TRUNCATED)))
+                            }),
+                    )
+                    .child(
+                        ui::icon_button(
+                            "database-find-result",
+                            Icon::Search,
+                            i18n_key::DATABASE_FIND_IN_LOADED_ROWS,
+                        )
+                        .when(filtered, |b| b.text_color(rgb(ui::colors().accent)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.result_search_open = !this.result_search_open;
+                            if this.result_search_open {
+                                this.documents[this.active_document]
+                                    .result_filter
+                                    .read(cx)
+                                    .focus(window);
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            "database-copy",
+                            Icon::Copy,
+                            i18n_key::DATABASE_COPY_DISPLAYED_RESULT_AS_TSV,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_result(cx))),
+                    )
+                    .child(
+                        action(
+                            "database-export",
+                            i18n_key::DATABASE_EXPORT_CSV,
+                            self.interactive(),
+                            ButtonStyle::Neutral,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.export_csv(cx))),
+                    ),
+            )
+            .when(self.result_search_open || filtered, |d| {
+                d.child(
                     div()
-                        .flex_1()
-                        .min_w(px(120.))
-                        .child(self.documents[self.active_document].result_filter.clone()),
+                        .px_2()
+                        .pb_1()
+                        .flex_shrink_0()
+                        .child(document.result_filter.clone()),
                 )
-                .child(
-                    ui::icon_button(
-                        "database-copy",
-                        Icon::Copy,
-                        i18n_key::DATABASE_COPY_DISPLAYED_RESULT_AS_TSV,
-                    )
-                    .tab_index(0)
-                    .on_click(cx.listener(|this, _, _, cx| this.copy_result(cx))),
-                )
-                .child(
-                    action(
-                        "database-export",
-                        i18n_key::DATABASE_EXPORT_CSV,
-                        self.interactive(),
-                        ButtonStyle::Neutral,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.export_csv(cx))),
-                ),
-        );
-        results = results.child(
-            div()
-                .px_2()
-                .pb_1()
-                .flex_shrink_0()
-                .text_size(px(10.))
-                .text_color(rgb(ui::colors().muted))
-                .child(rustterm::trf!(
-                    i18n_key::DATABASE_SHOWN_TOTAL_LOADED_ROWS_AFFECTED_AFFECTED_ELAPSED_MS,
-                    shown = self.documents[self.active_document].visible_rows.len(),
-                    total = result.rows.len(),
-                    affected = result.affected_rows,
-                    elapsed = output.elapsed.as_millis()
-                ))
-                .when(result.truncated, |line| {
-                    line.child(format!(" · {}", tr(i18n_key::DATABASE_RESULT_TRUNCATED)))
-                }),
-        );
+            });
         if result.columns.is_empty() {
             return results
                 .child(

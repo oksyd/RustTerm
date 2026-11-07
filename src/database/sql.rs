@@ -159,6 +159,10 @@ struct QuoteRules {
 
 fn rules(engine: SqlEngine) -> &'static [QuoteRules] {
     match engine {
+        SqlEngine::ClickHouse => &[QuoteRules {
+            backslash_strings: true,
+            double_quoted_identifiers: true,
+        }],
         SqlEngine::Mysql => &[
             QuoteRules {
                 backslash_strings: true,
@@ -212,6 +216,12 @@ fn lex_with_rules(text: &str, engine: SqlEngine, rules: QuoteRules) -> Vec<Token
         } else if bytes[i..].starts_with(b"--")
             && (engine != SqlEngine::Mysql || bytes.get(i + 2).is_none_or(u8::is_ascii_whitespace))
             || (engine == SqlEngine::Mysql && ch == '#')
+            || (engine == SqlEngine::ClickHouse
+                && (bytes[i..].starts_with(b"//")
+                    || ch == '#'
+                        && bytes
+                            .get(i + 1)
+                            .is_some_and(|next| *next == b'!' || next.is_ascii_whitespace())))
         {
             i = text[i..]
                 .find('\n')
@@ -221,7 +231,9 @@ fn lex_with_rules(text: &str, engine: SqlEngine, rules: QuoteRules) -> Vec<Token
             i += 2;
             let mut depth = 1;
             while i < bytes.len() && depth > 0 {
-                if engine == SqlEngine::Postgres && bytes[i..].starts_with(b"/*") {
+                if matches!(engine, SqlEngine::Postgres | SqlEngine::ClickHouse)
+                    && bytes[i..].starts_with(b"/*")
+                {
                     depth += 1;
                     i += 2;
                 } else if bytes[i..].starts_with(b"*/") {
@@ -233,7 +245,7 @@ fn lex_with_rules(text: &str, engine: SqlEngine, rules: QuoteRules) -> Vec<Token
             }
             complete = depth == 0;
             kind = Kind::Comment;
-        } else if engine == SqlEngine::Postgres
+        } else if matches!(engine, SqlEngine::Postgres | SqlEngine::ClickHouse)
             && ch == '$'
             && let Some(end) = dollar_tag(&text[i..])
         {
@@ -252,14 +264,17 @@ fn lex_with_rules(text: &str, engine: SqlEngine, rules: QuoteRules) -> Vec<Token
         {
             let close = if ch == '[' { ']' } else { ch };
             let string = ch == '\'' || (ch == '"' && !rules.double_quoted_identifiers);
-            let escaped = string
-                && (rules.backslash_strings
-                    || (engine == SqlEngine::Postgres
-                        && ch == '\''
-                        && start > 0
-                        && matches!(bytes[start - 1], b'e' | b'E')
-                        && (start < 2
-                            || !word_continue(text[..start - 1].chars().next_back().unwrap()))));
+            let escaped = engine == SqlEngine::ClickHouse
+                || string
+                    && (rules.backslash_strings
+                        || (engine == SqlEngine::Postgres
+                            && ch == '\''
+                            && start > 0
+                            && matches!(bytes[start - 1], b'e' | b'E')
+                            && (start < 2
+                                || !word_continue(
+                                    text[..start - 1].chars().next_back().unwrap(),
+                                ))));
             i += ch.len_utf8();
             complete = false;
             while i < bytes.len() {
@@ -439,7 +454,7 @@ fn statements_with_rules(
                     value.to_ascii_uppercase().as_str(),
                     "TRIGGER" | "PROCEDURE" | "FUNCTION" | "EVENT"
                 )
-                && engine != SqlEngine::Postgres
+                && matches!(engine, SqlEngine::Mysql | SqlEngine::Sqlite)
             {
                 compound = true;
             }
@@ -545,19 +560,11 @@ mod tests {
     fn session_dependent_quoting_requires_explicit_execution_boundaries() {
         let sql = "SELECT 'a\\'; SELECT 2; -- '; SELECT 3;";
         for engine in [SqlEngine::Mysql, SqlEngine::Postgres] {
-            assert!(
-                statement_range(sql, 0, engine)
-                    .unwrap_err()
-                    .starts_with("SQL quoting depends")
-            );
+            assert_eq!(statement_range(sql, 0, engine).unwrap_err(), i18n_key::DATABASE_SQL_QUOTING_DEPENDS_ON_SESSION_SETTINGS_SELECT_THE_STATEMENT_EXPLICITLY);
             assert!(statements(sql, engine).is_err());
         }
         let ansi = "SELECT \"a\\\"; SELECT 2; -- \"; SELECT 3;";
-        assert!(
-            statement_range(ansi, 0, SqlEngine::Mysql)
-                .unwrap_err()
-                .starts_with("SQL quoting depends")
-        );
+        assert_eq!(statement_range(ansi, 0, SqlEngine::Mysql).unwrap_err(), i18n_key::DATABASE_SQL_QUOTING_DEPENDS_ON_SESSION_SETTINGS_SELECT_THE_STATEMENT_EXPLICITLY);
         // A later ambiguous statement does not disable an unambiguous current one.
         let prefixed = format!("SELECT 0; {sql}");
         assert_eq!(

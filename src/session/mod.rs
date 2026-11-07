@@ -6,6 +6,8 @@ use crate::i18n::messages as i18n_key;
 
 mod actor;
 mod budget;
+mod container;
+pub(crate) mod exec;
 #[cfg(target_os = "linux")]
 mod local;
 #[cfg(windows)]
@@ -262,6 +264,28 @@ pub struct Session {
     shared: Arc<Shared>,
 }
 impl Session {
+    /// An ephemeral container shell; it shares SSH authentication, not terminal input.
+    pub fn spawn_container(
+        client: crate::docker::DockerClient,
+        id: String,
+        shell: crate::docker::Shell,
+        columns: u16,
+        rows: u16,
+        history: usize,
+    ) -> Result<Self> {
+        let (handle, terminal, commands) = Self::create(columns, rows, history)?;
+        runtime()?.spawn(container::run(
+            client,
+            id,
+            shell,
+            terminal,
+            commands,
+            handle.shared.clone(),
+            columns,
+            rows,
+        ));
+        Ok(handle)
+    }
     fn create(
         columns: u16,
         rows: u16,
@@ -546,6 +570,16 @@ impl Session {
         }
         self.shared
             .resources
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+    pub fn docker(&self) -> Option<crate::docker::DockerClient> {
+        if self.shared.io_stop.is_cancelled() || self.state() != SessionState::Connected {
+            return None;
+        }
+        self.shared
+            .docker
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()

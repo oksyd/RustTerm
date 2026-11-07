@@ -39,6 +39,18 @@ fn main() {
     if let Err(error) = build() {
         panic!("i18n catalog validation failed: {error}");
     }
+    println!("cargo:rerun-if-changed=assets/windows.rc");
+    println!("cargo:rerun-if-changed=assets/brand/rustterm.ico");
+    // GPUI loads icon resource 1 for the window class. Link it directly into
+    // the executable so Explorer and shortcuts use the same application icon.
+    // The existing GPUI feature embeds the Windows manifest separately.
+    embed_resource::compile_for(
+        "assets/windows.rc",
+        ["rustterm"],
+        embed_resource::ParamsIncludeDirs(["assets"]),
+    )
+    .manifest_required()
+    .expect("Windows application icon resource compilation failed");
 }
 
 fn build() -> Result<()> {

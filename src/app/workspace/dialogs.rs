@@ -94,6 +94,7 @@ impl Workspace {
                         ProfileKind::Redis => tr(i18n_key::REDIS_ADD_REDIS_CONNECTION),
                         ProfileKind::Elasticsearch => tr(i18n_key::ES_ADD_CONNECTION),
                         ProfileKind::Mysql => tr(i18n_key::DATABASE_ADD_MYSQL_CONNECTION),
+                        ProfileKind::ClickHouse => tr(i18n_key::DATABASE_ADD_CLICKHOUSE_CONNECTION),
                         ProfileKind::Postgres => tr(i18n_key::DATABASE_ADD_POSTGRESQL_CONNECTION),
                         ProfileKind::Sqlite => tr(i18n_key::DATABASE_ADD_SQLITE_DATABASE),
                         ProfileKind::Rdp => tr(i18n_key::RDP_ADD_RDP_CONNECTION),
@@ -139,7 +140,7 @@ impl Workspace {
                     }
                     Connection::Elasticsearch(s) => format!("Elasticsearch · {}", s.endpoint),
                     Connection::Rdp(s) => format!("RDP · {}@{}:{}", s.username, s.host, s.port),
-                    Connection::Mysql(s) | Connection::Postgres(s) => format!(
+                    Connection::Mysql(s) | Connection::Postgres(s) | Connection::ClickHouse(s) => format!(
                         "{} · {}@{}:{} / {}",
                         profile.connection.sql().unwrap().0.label(),
                         s.username,
@@ -163,7 +164,7 @@ impl Workspace {
                         .child(tr(match profile.connection {
                             Connection::Elasticsearch(_) => i18n_key::ES_AUTH_HELP,
                             Connection::Redis(_) => i18n_key::REDIS_AUTHENTICATION_IS_SKIPPED_ONLY_WHEN_BOTH_USERNAME_AND_PASSWORD_ARE,
-                            Connection::Mysql(_) | Connection::Postgres(_) => i18n_key::DATABASE_ENTER_THE_DATABASE_PASSWORD_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND,
+                            Connection::Mysql(_) | Connection::Postgres(_) | Connection::ClickHouse(_) => i18n_key::DATABASE_ENTER_THE_DATABASE_PASSWORD_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND,
                             Connection::Rdp(_) => i18n_key::RDP_RDP_USES_TLS_AND_NETWORK_LEVEL_AUTHENTICATION_NLA_CREDENTIALS_ARE,
                             _ => i18n_key::WORKSPACE_LEAVE_BLANK_FOR_AN_UNENCRYPTED_PRIVATE_KEY_AUTHENTICATION_CREDENTIALS_ARE,
                         }))
@@ -262,10 +263,12 @@ impl Workspace {
             }
         };
         let settings = matches!(modal, Modal::Settings(_));
+        let rdp_profile =
+            matches!(modal, Modal::Profile(form) if form.read(cx).kind == ProfileKind::Rdp);
         let settings_dirty = matches!(modal, Modal::Settings(form) if form.read(cx).is_dirty(cx));
         let save_enabled =
             !settings || ((settings_dirty || self.save_failed) && !self.modal_saving);
-        let body = if settings {
+        let body = if settings || rdp_profile {
             div()
                 .size_full()
                 .min_w_0()
@@ -288,20 +291,18 @@ impl Workspace {
                 .map(|content| ui::scrollable(content, Some(self.modal_scroll.clone())))
                 .into_any_element()
         };
-        let mut card = div()
+        let mut card = ui::dialog_surface()
             .w(px(if settings { 900. } else { 700. }))
             .when(settings, |card| card.h(px(640.)).overflow_hidden())
+            .when(rdp_profile, |card| card.h(px(620.)))
             .max_w(relative(0.95))
             .max_h(relative(0.92))
             .flex()
             .flex_col()
             .when(!settings, |card| card.p_4().gap_4())
-            .bg(rgb(ui::colors().surface))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(4.))
             .child(
                 div()
+                    .flex_shrink_0()
                     .when(settings, |header| {
                         header
                             .flex_shrink_0()
@@ -310,24 +311,36 @@ impl Workspace {
                             .border_b_1()
                             .border_color(rgb(ui::colors().border))
                     })
-                    .text_size(px(15.))
+                    .text_size(px(ui::metrics::HEADING))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(title),
             )
             .child(body);
         if let Some(error) = &self.error {
             card = card.child(
-                div()
-                    .when(settings, |error| error.flex_shrink_0().px_4().py_2())
-                    .text_color(rgb(ui::colors().danger))
-                    .child(error.render()),
+                ui::feedback(error.render(), true)
+                    .id("modal-error")
+                    .max_h(px(96.))
+                    .when(settings, |error| error.mx_4().mb_2())
+                    .overflow_y_scroll()
+                    .map(ui::preserve_scroll_axes)
+                    .map(|content| ui::scrollable(content, None)),
             );
         }
         if let Some(test) = &self.profile_test {
-            card = card.child(div().text_color(rgb(test.color())).child(test.message()));
+            card = card.child(
+                ui::feedback(test.message(), false)
+                    .id("profile-test-result")
+                    .max_h(px(96.))
+                    .text_color(rgb(test.color()))
+                    .overflow_y_scroll()
+                    .map(ui::preserve_scroll_axes)
+                    .map(|content| ui::scrollable(content, None)),
+            );
         }
         card = card.child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .justify_end()
                 .gap_3()

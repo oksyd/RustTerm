@@ -1,6 +1,5 @@
 use super::{Tab, Workspace};
 use crate::app::database_view::{DatabaseLaunch, DatabaseView};
-use crate::app::diagnostics;
 use crate::app::elasticsearch_view::{ElasticsearchLaunch, ElasticsearchView};
 use crate::app::file_transfer::{FileTransferEvent, FileTransferView};
 use crate::app::layout::{Axis, PaneNode};
@@ -42,6 +41,7 @@ impl Workspace {
         {
             let current = match &mut profile.connection {
                 Connection::Mysql(config) if engine == SqlEngine::Mysql => Some(config),
+                Connection::ClickHouse(config) if engine == SqlEngine::ClickHouse => Some(config),
                 Connection::Postgres(config) if engine == SqlEngine::Postgres => Some(config),
                 _ => None,
             };
@@ -178,7 +178,10 @@ impl Workspace {
                     | (Connection::Elasticsearch(_), Some(Pane::Elasticsearch(_)))
                     | (Connection::Rdp(_), Some(Pane::Rdp(_)))
                     | (
-                        Connection::Mysql(_) | Connection::Postgres(_) | Connection::Sqlite(_),
+                        Connection::Mysql(_)
+                            | Connection::Postgres(_)
+                            | Connection::ClickHouse(_)
+                            | Connection::Sqlite(_),
                         Some(Pane::Database(_))
                     )
             );
@@ -224,6 +227,7 @@ impl Workspace {
             | Connection::Rdp(_)
             | Connection::Mysql(_)
             | Connection::Postgres(_)
+            | Connection::ClickHouse(_)
             | Connection::Sqlite(_) => profile.name.clone(),
             Connection::Ssh(s) => {
                 format!("{} · {}@{}:{}", profile.name, s.username, s.host, s.port)
@@ -414,16 +418,8 @@ impl Workspace {
             }
             _ => None,
         });
-        let view = cx.new(|cx| {
-            DatabaseView::new(
-                id,
-                profile.name.clone(),
-                launch,
-                self.window_state.clone(),
-                window,
-                cx,
-            )
-        });
+        let view =
+            cx.new(|cx| DatabaseView::new(id, launch, self.window_state.clone(), window, cx));
         if let Some(draft) = draft {
             view.update(cx, |view, cx| view.restore_draft(draft, cx));
         }
@@ -630,7 +626,7 @@ impl Workspace {
         self.focused = id;
         self.tabs[destination].focused = id;
         self.set_active(destination, window, cx);
-        diagnostics::record(&self.path, "session-created", id);
+        self.window_state.record("session-created", id);
         self.capture_restored_pane(id, window, cx);
     }
     pub(super) fn local_session(&self, config: &LocalConfig) -> anyhow::Result<Session> {
@@ -712,8 +708,12 @@ impl Workspace {
             PaneEvent::Zoom => self.toggle_zoom(window, cx),
             PaneEvent::Files => self.toggle_tool(SessionTool::Files, window, cx),
             PaneEvent::Commands => self.toggle_tool(SessionTool::Commands, window, cx),
+            PaneEvent::Docker => self.toggle_tool(SessionTool::Docker, window, cx),
             PaneEvent::Resources => self.toggle_tool(SessionTool::Resources, window, cx),
             PaneEvent::Reconnect(id) => {
+                if self.reconnect_container(*id, cx) {
+                    return;
+                }
                 self.reset_reconnect(*id);
                 if let Some(profile) = self.profile_for_pane(*id, cx) {
                     self.open_profile(profile, Some(*id), window, cx);
@@ -722,7 +722,9 @@ impl Workspace {
             PaneEvent::DatabaseChanged { index, database } => {
                 if let Some(mut profile) = self.profile_for_pane(*index, cx) {
                     let config = match &mut profile.connection {
-                        Connection::Mysql(config) | Connection::Postgres(config) => config,
+                        Connection::Mysql(config)
+                        | Connection::Postgres(config)
+                        | Connection::ClickHouse(config) => config,
                         _ => return,
                     };
                     config.database = database.clone();
@@ -742,7 +744,7 @@ impl Workspace {
                 for (id, pane) in &self.panes {
                     let state = pane.diagnostic_state(cx);
                     if self.diagnostic_states.insert(*id, state) != Some(state) {
-                        diagnostics::record(&self.path, state, *id);
+                        self.window_state.record(state, *id);
                     }
                 }
             }
@@ -785,18 +787,28 @@ impl Workspace {
             return;
         };
         self.confirming_close = true;
+        let contains_container = ids.iter().any(|id| matches!(self.panes.get(id), Some(Pane::Terminal(view)) if view.read(cx).is_container()));
+        let mut close_detail =
+            tr(i18n_key::REDIS_CONNECTIONS_AND_TRANSFERS_WILL_CLOSE_UNSAVED_DATA_EDITS_AND_PANE)
+                .to_owned();
+        if contains_container {
+            close_detail.push_str("\n\n");
+            close_detail.push_str(tr(i18n_key::DOCKER_CONSOLE_CLOSE_HINT));
+        }
         let response = window.prompt(
             PromptLevel::Warning,
             &rustterm::trf!(
                 i18n_key::WORKSPACE_CLOSE_PANES_CONFIRMATION,
                 count = ids.len()
             ),
-            Some(tr(
-                i18n_key::REDIS_CONNECTIONS_AND_TRANSFERS_WILL_CLOSE_UNSAVED_DATA_EDITS_AND_PANE,
-            )),
+            Some(&close_detail),
             &[
                 tr(i18n_key::COMMON_CANCEL),
-                tr(i18n_key::WORKSPACE_END_AND_CLOSE),
+                tr(if contains_container {
+                    i18n_key::DOCKER_DISCONNECT_CLOSE
+                } else {
+                    i18n_key::WORKSPACE_END_AND_CLOSE
+                }),
             ],
             cx,
         );
@@ -832,7 +844,7 @@ impl Workspace {
             self.pane_profiles.remove(id);
             self.session_names.remove(*id);
             self.diagnostic_states.remove(id);
-            diagnostics::record(&self.path, "session-closed", *id);
+            self.window_state.record("session-closed", *id);
         }
         self.tabs = std::mem::take(&mut self.tabs)
             .into_iter()

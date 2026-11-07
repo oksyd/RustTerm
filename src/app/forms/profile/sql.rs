@@ -9,15 +9,6 @@ use rustterm::{
     i18n::tr,
 };
 
-pub(super) const FIELDS: &[&str] = &[
-    i18n_key::WORKSPACE_HOST,
-    i18n_key::WORKSPACE_PORT,
-    i18n_key::DATABASE_DATABASE_USERNAME,
-    i18n_key::DATABASE_DATABASE_NAME,
-    i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
-    i18n_key::DATABASE_QUERY_TIMEOUT_SECONDS,
-];
-
 impl ProfileForm {
     pub(super) fn sql_config(
         &self,
@@ -64,10 +55,20 @@ impl ProfileForm {
 
     pub(super) fn sql_body(&self, cx: &mut Context<Self>) -> AnyElement {
         column()
-            .child(self.tunnel_picker(cx))
-            .child(self.fields.selected_rows(FIELDS))
+            .child(self.host_port())
+            .child(
+                self.fields
+                    .selected_rows(&[i18n_key::DATABASE_DATABASE_USERNAME]),
+            )
+            .child(self.credential_editor(cx))
+            .child(
+                self.fields
+                    .selected_rows(&[i18n_key::DATABASE_DATABASE_NAME]),
+            )
             .child(hint(if self.kind == ProfileKind::Mysql {
                 i18n_key::DATABASE_LEAVE_THE_DATABASE_NAME_BLANK_TO_CHOOSE_A_DATABASE_AFTER
+            } else if self.kind == ProfileKind::ClickHouse {
+                i18n_key::DATABASE_CLICKHOUSE_CONNECTION_HINT
             } else {
                 i18n_key::DATABASE_POSTGRESQL_OPENS_ONE_DATABASE_PER_CONNECTION_LEAVE_BLANK_TO_USE
             }))
@@ -77,7 +78,7 @@ impl ProfileForm {
                     i18n_key::REDIS_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND_HOSTNAME,
                 ))
             })
-            .child(self.credential_editor(cx))
+            .child(self.network_options(cx))
             .into_any_element()
     }
 
@@ -117,6 +118,15 @@ impl ProfileForm {
                 .child(tr(i18n_key::REDIS_USE_TLS))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.database_tls = !this.database_tls;
+                    if this.kind == ProfileKind::ClickHouse {
+                        let old = if this.database_tls { "8123" } else { "8443" };
+                        if this.fields.get(i18n_key::WORKSPACE_PORT, cx) == old {
+                            let port = if this.database_tls { "8443" } else { "8123" };
+                            this.fields
+                                .field(i18n_key::WORKSPACE_PORT)
+                                .update(cx, |field, cx| field.set_value(port, cx));
+                        }
+                    }
                     cx.notify();
                 })),
         )
@@ -134,6 +144,7 @@ fn preserve_sql_credential_reference(
         .and_then(|id| profiles.iter().find(|profile| profile.id == id))
         .and_then(|profile| match (&profile.connection, engine) {
             (Connection::Mysql(config), SqlEngine::Mysql)
+            | (Connection::ClickHouse(config), SqlEngine::ClickHouse)
             | (Connection::Postgres(config), SqlEngine::Postgres) => Some(config),
             _ => None,
         });

@@ -112,19 +112,11 @@ impl Render for RedisView {
             });
         if let Some(error) = &self.error {
             panel = panel.child(
-                div()
+                ui::feedback(error.render(), true)
                     .id("redis-error")
-                    .max_h(px(56.))
+                    .max_h(px(80.))
                     .overflow_y_scroll()
                     .map(ui::preserve_scroll_axes)
-                    .px(px(10.))
-                    .py(px(6.))
-                    .flex_shrink_0()
-                    .border_t_1()
-                    .border_color(rgb(ui::colors().border))
-                    .text_size(px(11.))
-                    .text_color(rgb(ui::colors().danger))
-                    .child(error.render())
                     .map(|content| ui::scrollable(content, None)),
             );
         } else if let Some(busy) = self.busy {

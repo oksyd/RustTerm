@@ -51,7 +51,7 @@ fn clipboard_text(item: Option<ClipboardItem>) -> ClipboardRead {
 }
 
 /// Returns whether a local paste is forced, or None for an ordinary remote key.
-fn paste_shortcut(key: &str, mods: Modifiers, clipboard: bool) -> Option<bool> {
+pub(super) fn paste_shortcut(key: &str, mods: Modifiers, clipboard: bool) -> Option<bool> {
     if mods.alt || mods.platform {
         return None;
     }
@@ -64,7 +64,7 @@ fn paste_shortcut(key: &str, mods: Modifiers, clipboard: bool) -> Option<bool> {
     }
 }
 
-fn modifier_changes(
+pub(super) fn modifier_changes(
     previous: Modifiers,
     current: Modifiers,
     remote_keys: &BTreeSet<u16>,
@@ -80,7 +80,7 @@ fn modifier_changes(
     })
 }
 
-fn wheel_deltas(delta: ScrollDelta, remainder: &mut (f32, f32)) -> [(bool, i16); 2] {
+pub(super) fn wheel_deltas(delta: ScrollDelta, remainder: &mut (f32, f32)) -> [(bool, i16); 2] {
     // GPUI's Linux backend emits three lines per detent; Windows expects 120 units.
     let (horizontal, vertical) = match delta {
         ScrollDelta::Lines(delta) => (-delta.x * 40., delta.y * 40.),
@@ -554,7 +554,7 @@ impl RdpView {
         }
     }
 
-    fn start_clipboard_action(
+    pub(super) fn start_clipboard_action(
         &mut self,
         paste: bool,
         force_local: bool,
@@ -602,6 +602,7 @@ impl RdpView {
             .background_executor()
             .spawn(async move { file_clipboard::read(read_cancel, files_enabled) });
         self.clipboard.feedback = Some(Feedback::ReadingFiles);
+        let application = self.applications.active;
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = pending.await;
             let _ = cx.update(|window, cx| {
@@ -611,7 +612,8 @@ impl RdpView {
                         || !this.input_enabled()
                         || !this.preedit.is_empty()
                         || !window.is_window_active()
-                        || !this.focus.is_focused(window)
+                        || this.applications.active != application
+                        || (application.is_none() && !this.focus.is_focused(window))
                     {
                         return;
                     }
@@ -821,7 +823,7 @@ impl RdpView {
         }
     }
 
-    fn begin_clipboard(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+    pub(super) fn begin_clipboard(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         if self.window_state.is_locked() {
             return None;
         }
@@ -874,6 +876,8 @@ impl RdpView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let application_active =
+            self.config.remote_app.is_some() && self.applications.active.is_some();
         let explicit = self.clipboard.awaiting_copy_offer();
         let Some(eligible) = self.clipboard.remote_offer(revision) else {
             return;
@@ -887,12 +891,12 @@ impl RdpView {
         if self.window_state.is_locked()
             || !eligible
             || !self.config.clipboard
-            || !self.visible
+            || (!self.visible && !application_active)
             || self.closed
             || self.state != State::Connected
             || self.menu_open
             || self.window_state.prompts.is_busy()
-            || !self.focus.is_focused(window)
+            || (!self.focus.is_focused(window) && !application_active)
         {
             self.clipboard.cancel_export();
             return;
@@ -900,7 +904,7 @@ impl RdpView {
         // Wayland may temporarily expose no text when our window is inactive.
         // In that case the retained native observer protects ownership instead.
         if self.clipboard.has_export()
-            && (window.is_window_active() || is_x11())
+            && ((window.is_window_active() || application_active) || is_x11())
             && self
                 .clipboard
                 .local_changed_since_copy(&self.read_clipboard(cx))
@@ -908,14 +912,14 @@ impl RdpView {
             self.clipboard.cancel_export();
             return;
         }
-        if !self.clipboard.has_export() && window.is_window_active() {
+        if !self.clipboard.has_export() && (window.is_window_active() || application_active) {
             let local = self.read_clipboard(cx);
             self.clipboard.capture_export(local);
         }
         if self.config.clipboard && self.clipboard.has_export() {
             self.file_export_snapshot = if explicit {
                 snapshot
-            } else if window.is_window_active() {
+            } else if window.is_window_active() || application_active {
                 Some(
                     cx.background_executor()
                         .spawn(async { file_clipboard::export::Snapshot::capture() }),
@@ -931,15 +935,17 @@ impl RdpView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let application_active =
+            self.config.remote_app.is_some() && self.applications.active.is_some();
         if self.window_state.is_locked()
             || !self.config.clipboard
-            || !self.visible
+            || (!self.visible && !application_active)
             || self.closed
             || self.state != State::Connected
             || self.menu_open
             || self.window_state.prompts.is_busy()
-            || !self.focus.is_focused(window)
-            || (!window.is_window_active() && !is_x11())
+            || (!application_active
+                && (!self.focus.is_focused(window) || (!window.is_window_active() && !is_x11())))
             || !self.clipboard.export_ready()
         {
             return false;
@@ -1214,7 +1220,7 @@ impl EntityInputHandler for RdpView {
     }
 }
 
-fn utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
+pub(super) fn utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
     fn offset(text: &str, target: usize) -> usize {
         let mut units = 0;
         for (byte, ch) in text.char_indices() {
@@ -1229,7 +1235,7 @@ fn utf16_range(text: &str, range: Range<usize>) -> Range<usize> {
     start..offset(text, range.end).max(start)
 }
 
-fn key_scancode(key: &Keystroke, physical: Modifiers) -> Option<(u16, Modifiers)> {
+pub(super) fn key_scancode(key: &Keystroke, physical: Modifiers) -> Option<(u16, Modifiers)> {
     if alt_gr_text(key).is_some() {
         return None;
     }

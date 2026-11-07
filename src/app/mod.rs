@@ -3,6 +3,7 @@ mod auth_prompt;
 mod command_view;
 mod database_view;
 mod diagnostics;
+mod docker_view;
 mod elasticsearch_view;
 mod file_transfer;
 mod forms;
@@ -13,6 +14,7 @@ mod pane;
 mod rdp_view;
 mod redis_view;
 mod resize;
+mod resource_monitor;
 mod resource_view;
 mod terminal_view;
 mod text_input;
@@ -27,7 +29,7 @@ use anyhow::{Context as _, Result, bail};
 use gpui::{
     App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size,
 };
-use rustterm::config::{AppConfig, ConfigLock, Connection, LocalConfig, Profile};
+use rustterm::config::{AppPaths, ConfigLock, Connection, LocalConfig, Profile};
 use rustterm::i18n::{set_language, tr};
 use rustterm::trf;
 use std::{cell::RefCell, path::PathBuf, rc::Rc};
@@ -128,12 +130,10 @@ pub(crate) fn run() -> Result<()> {
         return Ok(());
     };
     let restore = options.should_restore_workspace();
-    let directory = options
-        .config_dir
-        .map(Ok)
-        .unwrap_or_else(rustterm::config::config_dir)?;
-    let lock = ConfigLock::acquire(&directory)?;
-    let mut config = AppConfig::load(directory.join("config.toml"))?;
+    let paths = AppPaths::discover(options.config_dir.clone())?;
+    let restart_directory = options.config_dir.as_ref().map(|_| paths.config.clone());
+    let lock = ConfigLock::acquire(&paths.config)?;
+    let mut config = paths.load_config()?;
     set_language(config.settings.language);
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
@@ -149,8 +149,8 @@ pub(crate) fn run() -> Result<()> {
         config.settings.font_size = size;
     }
     config.validate()?;
-    if !directory.join("config.toml").exists() {
-        config.save(directory.join("config.toml"))?;
+    if !paths.config.join("config.toml").exists() {
+        paths.save_config(&config)?;
     }
     let initial = if let Some(shell) = options.shell {
         Profile::local(
@@ -179,16 +179,18 @@ pub(crate) fn run() -> Result<()> {
         profile
     };
     let restart = Rc::new(RefCell::new(None::<PathBuf>));
-    let restart_directory = directory.clone();
     let startup = Startup {
         profile: initial,
         panes: options.panes,
         restore,
         restart: restart.clone(),
     };
-    diagnostics::record(&directory, "application-start", 0);
+    // A log failure must not prevent users from accessing their connections.
+    let _ = paths.prepare_logs();
+    let logs = paths.logs();
+    diagnostics::record(&logs, "application-start", 0);
     diagnostics::record(
-        &directory,
+        &logs,
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
             "backend-wayland"
         } else {
@@ -202,6 +204,7 @@ pub(crate) fn run() -> Result<()> {
         .with_assets(ui::Assets)
         .run(move |cx: &mut App| {
             ui::set_theme(config.settings.app_theme, cx);
+            ui::prompt::install(cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit()
@@ -224,15 +227,15 @@ pub(crate) fn run() -> Result<()> {
                     window_background: gpui::WindowBackgroundAppearance::Transparent,
                     titlebar: Some(TitlebarOptions {
                         title: Some("RustTerm".into()),
+                        // Windows uses this flag instead of window_decorations.
+                        appears_transparent: cfg!(target_os = "windows"),
                         ..Default::default()
                     }),
                     window_min_size: Some(size(px(700.), px(460.))),
                     ..Default::default()
                 },
                 |window, cx| {
-                    cx.new(|cx| {
-                        workspace::Workspace::new(config, directory, lock, startup, window, cx)
-                    })
+                    cx.new(|cx| workspace::Workspace::new(config, paths, lock, startup, window, cx))
                 },
             );
             if let Err(error) = result {
@@ -248,22 +251,18 @@ pub(crate) fn run() -> Result<()> {
         ));
     }
     if let Some(executable) = restart.borrow_mut().take() {
+        let mut command = std::process::Command::new(executable);
+        if let Some(directory) = restart_directory {
+            command.arg("--config-dir").arg(directory);
+        }
         #[cfg(windows)]
         {
-            std::process::Command::new(executable)
-                .arg("--config-dir")
-                .arg(restart_directory)
-                .spawn()
-                .context("Could not restart RustTerm")?;
+            command.spawn().context("Could not restart RustTerm")?;
         }
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            return Err(std::process::Command::new(executable)
-                .arg("--config-dir")
-                .arg(restart_directory)
-                .exec())
-            .context("Could not restart RustTerm");
+            return Err(command.exec()).context("Could not restart RustTerm");
         }
     }
     Ok(())

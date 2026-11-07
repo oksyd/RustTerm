@@ -57,6 +57,7 @@ impl Document {
         let row_limit = cx.new(|cx| {
             let mut input = TextInput::new(i18n_key::DATABASE_RESULT_ROW_LIMIT, false, cx);
             input.set_value(DEFAULT_ROW_LIMIT.to_string(), cx);
+            input.set_compact(true, cx);
             input
         });
         let result_filter =
@@ -241,6 +242,7 @@ impl DatabaseView {
         if !self.interactive() {
             return;
         }
+        self.results_only = false;
         let id = self.next_document_id;
         self.next_document_id += 1;
         let document = Document::new(
@@ -251,6 +253,7 @@ impl DatabaseView {
         );
         self.documents.push(document);
         self.select_document(self.documents.len() - 1, window, cx);
+        self.update_editor_height(cx);
         self.update_completions(cx);
     }
 
@@ -263,10 +266,14 @@ impl DatabaseView {
         if !self.interactive() {
             return;
         }
-        let Some(document) = self.documents.get(index) else {
+        if index >= self.documents.len() {
             return;
-        };
+        }
+        self.pause_monitor();
+        let document = &self.documents[index];
         self.active_document = index;
+        self.page = WorkspacePage::Document;
+        self.object_menu = None;
         self.selected_table = document.table.as_ref().map(|state| state.info.clone());
         self.resize_drag = None;
         self.success_notice = None;
@@ -275,7 +282,7 @@ impl DatabaseView {
         if self.viewport_size.0 < BROWSER_MIN_WIDTH {
             self.browser_open = false;
         }
-        if !document.focus(window, cx) {
+        if self.results_only || !document.focus(window, cx) {
             self.focus.focus(window);
         }
         let unloaded = document
@@ -354,7 +361,7 @@ impl DatabaseView {
         if !self.interactive() || self.running_document == Some(document.id) {
             return;
         }
-        let closing_active = index == self.active_document;
+        let closing_active = index == self.active_document && self.page == WorkspacePage::Document;
         self.documents.remove(index);
         if self.documents.is_empty() {
             let id = self.next_document_id;
@@ -371,6 +378,7 @@ impl DatabaseView {
         } else {
             self.active_document = self.active_document.min(self.documents.len() - 1);
         }
+        self.update_editor_height(cx);
         self.update_completions(cx);
         if closing_active {
             self.select_document(self.active_document, window, cx);
@@ -417,13 +425,15 @@ impl DatabaseView {
     pub(super) fn render_documents(&self, cx: &Context<Self>) -> AnyElement {
         div()
             .id("database-documents")
-            .h(px(34.))
+            .h(px(38.))
             .flex_shrink_0()
             .flex()
             .items_center()
             .bg(rgb(ui::colors().chrome))
             .border_b_1()
             .border_color(rgb(ui::colors().border))
+            .child(self.render_overview_tab(cx))
+            .children(self.render_sessions_tab(cx))
             .child(
                 div()
                     .id("database-document-scroll")
@@ -435,6 +445,25 @@ impl DatabaseView {
                     .flex()
                     .children(self.documents.iter().enumerate().map(|(index, document)| {
                         let id = document.id;
+                        let qualified = document
+                            .table
+                            .as_ref()
+                            .map(|table| format!("{}.{}", table.info.schema, table.info.name));
+                        let same_name = document.table.as_ref().is_some_and(|table| {
+                            self.documents.iter().any(|other| {
+                                other.id != id
+                                    && other
+                                        .table
+                                        .as_ref()
+                                        .is_some_and(|other| other.info.name == table.info.name)
+                            })
+                        });
+                        let title = if same_name {
+                            qualified.clone().unwrap()
+                        } else {
+                            document.title.render()
+                        };
+                        let hint = qualified.unwrap_or_else(|| title.clone());
                         div()
                             .id(("database-document", id))
                             .tab_index(0)
@@ -448,17 +477,22 @@ impl DatabaseView {
                             .border_r_1()
                             .border_color(rgb(ui::colors().border))
                             .cursor_pointer()
-                            .when(index == self.active_document, |d| {
-                                d.bg(rgb(ui::colors().bg))
-                                    .text_color(rgb(ui::colors().accent))
-                            })
+                            .when(
+                                index == self.active_document
+                                    && self.page == WorkspacePage::Document,
+                                |d| {
+                                    d.bg(rgb(ui::colors().bg))
+                                        .text_color(rgb(ui::colors().accent))
+                                },
+                            )
                             .hover(|s| s.bg(rgb(ui::colors().hover)))
-                            .child(ui::icon(if document.table.is_some() {
-                                ui::Icon::Table
-                            } else {
-                                ui::Icon::Terminal
+                            .child(ui::icon(match document.table.as_ref() {
+                                Some(table) if dialect::is_view(&table.info) => ui::Icon::View,
+                                Some(_) => ui::Icon::Table,
+                                None => ui::Icon::Terminal,
                             }))
-                            .child(div().truncate().child(document.title.render()))
+                            .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(hint.clone())).into())
+                            .child(div().truncate().child(title))
                             .when(document.dirty(), |d| {
                                 d.child(div().text_color(rgb(ui::colors().warning)).child("•"))
                             })

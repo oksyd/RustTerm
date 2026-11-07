@@ -215,6 +215,7 @@ impl Fixture {
         let (tunnel, tunnel_rx) = mpsc::channel(32);
         let stop = CancellationToken::new();
         let (resources, resources_rx) = ResourceClient::new(stop.clone());
+        let (_exec, exec_rx) = crate::session::exec::ExecClient::new(stop.clone());
         let cancelled = stop.clone();
         let broker = tokio::spawn(async move {
             if tunnel_mode {
@@ -223,7 +224,7 @@ impl Fixture {
                 // A shared handle exercises each broker's request semantics;
                 // transport isolation is tested with distinct connections.
                 tokio::join!(
-                    run_shell(&handle, sftp_rx, resources_rx, &cancelled),
+                    run_shell(&handle, sftp_rx, resources_rx, exec_rx, &cancelled),
                     run_forwarding(&handle, forwards_rx, &cancelled, Duration::from_millis(40)),
                 );
             }

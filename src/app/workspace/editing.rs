@@ -137,10 +137,17 @@ impl Workspace {
         }
         if self.modal_observer.is_none() {
             self.modal_observer = match &self.modal {
-                Some(Modal::Profile(form)) => Some(cx.observe(form, |this, _, cx| {
-                    this.cancel_profile_test();
-                    cx.notify();
-                })),
+                Some(Modal::Profile(form)) => {
+                    let mut stamp = form.read(cx).change_stamp(cx);
+                    Some(cx.observe(form, move |this, form, cx| {
+                        let current = form.read(cx).change_stamp(cx);
+                        if current != stamp {
+                            this.cancel_profile_test();
+                            stamp = current;
+                        }
+                        cx.notify();
+                    }))
+                }
                 Some(Modal::Settings(form)) => Some(cx.observe(form, |_, _, cx| cx.notify())),
                 _ => None,
             };
@@ -153,6 +160,10 @@ impl Workspace {
         self.modal_subscriptions.clear();
         let scroll = match &self.modal {
             Some(Modal::Settings(form)) => form.read(cx).scroll_handle(),
+            Some(Modal::Profile(form)) => form
+                .read(cx)
+                .scroll_handle()
+                .unwrap_or_else(|| self.modal_scroll.clone()),
             _ => self.modal_scroll.clone(),
         };
         for input in &inputs {
@@ -232,12 +243,20 @@ impl Workspace {
             return;
         }
         self.remember_popup_focus(window, cx);
+        let default_group = self.selected_profile.and_then(|id| {
+            self.config
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .and_then(|profile| profile.group)
+        });
         let form = cx.new(|cx| {
             ProfileForm::new(
                 profile,
                 kind,
                 self.config.groups.clone(),
                 self.config.profiles.clone(),
+                default_group,
                 self.window_state.prompts.clone(),
                 cx,
             )
@@ -439,7 +458,7 @@ impl Workspace {
             let candidate = this.update(cx, |this, cx| {
                 let candidate = this.edited_config(cx)?;
                 this.saving = true;
-                Ok::<_, anyhow::Error>((candidate, this.path.join("config.toml")))
+                Ok::<_, anyhow::Error>((candidate, this.paths.clone()))
             });
             let (mut candidate, path) = match candidate {
                 Ok(Ok(candidate)) => candidate,
@@ -611,9 +630,9 @@ fn apply_profile(config: &mut AppConfig, profile: Profile) {
                 match &mut dependent.connection {
                     Connection::Redis(config) => config.credential = None,
                     Connection::Elasticsearch(config) => config.credential = None,
-                    Connection::Mysql(config) | Connection::Postgres(config) => {
-                        config.credential = None
-                    }
+                    Connection::Mysql(config)
+                    | Connection::Postgres(config)
+                    | Connection::ClickHouse(config) => config.credential = None,
                     _ => {}
                 }
             }

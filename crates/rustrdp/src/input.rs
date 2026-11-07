@@ -103,6 +103,38 @@ impl InputState {
         self.position
     }
 
+    pub fn keep_awake(&self, position: (u16, u16), info: &ConnectionInfo) -> Result<Vec<Vec<u8>>> {
+        // Never turn a held button/modifier into a drag or application gesture.
+        if !self.keys.is_empty() || !self.buttons.is_empty() {
+            return Ok(Vec::new());
+        }
+        if info.width == 0 || info.height == 0 {
+            return Err(Error::Invalid("input dimensions"));
+        }
+        let (x, y) = (position.0.min(info.width - 1), position.1.min(info.height - 1));
+        let nearby = if info.width > 1 {
+            (if x + 1 < info.width { x + 1 } else { x - 1 }, y)
+        } else if info.height > 1 {
+            (x, if y + 1 < info.height { y + 1 } else { y - 1 })
+        } else {
+            return Ok(Vec::new());
+        };
+        // Actual motion matters: compositors may ignore a repeated coordinate.
+        // One packet preserves the move/restore ordering without interleaving
+        // user input or leaving a synthetic key/button pressed on cancellation.
+        let events = [nearby, (x, y)].map(|(x, y)| Event::Mouse {
+            extended: false,
+            flags: 0x0800,
+            x,
+            y,
+        });
+        Ok(vec![if info.fastpath_input {
+            fast_path(&events)?
+        } else {
+            slow_path(&events, info)?
+        }])
+    }
+
     pub fn encode(&mut self, input: Input, info: &ConnectionInfo) -> Result<Vec<Vec<u8>>> {
         if info.width == 0 || info.height == 0 {
             return Err(Error::Invalid("input dimensions"));
@@ -420,6 +452,79 @@ mod tests {
             }
         }
         keys
+    }
+
+    fn decode_activity(packet: &[u8], fast: bool) -> Vec<(u16, u16)> {
+        let mut slow = packet.to_vec();
+        let body = if fast {
+            let mut reader = wire::Reader::new(packet);
+            assert_eq!(reader.u8().unwrap(), 2 << 2);
+            assert_eq!(wire::per_length(&mut reader).unwrap(), packet.len());
+            &packet[2..]
+        } else {
+            slow[7] = 0x68;
+            let body = wire::mcs_indication(&slow).unwrap().2;
+            let mut reader = wire::Reader::new(body);
+            reader.skip(18).unwrap();
+            assert_eq!(reader.u16_le().unwrap(), 2);
+            assert_eq!(reader.u16_le().unwrap(), 0);
+            &body[22..]
+        };
+        let mut reader = wire::Reader::new(body);
+        let positions = (0..2)
+            .map(|_| {
+                if fast {
+                    assert_eq!(reader.u8().unwrap(), 0x20);
+                } else {
+                    assert_eq!(reader.u32_le().unwrap(), 0);
+                    assert_eq!(reader.u16_le().unwrap(), 0x8001);
+                }
+                // Exactly MOVE, with no key, click, wheel or lock-state changes.
+                assert_eq!(reader.u16_le().unwrap(), 0x0800);
+                (reader.u16_le().unwrap(), reader.u16_le().unwrap())
+            })
+            .collect();
+        reader.finish().unwrap();
+        positions
+    }
+
+    #[test]
+    fn keep_awake_encodes_real_motion_and_restore_in_one_packet_for_both_input_paths() {
+        for fast in [true, false] {
+            let state = InputState::default();
+            for (width, height, origin, expected) in [
+                (320, 200, (10, 20), [(11, 20), (10, 20)]),
+                (320, 200, (319, 199), [(318, 199), (319, 199)]),
+                (320, 200, (u16::MAX, u16::MAX), [(318, 199), (319, 199)]),
+                (1, 2, (0, 0), [(0, 1), (0, 0)]),
+                (1, 2, (0, 1), [(0, 0), (0, 1)]),
+            ] {
+                let info = ConnectionInfo { width, height, ..info(fast) };
+                let packets = state.keep_awake(origin, &info).unwrap();
+                assert_eq!(packets.len(), 1);
+                assert_eq!(decode_activity(&packets[0], fast), expected);
+                assert_eq!(state.position(), (0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn keep_awake_skips_held_keys_and_buttons_without_releasing_them() {
+        for fast in [true, false] {
+            let info = info(fast);
+            for input in [
+                Input::Key { scancode: 0x1d, pressed: true },
+                Input::MouseButton { button: MouseButton::Left, pressed: true, x: 3, y: 4 },
+            ] {
+                let mut state = InputState::default();
+                state.encode(input, &info).unwrap();
+                let before = (state.keys.clone(), state.buttons.clone(), state.position);
+                assert!(state.keep_awake((7, 8), &info).unwrap().is_empty());
+                assert_eq!((state.keys.clone(), state.buttons.clone(), state.position), before);
+                assert!(!state.encode(Input::ReleaseAll, &info).unwrap().is_empty());
+                assert_eq!(state.keep_awake((7, 8), &info).unwrap().len(), 1);
+            }
+        }
     }
 
     #[test]

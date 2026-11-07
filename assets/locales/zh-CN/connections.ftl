@@ -72,7 +72,7 @@ connections-cannot-deliver-the-terminal-protocol-response = 终端协议回复�
 
 connections-cannot-deliver-the-terminal-response-after-file-transfer = 文件传输结束后终端回复无法送达
 
-connections-cannot-determine-the-configuration-directory-set-home-or-xdg-config = 配置目录不可确定，请设置 HOME 或 XDG_CONFIG_HOME
+connections-cannot-determine-the-configuration-directory-set-home-or-xdg-config = 无法确定用户存储目录，请检查用户环境或指定 --config-dir
 
 connections-cannot-inspect-the-private-key-file = 无法检查私钥文件
 
@@ -719,3 +719,18 @@ connections-zmodem-timed-out-waiting-for-the-remote-host = ZMODEM 等待远端�
 
 connections-group-parent-missing = 分组引用的上级分组不存在。
 connections-group-cycle = 不能将分组放入自身或其子组中。
+
+connections-display-name-optional = 显示名称（可选）
+connections-network-advanced = 网络与高级设置
+connections-timeout-summary = 超时：{ $seconds } 秒
+connections-custom-ca = 自定义 CA 证书
+connections-ssh-options-summary = { $jumps } 个跳板 · { $forwards } 个转发 · 超时：{ $seconds } 秒
+connections-startup-options = 启动选项
+connections-startup-summary = { $arguments } 个参数 · { $variables } 个环境变量
+connections-credential-help = 保存时写入系统凭据库。留空则在连接时询问，测试使用空凭据。
+connections-display-tab = 显示
+connections-advanced-tab = 高级
+connections-launch-options = 可选启动参数
+connections-configured = 已配置
+connections-rdp-resources-summary = 剪贴板：{ $clipboard } · 声音：{ $audio } · 麦克风：{ $microphone } · 共享目录：{ $folders }
+connections-query-timeout-summary = 查询超时：{ $seconds } 秒

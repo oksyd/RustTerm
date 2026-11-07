@@ -1,10 +1,9 @@
 use crate::app::forms::CredentialChange;
 use rustterm::config::{
-    AppConfig, ConfigError, CredentialRef, CredentialStore, ProcessCredentialStore, Uuid,
+    AppConfig, AppPaths, ConfigError, CredentialRef, CredentialStore, ProcessCredentialStore, Uuid,
     credentials::CredentialError,
 };
 use rustterm::i18n::messages as i18n_key;
-use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SaveError {
@@ -36,13 +35,13 @@ pub(super) struct SaveOutcome {
 pub(super) fn save(
     config: AppConfig,
     credential: Option<(Uuid, CredentialChange)>,
-    path: &Path,
+    paths: &AppPaths,
 ) -> SaveOutcome {
     commit(
         config,
         credential,
         &ProcessCredentialStore::new(),
-        |config| config.save(path),
+        |config| paths.save_config(config),
     )
 }
 

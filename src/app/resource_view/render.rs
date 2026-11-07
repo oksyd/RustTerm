@@ -1,4 +1,4 @@
-use super::{ResourceEvent, ResourceState, ResourceView, memory_percent};
+use super::{ResourceEvent, ResourceMonitor, ResourceState, ResourceView, memory_percent};
 use crate::app::ui;
 use gpui::{
     AnyElement, Context, Div, FontWeight, IntoElement, MouseButton, PathBuilder, Render, Window,
@@ -11,6 +11,7 @@ const MEMORY: u32 = 0xa9bfdc;
 
 impl Render for ResourceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let monitor = self.monitor.read(cx);
         let mut body = div()
             .id("resource-metrics")
             .flex_1()
@@ -18,7 +19,7 @@ impl Render for ResourceView {
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .px(px(16.));
-        if self.state == ResourceState::Failed {
+        if monitor.state() == ResourceState::Failed {
             body = body.child(
                 div()
                     .py_3()
@@ -26,7 +27,7 @@ impl Render for ResourceView {
                     .flex_col()
                     .gap_2()
                     .text_color(rgb(ui::colors().warning))
-                    .child(self.error.clone().unwrap_or_else(|| {
+                    .child(monitor.error.clone().unwrap_or_else(|| {
                         tr(i18n_key::RESOURCES_RESOURCE_INFORMATION_IS_UNAVAILABLE).into()
                     }))
                     .child(
@@ -39,19 +40,21 @@ impl Render for ResourceView {
                         .on_click(cx.listener(|this, _, _, cx| this.retry(cx))),
                     ),
             );
-        } else if self.state == ResourceState::Disconnected {
+        } else if monitor.state() == ResourceState::Disconnected {
             body = body.child(
                 div()
                     .py_4()
                     .text_color(rgb(ui::colors().muted))
                     .child(tr(i18n_key::RESOURCES_CONNECTION_DISCONNECTED)),
             );
+        } else if monitor.is_container() {
+            body = body.child(monitor.container_metrics());
         } else {
             body = body
-                .child(self.cpu())
-                .child(self.memory())
-                .child(self.network(cx))
-                .child(self.disks());
+                .child(monitor.cpu())
+                .child(monitor.memory())
+                .child(monitor.network(cx))
+                .child(monitor.disks());
         }
         div()
             .id("server-resources")
@@ -84,12 +87,62 @@ impl Render for ResourceView {
                     cx.stop_propagation();
                 }
             }))
-            .child(self.header())
+            .child(monitor.header())
             .child(ui::scrollable(body, None))
     }
 }
 
-impl ResourceView {
+impl ResourceMonitor {
+    fn container_metrics(&self) -> Div {
+        let summary = self.summary();
+        let stats = self.container_snapshot();
+        div()
+            .child(section().child(row(
+                label("CPU"),
+                div().child(percent(summary.and_then(|s| s.cpu))),
+            )))
+            .child(section().child(row(
+                label(i18n_key::RESOURCES_MEMORY),
+                div().child(format!(
+                        "{} / {} · {}",
+                        summary
+                            .and_then(|s| s.memory_used)
+                            .map_or_else(|| "—".into(), |v| bytes(v as f64)),
+                        summary
+                            .and_then(|s| s.memory_total)
+                            .map_or_else(|| "—".into(), |v| bytes(v as f64)),
+                        percent(summary.and_then(|s| s.memory_percent()))
+                    )),
+            )))
+            .child(section().child(row(
+                label(i18n_key::TERMINAL_NETWORK),
+                div().child(format!(
+                    "↓ {}   ↑ {}",
+                    rate(summary.and_then(|s| s.rx)),
+                    rate(summary.and_then(|s| s.tx))
+                )),
+            )))
+            .child(section().child(row(
+                label(i18n_key::DOCKER_NETWORK),
+                div().child(stats.filter(|s| !s.networks.is_empty()).map_or_else(
+                    || "—".into(),
+                    |s| {
+                        let (rx, tx) = s.network_bytes();
+                        format!("{} / {}", bytes(rx as f64), bytes(tx as f64))
+                    },
+                )),
+            )))
+            .child(
+                section().child(row(
+                    label(i18n_key::DOCKER_PROCESSES),
+                    div().child(
+                        stats
+                            .and_then(|s| s.pids_stats.current)
+                            .map_or_else(|| "—".into(), |v| v.to_string()),
+                    ),
+                )),
+            )
+    }
     fn header(&self) -> Div {
         div()
             .flex_shrink_0()
@@ -97,9 +150,10 @@ impl ResourceView {
             .py_2()
             .text_size(px(11.))
             .text_color(rgb(ui::colors().muted))
-            .child(tr(match self.state {
+            .child(tr(match self.state() {
                 ResourceState::Loading => i18n_key::RESOURCES_COLLECTING,
                 ResourceState::Live => i18n_key::RESOURCES_UPDATED_JUST_NOW,
+                ResourceState::Stale => i18n_key::RESOURCES_STALE,
                 ResourceState::Paused => i18n_key::RESOURCES_SAMPLING_PAUSED,
                 ResourceState::Failed => i18n_key::RESOURCES_RESOURCE_INFORMATION_IS_UNAVAILABLE,
                 ResourceState::Disconnected => i18n_key::RESOURCES_CONNECTION_DISCONNECTED,
@@ -189,7 +243,7 @@ impl ResourceView {
         section
     }
 
-    fn network(&self, cx: &Context<Self>) -> Div {
+    fn network(&self, cx: &Context<ResourceView>) -> Div {
         let sample = self.current_snapshot();
         let network = sample.and_then(|sample| {
             sample
@@ -407,7 +461,8 @@ fn sparkline(
                         connected = false;
                         continue;
                     };
-                    let x = width * index as f32 / (super::TREND_POINTS - 1) as f32;
+                    let x = width * index as f32
+                        / (crate::app::resource_monitor::TREND_POINTS - 1) as f32;
                     let y = height * (1. - (value / maximum).clamp(0., 1.) as f32) + 1.5;
                     let position = point(bounds.left() + px(x), bounds.top() + px(y));
                     if connected {
@@ -432,11 +487,11 @@ fn sparkline(
     .into_any_element()
 }
 
-fn percent(value: Option<f64>) -> String {
+pub(crate) fn percent(value: Option<f64>) -> String {
     value.map_or_else(|| "—".into(), |value| format!("{value:.1}%"))
 }
 
-fn bytes(value: f64) -> String {
+pub(crate) fn bytes(value: f64) -> String {
     let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
     let mut value = value.max(0.);
     let mut unit = 0;
@@ -451,7 +506,7 @@ fn bytes(value: f64) -> String {
     }
 }
 
-fn rate(value: Option<f64>) -> String {
+pub(crate) fn rate(value: Option<f64>) -> String {
     value.map_or_else(|| "—".into(), |value| format!("{}/s", bytes(value)))
 }
 

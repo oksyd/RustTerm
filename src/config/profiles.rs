@@ -82,6 +82,14 @@ impl Profile {
             connection: Connection::Rdp(config),
         }
     }
+    pub fn clickhouse(name: impl Into<String>, config: SqlConfig) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            group: None,
+            connection: Connection::ClickHouse(config),
+        }
+    }
     pub fn mysql(name: impl Into<String>, config: SqlConfig) -> Self {
         Self {
             id: Uuid::new_v4(),
@@ -122,6 +130,8 @@ pub enum Connection {
     Redis(RedisConfig),
     Elasticsearch(ElasticsearchConfig),
     Mysql(SqlConfig),
+    #[serde(rename = "clickhouse")]
+    ClickHouse(SqlConfig),
     Postgres(SqlConfig),
     Sqlite(SqliteConfig),
     Rdp(RdpConfig),
@@ -137,7 +147,9 @@ impl Connection {
             },
             Self::Redis(config) => config.credential,
             Self::Elasticsearch(config) => config.credential,
-            Self::Mysql(config) | Self::Postgres(config) => config.credential,
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {
+                config.credential
+            }
             Self::Rdp(config) => config.credential,
             Self::Local(_) | Self::Telnet(_) | Self::Sqlite(_) => None,
         }
@@ -152,7 +164,9 @@ impl Connection {
             },
             Self::Redis(config) => &mut config.credential,
             Self::Elasticsearch(config) => &mut config.credential,
-            Self::Mysql(config) | Self::Postgres(config) => &mut config.credential,
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {
+                &mut config.credential
+            }
             Self::Rdp(config) => &mut config.credential,
             Self::Local(_) | Self::Telnet(_) | Self::Sqlite(_) => return false,
         };
@@ -163,6 +177,7 @@ impl Connection {
     pub fn sql(&self) -> Option<(SqlEngine, &SqlConfig)> {
         match self {
             Self::Mysql(config) => Some((SqlEngine::Mysql, config)),
+            Self::ClickHouse(config) => Some((SqlEngine::ClickHouse, config)),
             Self::Postgres(config) => Some((SqlEngine::Postgres, config)),
             _ => None,
         }
@@ -171,6 +186,7 @@ impl Connection {
     pub fn database(&self) -> Option<DatabaseConfig> {
         match self {
             Self::Mysql(config) => Some(DatabaseConfig::Mysql(config.clone())),
+            Self::ClickHouse(config) => Some(DatabaseConfig::ClickHouse(config.clone())),
             Self::Postgres(config) => Some(DatabaseConfig::Postgres(config.clone())),
             Self::Sqlite(config) => Some(DatabaseConfig::Sqlite(config.clone())),
             _ => None,
@@ -181,7 +197,9 @@ impl Connection {
         match self {
             Self::Redis(config) => config.ssh_profile,
             Self::Elasticsearch(config) => config.ssh_profile,
-            Self::Mysql(config) | Self::Postgres(config) => config.ssh_profile,
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {
+                config.ssh_profile
+            }
             _ => None,
         }
     }

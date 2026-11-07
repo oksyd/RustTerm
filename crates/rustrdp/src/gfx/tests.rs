@@ -19,7 +19,7 @@ fn reset(width: u32, height: u32) -> Vec<u8> {
 
 fn setup() -> (Gfx, Graphics) {
     let limits = Limits::default();
-    let mut gfx = Gfx::new(limits);
+    let mut gfx = Gfx::new(limits, true);
     let mut output = Graphics::new(2, 2, limits).unwrap();
     let mut caps = Vec::new();
     for value in [CAPABILITIES[0].0, 4, CAPABILITIES[0].1] {
@@ -34,6 +34,181 @@ fn setup() -> (Gfx, Graphics) {
     )
     .unwrap();
     (gfx, output)
+}
+
+#[test]
+fn clarity_keeps_the_pipeline_but_disables_avc_in_every_version() {
+    let limits = Limits::default();
+    let gfx = Gfx::new(limits, false);
+    let bytes = gfx.capabilities();
+    let mut reader = Reader::new(&bytes[8..]);
+    let count = reader.u16_le().unwrap();
+    assert_eq!(usize::from(count), CAPABILITIES.len());
+    for _ in 0..count {
+        let version = reader.u32_le().unwrap();
+        assert_eq!(reader.u32_le().unwrap(), 4);
+        let flags = reader.u32_le().unwrap();
+        if version >= 0x000a_0002 {
+            assert_ne!(flags & 0x20, 0);
+            assert_eq!(flags & 0x40, 0);
+        } else {
+            assert_eq!(flags & 0x10, 0);
+        }
+        let mut confirm = Vec::new();
+        for value in [version, 4, flags] {
+            confirm.extend(value.to_le_bytes());
+        }
+        let mut graphics = Graphics::new(2, 2, limits).unwrap();
+        let mut session = Gfx::new(limits, false);
+        session
+            .receive(&message([pdu(19, &confirm)]), &mut graphics, |_, _| Ok(()))
+            .unwrap();
+        if version >= 0x000a_0002 {
+            confirm[8..12].copy_from_slice(&(flags & !0x20).to_le_bytes());
+            let mut session = Gfx::new(limits, false);
+            assert!(
+                session
+                    .receive(&message([pdu(19, &confirm)]), &mut graphics, |_, _| Ok(()))
+                    .is_err()
+            );
+        }
+    }
+    reader.finish().unwrap();
+    let config = crate::ClientConfig {
+        graphics_pipeline: true,
+        allow_lossy_bitmaps: false,
+        frame_acknowledgements: std::num::NonZeroU32::new(3),
+        ..crate::ClientConfig::default()
+    };
+    assert!(config.validate().is_ok());
+    assert!(
+        crate::ClientConfig {
+            frame_acknowledgements: None,
+            ..config
+        }
+        .validate()
+        .is_err()
+    );
+}
+
+#[test]
+fn every_offered_version_decodes_the_baseline_desktop() {
+    for allow_avc in [false, true] {
+        let offered: Vec<_> = Gfx::new(Limits::default(), allow_avc)
+            .offered_capabilities()
+            .collect();
+        for (version, flags) in offered {
+            let mut gfx = Gfx::new(Limits::default(), allow_avc);
+            let mut output = Graphics::new(2, 2, Limits::default()).unwrap();
+            let confirm: Vec<_> = [version, 4, flags]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let commands = message([
+                pdu(19, &confirm),
+                reset(2, 2),
+                pdu(9, &[1, 0, 2, 0, 2, 0, 0x20]),
+                pdu(15, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+                start(1),
+                fill([11, 22, 33, 0]),
+                pdu(12, &1u32.to_le_bytes()),
+            ]);
+            let mut completed = 0;
+            gfx.receive(&commands, &mut output, |event, graphics| {
+                if matches!(event, FrameEvent::End { id: 1, total: 1 }) {
+                    completed += 1;
+                    assert_eq!(graphics.pixels(), [11, 22, 33, 255].repeat(4));
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(completed, 1);
+        }
+    }
+}
+
+#[test]
+fn codec_selection_respects_the_confirmed_version_and_avc_flags() {
+    // The server can select 8.0 or 8.1 without AVC even when the client offered
+    // H.264 for newer versions. The decoder must follow that selected set.
+    for (version, flags, forbidden) in [
+        (0x0008_0004u32, 2u32, &[11u16, 14, 15][..]),
+        (0x0008_0105, 2, &[11, 14, 15][..]),
+        (0x0008_0105, 0x12, &[14, 15][..]),
+        (0x000a_0002, 2, &[15][..]),
+    ] {
+        for &codec in forbidden {
+            let mut gfx = Gfx::new(Limits::default(), true);
+            let mut output = Graphics::new(2, 2, Limits::default()).unwrap();
+            let confirm: Vec<_> = [version, 4, flags]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            gfx.receive(
+                &message([pdu(19, &confirm), reset(2, 2)]),
+                &mut output,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+            let mut bitmap = vec![1, 0];
+            bitmap.extend(codec.to_le_bytes());
+            bitmap.extend([0x20, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                gfx.receive(&message([pdu(1, &bitmap)]), &mut output, |_, _| Ok(())),
+                Err(Error::Invalid("unnegotiated graphics AVC codec"))
+            );
+        }
+    }
+}
+
+#[test]
+fn unsupported_scaled_mapping_cannot_be_enabled_by_confirmation() {
+    let mut gfx = Gfx::new(Limits::default(), true);
+    let mut output = Graphics::new(2, 2, Limits::default()).unwrap();
+    let confirm: Vec<_> = [0x000a_0701u32, 4, 0x42]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    assert_eq!(
+        gfx.receive(&message([pdu(19, &confirm)]), &mut output, |_, _| Ok(())),
+        Err(Error::Invalid("unoffered graphics capabilities"))
+    );
+}
+
+#[test]
+fn unknown_capability_sets_are_ignored_without_advancing_negotiation() {
+    let mut gfx = Gfx::new(Limits::default(), true);
+    let mut output = Graphics::new(2, 2, Limits::default()).unwrap();
+    let unknown: Vec<_> = [0x1234_5678u32, 8, 0, 0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    gfx.receive(&message([pdu(19, &unknown)]), &mut output, |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(gfx.version, None);
+    let confirm: Vec<_> = [0x0008_0004u32, 4, 2]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    gfx.receive(
+        &message([pdu(19, &confirm), reset(2, 2)]),
+        &mut output,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(gfx.version, Some(0x0008_0004));
+    gfx.receive(&message([pdu(19, &unknown)]), &mut output, |_, _| Ok(()))
+        .unwrap();
+    assert_eq!(gfx.version, Some(0x0008_0004));
+
+    // Unknown formats still have to obey their enclosing PDU lengths.
+    let mut fresh = Gfx::new(Limits::default(), true);
+    assert_eq!(
+        fresh.receive(&message([pdu(19, &unknown[..12])]), &mut output, |_, _| Ok(
+            ()
+        )),
+        Err(Error::Truncated)
+    );
 }
 
 fn start(id: u32) -> Vec<u8> {

@@ -380,13 +380,11 @@ impl ProfileForm {
             .when_some(self.ssh_import_error.clone(), |body, error| {
                 body.child(div().text_color(rgb(ui::colors().danger)).child(error.render()))
             })
-            .when(self.ssh_auth == SshAuthentication::Agent, |body| {
-                body.child(self.fields.selected_rows(&[i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL]))
-            })
-            .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_HOST, i18n_key::WORKSPACE_PORT, i18n_key::WORKSPACE_USERNAME]))
+            .child(self.host_port())
+            .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_USERNAME]))
             .child(row(
                 i18n_key::COMMON_AUTHENTICATION,
-                div().flex().gap_1().children(
+                div().flex().flex_wrap().gap_1().children(
                     [
                         (SshAuthentication::Password, i18n_key::WORKSPACE_PASSWORD),
                         (SshAuthentication::PrivateKey, i18n_key::COMMON_PRIVATE_KEY),
@@ -429,6 +427,9 @@ impl ProfileForm {
                     }),
                 ),
             ))
+            .when(self.ssh_auth == SshAuthentication::Agent, |body| {
+                body.child(self.fields.selected_rows(&[i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL]))
+            })
             .when(self.ssh_auth == SshAuthentication::PrivateKey, |body| {
                 body.child(row(
                     i18n_key::CONNECTIONS_PRIVATE_KEY_PATH,
@@ -464,38 +465,11 @@ impl ProfileForm {
                 body.child(div().text_color(rgb(ui::colors().danger)).child(tr(error)))
             })
             .child(self.credential_editor(cx))
-            .child(
-                div()
-                    .id("ssh-advanced")
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .cursor_pointer()
-                    .text_color(rgb(ui::colors().muted))
-                    .child(ui::icon(if self.advanced {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    }))
-                    .child(tr(i18n_key::CONNECTIONS_ADVANCED_SSH_SETTINGS))
-                    .tab_index(0)
-                    .border_1()
-                    .border_color(rgb(ui::colors().border))
-                    .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.advanced
-                            && this
-                                .fields
-                                .selected_inputs(SSH_ADVANCED)
-                                .iter()
-                                .any(|input| input.read(cx).focus_handle().is_focused(window))
-                        {
-                            this.fields.field(i18n_key::WORKSPACE_USERNAME).read(cx).focus(window);
-                        }
-                        this.advanced = !this.advanced;
-                        cx.notify();
-                    })),
-            )
+            .child(self.advanced_toggle(i18n_key::CONNECTIONS_ADVANCED_SSH_SETTINGS,
+                rustterm::trf!(i18n_key::CONNECTIONS_SSH_OPTIONS_SUMMARY,
+                    jumps = self.fields.get(i18n_key::CONNECTIONS_JUMP_HOSTS_COMMA_SEPARATED, cx).split(',').filter(|part| !part.trim().is_empty()).count(),
+                    forwards = self.fields.get(i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED, cx).split(';').filter(|part| !part.trim().is_empty()).count(),
+                    seconds = self.fields.get(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS, cx)), cx))
             .when(self.advanced, |body| {
                 body.child(row(
                     i18n_key::CONNECTIONS_SHELL_INTEGRATION,

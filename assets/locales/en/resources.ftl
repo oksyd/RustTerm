@@ -125,3 +125,12 @@ resources-unknown-resource-output-record = Unknown resource output record
 resources-unpin-resources = Unpin resources
 
 resources-updated-just-now = Updated just now
+
+resources-host = Host
+resources-container = Container
+resources-stale = Data expired
+resources-status-unavailable = Unavailable
+resources-sample-age = Last sample: { $seconds }s ago
+resources-open-details = Click to open resource details
+resources-status-monitoring = Show resources in the status bar
+resources-status-monitoring-help = Sample the active SSH host or container every 5 seconds. Pause when hidden or locked. Resource panels can still be used when this is off.

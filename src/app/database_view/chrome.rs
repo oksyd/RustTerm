@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{AnyElement, IntoElement, MouseButton, div, prelude::*, px, rgb};
+use gpui::{AnyElement, IntoElement, MouseButton, div, prelude::*, px};
 use rustterm::i18n::messages as i18n_key;
 use ui::Icon;
 
@@ -14,6 +14,8 @@ impl DatabaseView {
         }
         self.menu_return_focus = window.focused(cx);
         self.menu_open = true;
+        self.object_menu = None;
+        self.menu_scroll.scroll_to_item(0);
         self.menu_index = usize::from(!self.available());
         self.focus.focus(window);
         cx.notify();
@@ -82,20 +84,19 @@ impl DatabaseView {
     ) {
         match event.keystroke.key.as_str() {
             "escape" => self.close_menu(window, cx),
-            "up" | "down" | "tab" => {
-                self.menu_index = if self.available() {
-                    1 - self.menu_index
-                } else {
-                    1
-                };
+            "up" | "down" | "tab" | "home" | "end" => {
+                if let Some(index) =
+                    ui::popup::next_index(event, self.menu_index, &[self.available(), true])
+                {
+                    self.menu_index = index;
+                }
             }
-            "home" => self.menu_index = usize::from(!self.available()),
-            "end" => self.menu_index = 1,
             "enter" | "return" | "space" => self.run_menu_action(self.menu_index, window, cx),
             _ => {}
         }
         // The menu owns the keyboard until dismissed; editor shortcuts must not
         // execute a query behind it.
+        self.menu_scroll.scroll_to_item(self.menu_index);
         window.prevent_default();
         cx.stop_propagation();
         cx.notify();
@@ -105,53 +106,49 @@ impl DatabaseView {
         if !self.menu_open {
             return None;
         }
-        let popup = div()
+        let bounds = ui::popup::fit(
+            gpui::point(px(self.viewport_size.0 - 248.), px(ui::PANE_HEADER_HEIGHT)),
+            gpui::size(
+                px(240.),
+                px(2. * ui::metrics::ROW + 2. * ui::popup::PADDING),
+            ),
+            gpui::Bounds::new(
+                gpui::point(px(4.), px(4.)),
+                gpui::size(
+                    px((self.viewport_size.0 - 8.).max(0.)),
+                    px((self.viewport_size.1 - 8.).max(0.)),
+                ),
+            ),
+        );
+        let popup = ui::popup::surface("database-actions-popup")
             .absolute()
-            .top(px(ui::PANE_HEADER_HEIGHT))
-            .right(px(8.))
-            .w(px(240.))
-            .max_w_full()
-            .py_1()
-            .bg(rgb(ui::colors().raised))
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .rounded(px(4.))
-            .shadow_md()
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .left(bounds.origin.x)
+            .top(bounds.origin.y)
+            .w(bounds.size.width)
+            .max_h(bounds.size.height)
+            .overflow_y_scroll()
+            .map(ui::preserve_scroll_axes)
+            .track_scroll(&self.menu_scroll)
             .children((0..2).map(|index| {
                 let (label, glyph, enabled) = self.menu_item(index);
-                div()
-                    .id(("database-menu-action", index))
-                    .h(px(32.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_color(rgb(if enabled {
-                        ui::colors().text
-                    } else {
-                        ui::colors().faint
+                ui::popup::row(
+                    ("database-menu-action", index),
+                    enabled,
+                    index == self.menu_index,
+                )
+                .when(enabled, |row| {
+                    row.on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.menu_index != index {
+                            this.menu_index = index;
+                            cx.notify();
+                        }
                     }))
-                    .when(index == self.menu_index, |row| {
-                        row.bg(rgb(ui::colors().selected))
-                    })
-                    .when(enabled, |row| {
-                        row.cursor_pointer()
-                            .hover(|style| style.bg(rgb(ui::colors().hover)))
-                            .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                                if this.menu_index != index {
-                                    this.menu_index = index;
-                                    cx.notify();
-                                }
-                            }))
-                    })
-                    .child(ui::icon(glyph))
-                    .child(div().min_w_0().truncate().child(tr(label)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_menu_action(index, window, cx);
-                    }))
+                })
+                .child(ui::icon(glyph))
+                .child(div().min_w_0().truncate().child(tr(label)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.run_menu_action(index, window, cx);
+                }))
             }));
         Some(
             div()
@@ -173,7 +170,7 @@ impl DatabaseView {
                         cx.stop_propagation();
                     }),
                 )
-                .child(popup)
+                .child(ui::scrollable(popup, Some(self.menu_scroll.clone())))
                 .into_any_element(),
         )
     }

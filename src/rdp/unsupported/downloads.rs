@@ -20,7 +20,7 @@ pub(super) struct Completed {
 }
 pub(super) struct Downloads;
 impl Downloads {
-    pub fn new() -> Self {
+    pub fn new(_: Option<PathBuf>) -> Self {
         Self
     }
     pub fn active_offer(&self) -> Option<u64> {

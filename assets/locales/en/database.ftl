@@ -379,3 +379,160 @@ database-write-sql-ctrl-enter-runs-the-current-statement = Write SQL. Ctrl+Enter
 database-write-sql-ctrl-enter-runs-the-selection-or-the-entire = Write SQL. Ctrl+Enter runs the selection or the entire editor.
 
 database-ssh-tunnel-platform-unavailable = SQL SSH tunnels are not available on this platform. Use a direct database connection.
+
+database-clickhouse-connection-hint = Use the HTTP port (8123), or HTTPS (usually 8443) with TLS. Leave the database blank to use the server default.
+database-clickhouse-result-format = ClickHouse returned an unsupported result format or incomplete response. Remove the FORMAT clause, or use FORMAT JSONCompact.
+database-clickhouse-no-transactions = Transaction controls are not available for ClickHouse connections.
+database-clickhouse-grid-read-only = ClickHouse data is read-only in the table editor. Use SQL to modify data.
+database-add-clickhouse-connection = Add ClickHouse connection
+database-table-definition = DDL
+
+database-object-details = Details
+
+database-skip-indexes = Skipping indexes
+
+database-foreign-keys = Foreign keys
+
+database-constraints = Constraints
+
+database-parts = Data parts
+
+database-overview = Overview
+
+database-tables = Tables
+
+database-views = Views
+
+database-schemas = Schemas
+
+database-new-sql-query = New SQL query
+
+database-query-object = Query this object
+
+database-copy-object-name = Copy qualified name
+
+database-live-queries = Active queries
+
+database-storage = Storage usage
+
+database-file-info = File information
+
+database-integrity = Integrity check
+
+database-ch-queries-hint = Inspect running queries and their resource usage.
+
+database-ch-storage-hint = Explore rows and disk usage by table and partition.
+
+database-pg-queries-hint = Inspect sessions, query state and wait events.
+
+database-pg-storage-hint = Compare table and index storage with estimated rows.
+
+database-my-queries-hint = Inspect connections and currently executing statements.
+
+database-my-storage-hint = Inspect table engines, estimated rows and storage.
+
+database-sqlite-file-hint = Inspect attached files, page size and journal mode.
+
+database-sqlite-check-hint = Prepare a quick check of the database file.
+
+database-ch-overview = Explore analytical data, table engines and partitions.
+
+database-pg-overview = Browse schemas, relations, indexes and constraints.
+
+database-my-overview = Explore tables, storage engines and relational data.
+
+database-sqlite-overview = Explore a local database file and its objects.
+
+database-query-templates = Explore your database
+
+database-templates-hint = Open a query to review and run. Nothing runs automatically.
+
+database-object-hint = Double-click an object to open data. Right-click for more actions.
+
+database-endpoint = Endpoint
+
+database-local-file = Local file
+
+database-transport = Transport
+
+database-local = Local
+
+database-direct = Direct
+
+database-query-results = Results
+
+database-query-ready = Ready to query
+
+database-query-ready-hint = Write SQL above, then run with Ctrl+Enter.
+
+database-editor-resize = Drag to resize the SQL editor
+
+database-results-only = Expand results
+
+database-show-editor = Show SQL editor
+
+database-copy-definition = Copy definition
+
+database-definition-empty = No definition is available for this object.
+
+database-details-empty = No object details are available.
+
+database-query-status = { $rows } rows · { $elapsed } ms
+
+database-affected-status = { $rows } rows affected · { $elapsed } ms
+
+database-objects = Objects
+
+database-sessions = Sessions
+
+database-sessions-title = Server sessions
+
+database-sessions-search = Search SQL, user, host or state…
+
+database-sessions-database-filter = Filter databases…
+
+database-sessions-refresh = Refresh
+
+database-sessions-manual = Manual
+
+database-sessions-interval = { $seconds }s
+
+database-sessions-refresh-now = Refresh sessions (F5)
+
+database-sessions-hide-sleep = Hide Sleep
+
+database-sessions-all-visible = PROCESS privilege: sessions from all users are visible.
+
+database-sessions-own-visible = Only this account’s sessions are visible. PROCESS privilege is required to see other users.
+
+database-sessions-scope-unknown = Sessions are limited by this account’s permissions; PROCESS privilege has not been confirmed.
+
+database-sessions-counts = { $shown } of { $total } sessions
+
+database-sessions-refreshing = Refreshing…
+
+database-sessions-updated = Updated { $time }
+
+database-sessions-refresh-stopped = Automatic refresh stopped. The last successful snapshot is retained; refresh to retry.
+
+database-sessions-disconnected = Connect to MySQL to view server sessions.
+
+database-sessions-empty = No matching sessions. Try showing Sleep sessions or clearing the filters.
+
+database-sessions-user = User
+
+database-sessions-host = Host
+
+database-sessions-command = Command
+
+database-sessions-time = Time (s)
+
+database-sessions-state = State
+
+database-sessions-time-hint = Seconds spent in the current state; this is not total query duration.
+
+database-sessions-copy-sql = Copy full SQL
+
+database-sessions-close-sql = Close SQL details
+
+database-sessions-no-sql = This session has no current SQL statement.

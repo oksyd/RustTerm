@@ -363,3 +363,160 @@ database-write-sql-ctrl-enter-runs-the-current-statement = 输入 SQL，按 Ctrl
 database-write-sql-ctrl-enter-runs-the-selection-or-the-entire = 输入 SQL，按 Ctrl+Enter 执行选中内容或整个编辑器中的语句。
 
 database-ssh-tunnel-platform-unavailable = 此平台暂不支持 SQL 的 SSH 隧道，请使用数据库直连。
+
+database-clickhouse-connection-hint = 使用 HTTP 端口（8123），或启用 TLS 并使用 HTTPS 端口（通常为 8443）。数据库留空时使用服务端默认值。
+database-clickhouse-result-format = ClickHouse 返回了不支持的结果格式或不完整的响应。请移除 FORMAT 子句，或使用 FORMAT JSONCompact。
+database-clickhouse-no-transactions = ClickHouse 连接不提供事务控制。
+database-clickhouse-grid-read-only = ClickHouse 表格仅供浏览，请使用 SQL 修改数据。
+database-add-clickhouse-connection = 添加 ClickHouse 连接
+database-table-definition = 建表语句
+
+database-object-details = 详情
+
+database-skip-indexes = 跳数索引
+
+database-foreign-keys = 外键
+
+database-constraints = 约束
+
+database-parts = 数据部件
+
+database-overview = 概览
+
+database-tables = 表
+
+database-views = 视图
+
+database-schemas = Schema
+
+database-new-sql-query = 新建 SQL 查询
+
+database-query-object = 查询此对象
+
+database-copy-object-name = 复制完整名称
+
+database-live-queries = 活动查询
+
+database-storage = 存储用量
+
+database-file-info = 文件信息
+
+database-integrity = 完整性检查
+
+database-ch-queries-hint = 查看运行中的查询及资源用量。
+
+database-ch-storage-hint = 按表和分区查看行数及磁盘用量。
+
+database-pg-queries-hint = 查看会话、查询状态和等待事件。
+
+database-pg-storage-hint = 比较表与索引的存储用量和估算行数。
+
+database-my-queries-hint = 查看连接和正在执行的语句。
+
+database-my-storage-hint = 查看表引擎、估算行数和存储用量。
+
+database-sqlite-file-hint = 查看数据库文件、页大小和日志模式。
+
+database-sqlite-check-hint = 准备检查数据库文件的完整性。
+
+database-ch-overview = 浏览分析数据、表引擎及分区。
+
+database-pg-overview = 按 Schema 浏览表、视图、索引和约束。
+
+database-my-overview = 浏览数据表、存储引擎及关系数据。
+
+database-sqlite-overview = 浏览本地数据库文件及其中的对象。
+
+database-query-templates = 探索数据库
+
+database-templates-hint = 点击后打开查询，确认后再执行。
+
+database-object-hint = 双击对象打开数据，右键查看更多操作。
+
+database-endpoint = 服务地址
+
+database-local-file = 本地文件
+
+database-transport = 连接方式
+
+database-local = 本地
+
+database-direct = 直连
+
+database-query-results = 结果
+
+database-query-ready = 开始查询
+
+database-query-ready-hint = 在上方编写 SQL，按 Ctrl+Enter 执行。
+
+database-editor-resize = 拖动调整 SQL 编辑区高度
+
+database-results-only = 展开结果区
+
+database-show-editor = 显示 SQL 编辑器
+
+database-copy-definition = 复制定义
+
+database-definition-empty = 此对象暂无定义。
+
+database-details-empty = 暂无对象详情。
+
+database-query-status = { $rows } 行 · { $elapsed } 毫秒
+
+database-affected-status = 影响 { $rows } 行 · { $elapsed } 毫秒
+
+database-objects = 对象
+
+database-sessions = 会话
+
+database-sessions-title = 服务器会话
+
+database-sessions-search = 搜索 SQL、用户、来源或状态…
+
+database-sessions-database-filter = 筛选数据库…
+
+database-sessions-refresh = 刷新
+
+database-sessions-manual = 手动
+
+database-sessions-interval = { $seconds } 秒
+
+database-sessions-refresh-now = 刷新会话（F5）
+
+database-sessions-hide-sleep = 隐藏 Sleep
+
+database-sessions-all-visible = 具有 PROCESS 权限，可查看所有用户的会话。
+
+database-sessions-own-visible = 仅显示当前账号的会话；查看其他用户需要 PROCESS 权限。
+
+database-sessions-scope-unknown = 显示范围取决于当前账号权限；尚未确认 PROCESS 权限。
+
+database-sessions-counts = 显示 { $shown } / { $total } 个会话
+
+database-sessions-refreshing = 正在刷新…
+
+database-sessions-updated = 更新于 { $time }
+
+database-sessions-refresh-stopped = 自动刷新已停止，保留上次成功结果；点击刷新重试。
+
+database-sessions-disconnected = 连接 MySQL 后即可查看服务器会话。
+
+database-sessions-empty = 没有匹配的会话。可显示 Sleep 会话或清空筛选条件。
+
+database-sessions-user = 用户
+
+database-sessions-host = 来源
+
+database-sessions-command = 命令
+
+database-sessions-time = 时间（秒）
+
+database-sessions-state = 状态
+
+database-sessions-time-hint = 处于当前状态的秒数，并非查询总耗时。
+
+database-sessions-copy-sql = 复制完整 SQL
+
+database-sessions-close-sql = 关闭 SQL 详情
+
+database-sessions-no-sql = 此会话当前没有 SQL 语句。

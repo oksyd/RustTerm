@@ -67,6 +67,7 @@ pub struct TextInput {
     read_only: bool,
     size: InputSize,
     multiline: bool,
+    multiline_height: f32,
     literal: bool,
     reveal_cursor: bool,
     anchor: usize,
@@ -106,6 +107,7 @@ impl TextInput {
             read_only: false,
             size: InputSize::Normal,
             multiline: false,
+            multiline_height: 180.,
             literal: false,
             reveal_cursor: true,
             anchor: 0,
@@ -146,8 +148,11 @@ impl TextInput {
         placeholder: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        self.placeholder = placeholder.into();
-        cx.notify();
+        let placeholder = placeholder.into();
+        if self.placeholder != placeholder {
+            self.placeholder = placeholder;
+            cx.notify();
+        }
     }
 
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
@@ -156,6 +161,15 @@ impl TextInput {
         }
         self.anchor = 0;
         self.move_cursor(self.content.len(), true, cx);
+    }
+
+    pub fn set_multiline_height(&mut self, height: f32, cx: &mut Context<Self>) {
+        let height = height.clamp(80., 2000.);
+        if (self.multiline_height - height).abs() > 0.5 {
+            self.multiline_height = height;
+            self.reveal_cursor = true;
+            cx.notify();
+        }
     }
 
     pub fn set_sql_dialect(&mut self, engine: rustterm::config::SqlEngine, cx: &mut Context<Self>) {
@@ -992,12 +1006,12 @@ impl Render for TextInput {
         let input = cx.entity();
         let paint_input = input.clone();
         let height = if self.multiline {
-            180.
+            self.multiline_height
         } else {
             match self.size {
-                InputSize::Inline => 30.,
-                InputSize::Compact => 24.,
-                InputSize::Normal => 32.,
+                InputSize::Inline => ui::metrics::ROW,
+                InputSize::Compact => ui::metrics::CONTROL_COMPACT,
+                InputSize::Normal => ui::metrics::INPUT,
                 InputSize::Large => 44.,
             }
         };
@@ -1005,6 +1019,11 @@ impl Render for TextInput {
             InputSize::Inline | InputSize::Compact => 7.,
             InputSize::Normal => 9.,
             InputSize::Large => 12.,
+        };
+        let vertical_padding = match self.size {
+            InputSize::Inline | InputSize::Compact => 3.,
+            InputSize::Normal => 5.,
+            InputSize::Large => 10.,
         };
         let completions = self.render_sql_completions(cx);
         let field = div()
@@ -1015,11 +1034,7 @@ impl Render for TextInput {
             .min_w_0()
             .px(px(horizontal_padding))
             .when(self.password_visibility_toggle, |d| d.pr(px(42.)))
-            .py(px(match self.size {
-                InputSize::Inline | InputSize::Compact => 3.,
-                InputSize::Normal => 5.,
-                InputSize::Large => 10.,
-            }))
+            .py(px(vertical_padding))
             .when(self.multiline, |field| {
                 field
                     .pr(px(horizontal_padding + ui::SCROLLBAR_WIDTH))
@@ -1028,7 +1043,7 @@ impl Render for TextInput {
             .rounded(px(match self.size {
                 InputSize::Inline => 0.,
                 InputSize::Large => 6.,
-                _ => 2.,
+                _ => ui::metrics::RADIUS,
             }))
             .border_1()
             .border_color(rgb(if self.invalid || self.validation_error.is_some() {
@@ -1098,7 +1113,16 @@ impl Render for TextInput {
                         });
                     },
                 )
-                .size_full(),
+                .size_full()
+                // A percentage height can collapse to zero in the SQL pane's
+                // flex layout. The editor already has a fixed outer height.
+                .when(self.multiline, |canvas| {
+                    canvas.h(px(height
+                        - vertical_padding
+                        - 5.
+                        - ui::SCROLLBAR_WIDTH
+                        - 2.))
+                }),
             )
             .when(self.multiline, |field| {
                 field

@@ -43,6 +43,8 @@ pub struct GraphicsFrame<'a> {
 /// graphics change; the caller decides how to present clipboard text or errors.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
+    /// RemoteApp launch status or a remote window lifecycle change.
+    RemoteApp(crate::remote_app::RemoteAppEvent),
     /// Write this complete packet to the existing authenticated transport.
     Send(Vec<u8>),
     /// Establish an authenticated additional transport without blocking TCP.
@@ -169,6 +171,7 @@ pub struct Session {
     graphics: Graphics,
     input: InputState,
     channels: Channels,
+    remote_windows: crate::remote_app::Windows,
     bulk: Option<(BulkCompression, BulkDecoder)>,
     fragment: Option<Fragment>,
     frame_acknowledgements: Acknowledgements,
@@ -179,6 +182,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Inspect a frame from the authenticated primary transport for a handoff.
+    /// A returned payload contains credentials: do not log it, and discard this
+    /// session and its transport before following the redirection.
+    pub fn server_redirection<'a>(&self, packet: &'a [u8]) -> Result<Option<&'a [u8]>> {
+        connection::redirection_payload(packet, self.info.io_channel_id, Some(self.info.server_id))
+    }
     pub(crate) fn new(config: ClientConfig, info: ConnectionInfo) -> Result<Self> {
         config.validate()?;
         if info.user_id < 1001
@@ -197,6 +206,7 @@ impl Session {
             message_channel: connection::MessageChannel::default(),
             graphics: Graphics::new(info.width, info.height, config.limits)?,
             channels: Channels::new(&info.channels, &config, info.vc_chunk_size)?,
+            remote_windows: crate::remote_app::Windows::default(),
             bulk: config
                 .bulk_compression
                 .map(|maximum| (maximum, BulkDecoder::new(config.limits.max_pdu))),
@@ -220,6 +230,10 @@ impl Session {
     /// Current server-negotiated desktop and input capabilities.
     pub fn info(&self) -> &ConnectionInfo {
         &self.info
+    }
+    /// Snapshot of the currently known RemoteApp windows, synchronized with graphics.
+    pub fn remote_windows(&self) -> Vec<crate::remote_app::RemoteWindow> {
+        self.remote_windows.snapshot()
     }
     /// Latest BGRA framebuffer, including any software-rendered remote pointer.
     pub fn graphics(&self) -> &Graphics {
@@ -346,15 +360,7 @@ impl Session {
                     self.fast_path(wire::fast_path_payload(packet)?, &mut events, on_frame)?;
             }
             FrameKind::X224 => {
-                let data = wire::x224_payload(packet)?;
-                if data.first().is_some_and(|byte| byte >> 2 == 8) {
-                    if data.len() != 2 || data[1] & 0x7f != 0 {
-                        return Err(Error::Invalid("MCS disconnect"));
-                    }
-                    let reason = ((data[0] & 3) << 1) | (data[1] >> 7);
-                    if reason > 4 {
-                        return Err(Error::Invalid("MCS disconnect reason"));
-                    }
+                if let Some(reason) = wire::mcs_disconnect(packet)? {
                     self.state = State::Closed;
                     self.fragment = None;
                     self.graphics.cancel_frame();
@@ -371,19 +377,7 @@ impl Session {
                 }
                 self.message_channel.record_data(data.len());
                 if channel == self.info.io_channel_id {
-                    let mut pdus = Reader::new(data);
-                    while !pdus.is_empty() {
-                        let mut header = pdus;
-                        let length = usize::from(header.u16_le()?);
-                        // T.128 FlowPDU must be ignored (MS-RDPBCGR 2.2.8.1.1.1.1).
-                        if length == 0x8000 {
-                            break;
-                        }
-                        if length < 6 {
-                            return Err(Error::Invalid("Share Control length"));
-                        }
-                        changed |= self.share_control(pdus.take(length)?, &mut events)?;
-                    }
+                    changed |= self.share_pdus(data, &mut events)?;
                 } else {
                     let mut header = Reader::new(data);
                     let length = header.u32_le()? as usize;
@@ -403,6 +397,15 @@ impl Session {
             events.push(Event::GraphicsChanged);
         }
         Ok(events)
+    }
+
+    pub(crate) fn share_pdus(&mut self, data: &[u8], events: &mut Vec<Event>) -> Result<bool> {
+        let mut pdus = Reader::new(data);
+        let mut changed = false;
+        while let Some(pdu) = wire::next_share_pdu(&mut pdus)? {
+            changed |= self.share_control(pdu, events)?;
+        }
+        Ok(changed)
     }
 
     /// Acknowledge consumption of a completed frame and all earlier received frames.
@@ -477,6 +480,28 @@ impl Session {
             }
         }
         Ok(events)
+    }
+
+    /// Encode a small remote pointer motion and restore its current position.
+    ///
+    /// This is desktop activity, not a network heartbeat. Call only when the user
+    /// enables idle prevention. Held keys/buttons and server reactivation suppress
+    /// it. Both moves share one packet, use the latest server/client position, and
+    /// do not change the local framebuffer. This cannot unlock a desktop or
+    /// override mandatory server policies.
+    pub fn keep_awake(&mut self) -> Result<Vec<Event>> {
+        if matches!(self.state, State::Closed) {
+            return Err(Error::Invalid("closed session"));
+        }
+        if !self.is_active() {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .input
+            .keep_awake(self.graphics.pointer_position(), &self.info)?
+            .into_iter()
+            .map(Event::Send)
+            .collect())
     }
 
     /// Advertise local text without reading the operating system clipboard.
@@ -706,13 +731,14 @@ impl Session {
                 ChannelEvent::Capture(event) => events.push(Event::Capture(event)),
                 ChannelEvent::DriveRequest(request) => events.push(Event::DriveRequest(request)),
                 ChannelEvent::RequestRejected(error) => events.push(Event::RequestRejected(error)),
+                ChannelEvent::RemoteApp(event) => events.push(Event::RemoteApp(event)),
                 ChannelEvent::DisplayReady => {} // Channels sends any pending latest size itself.
                 #[cfg(feature = "graphics")]
                 ChannelEvent::GraphicsOpened => {
-                    self.gfx = Some(crate::gfx::Gfx::new(self.config.limits));
-                    let actions = self
-                        .channels
-                        .send_graphics(crate::gfx::Gfx::capabilities())?;
+                    let gfx =
+                        crate::gfx::Gfx::new(self.config.limits, self.config.allow_lossy_bitmaps);
+                    let actions = self.channels.send_graphics(gfx.capabilities())?;
+                    self.gfx = Some(gfx);
                     self.channel_events(actions, events)?;
                 }
                 #[cfg(feature = "graphics")]
@@ -786,6 +812,42 @@ impl Session {
         }
     }
 
+    /// Send a local window-manager operation to a known remote application.
+    pub fn remote_app(
+        &mut self,
+        command: crate::remote_app::RemoteAppCommand,
+    ) -> Result<Vec<Event>> {
+        if !matches!(self.state, State::Active) {
+            return Err(Error::Invalid("inactive session"));
+        }
+        use crate::remote_app::RemoteAppCommand;
+        let id = match &command {
+            RemoteAppCommand::Activate { window_id, .. }
+            | RemoteAppCommand::System { window_id, .. }
+            | RemoteAppCommand::Move { window_id, .. } => *window_id,
+        };
+        if !self.remote_windows.contains(id) {
+            return Err(Error::Invalid("unknown RemoteApp window"));
+        }
+        let actions = self.channels.remote_app(command)?;
+        let mut events = Vec::new();
+        self.channel_events(actions, &mut events)?;
+        Ok(events)
+    }
+
+    fn window_orders(&mut self, data: &[u8], slow: bool, events: &mut Vec<Event>) -> Result<bool> {
+        if self.config.remote_app.is_none() {
+            return Err(Error::Unsupported("drawing orders"));
+        }
+        events.extend(
+            self.remote_windows
+                .receive(data, slow)?
+                .into_iter()
+                .map(Event::RemoteApp),
+        );
+        Ok(false)
+    }
+
     fn share_data(&mut self, data: &[u8], events: &mut Vec<Event>) -> Result<bool> {
         let mut reader = Reader::new(data);
         let share_id = reader.u32_le()?;
@@ -823,7 +885,7 @@ impl Session {
         }
         match kind {
             2 => match reader.u16_le()? {
-                0 => Err(Error::Unsupported("drawing orders")),
+                0 => self.window_orders(reader.remaining(), true, events),
                 1 => self.graphics.bitmap_update(payload),
                 2 => self.graphics.palette_update(payload),
                 3 => {
@@ -993,7 +1055,7 @@ impl Session {
         on_frame: &mut Option<&mut FrameCallback<'_>>,
     ) -> Result<bool> {
         let pointer = match code {
-            0 => return Err(Error::Unsupported("drawing orders")),
+            0 => return self.window_orders(data, false, events),
             1 => return self.graphics.bitmap_update(data),
             2 => return self.graphics.palette_update(data),
             3 => {
@@ -1079,6 +1141,84 @@ mod tests {
         };
         Session::new(config, info).unwrap()
     }
+
+    #[test]
+    fn remote_app_session_routes_static_channel_window_orders_and_local_commands() {
+        use crate::remote_app::{RemoteApp, RemoteAppCommand, RemoteAppEvent, SystemCommand};
+        let base = session();
+        let mut config = base.config;
+        config.dynamic_resolution = false;
+        config.remote_app = Some(RemoteApp {
+            program: "||calc".into(),
+            ..Default::default()
+        });
+        let mut info = base.info;
+        info.channels = vec![crate::Channel {
+            id: 1004,
+            name: "rail".into(),
+        }];
+        let mut session = Session::new(config, info).unwrap();
+        let mut data = vec![8, 0, 0, 0, 3, 0, 0, 0];
+        data.extend_from_slice(&[5, 0, 8, 0, 1, 0, 0, 0]);
+        let mut handshake = wire::mcs_send_data(1002, 1004, &data).unwrap();
+        handshake[7] = 0x68;
+        let responses = session.process(&handshake).unwrap();
+        assert_eq!(
+            responses
+                .iter()
+                .filter(|e| matches!(e, Event::Send(_)))
+                .count(),
+            9
+        );
+        let order = crate::remote_app::test_window_order();
+        let events = session.process(&fast(&[(0, &order)])).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::RemoteApp(RemoteAppEvent::Window(w)) if w.id == 42))
+        );
+        assert_eq!(session.remote_windows()[0].title, "A");
+        for command in [
+            RemoteAppCommand::Activate {
+                window_id: 42,
+                enabled: true,
+            },
+            RemoteAppCommand::System {
+                window_id: 42,
+                command: SystemCommand::Close,
+            },
+        ] {
+            assert!(matches!(
+                &session.remote_app(command).unwrap()[..],
+                [Event::Send(_)]
+            ));
+            assert!(session.is_active());
+        }
+        assert!(
+            session
+                .remote_app(RemoteAppCommand::Activate {
+                    window_id: 43,
+                    enabled: true
+                })
+                .is_err()
+        );
+        let deletion = [1, 0, 0x2e, 11, 0, 0, 0, 0, 0x21, 42, 0, 0, 0];
+        assert!(
+            session
+                .process(&fast(&[(0, &deletion)]))
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, Event::RemoteApp(RemoteAppEvent::Deleted(42))))
+        );
+        assert!(session.remote_windows().is_empty());
+        assert!(session.is_active());
+        assert!(
+            super::tests::session()
+                .process(&fast(&[(0, &order)]))
+                .is_err()
+        );
+    }
+
     fn fast(updates: &[(u8, &[u8])]) -> Vec<u8> {
         let mut packet = vec![0, 0];
         for (header, data) in updates {
@@ -1487,6 +1627,23 @@ mod tests {
     }
 
     #[test]
+    fn keep_awake_uses_server_pointer_position_without_redrawing_the_frame() {
+        let mut session = session();
+        session.process(&fast(&[(8, &[1, 0, 1, 0])])).unwrap();
+        assert_eq!(session.input.position(), (0, 0));
+        let pixels = session.graphics().pixels().to_vec();
+        let events = session.keep_awake().unwrap();
+        let [Event::Send(packet)] = events.as_slice() else {
+            panic!("expected a single input packet and no graphics changes");
+        };
+        assert_eq!(packet, &[8, 16, 0x20, 0, 8, 0, 0, 1, 0, 0x20, 0, 8, 1, 0, 1, 0]);
+        assert_eq!(session.graphics().pointer_position(), (1, 1));
+        assert_eq!(session.graphics().pixels(), pixels);
+        session.state = State::Closed;
+        assert!(session.keep_awake().is_err());
+    }
+
+    #[test]
     fn synchronization_ime_and_unknown_slow_pointer_match_spec() {
         let mut session = session();
         assert!(
@@ -1595,6 +1752,7 @@ mod tests {
             .unwrap();
         assert!(!session.is_active());
         assert!(session.input(Input::ReleaseAll).unwrap().is_empty());
+        assert!(session.keep_awake().unwrap().is_empty());
         // Synchronize references the early graphics data, before activation finishes.
         session
             .process(&compressed_slow(31, 0x21, &[0xf8, 0x90]))

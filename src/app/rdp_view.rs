@@ -31,6 +31,7 @@ mod file_clipboard;
 mod input;
 mod menu;
 mod performance;
+mod remote_app;
 mod remote_files;
 mod render;
 
@@ -96,6 +97,7 @@ pub struct RdpView {
     menu_index: usize,
     menu_scroll: gpui::ScrollHandle,
     state: State,
+    applications: remote_app::Applications,
     sender: Option<RdpSender>,
     frames: Option<watch::Receiver<Option<Arc<RdpFrame>>>>,
     images: Vec<render::TileImage>,
@@ -219,7 +221,8 @@ impl RdpView {
                     cx.notify();
                 }
             }),
-            cx.on_release_in(window, |this: &mut Self, window, _| {
+            cx.on_release_in(window, |this: &mut Self, window, cx| {
+                this.close_application_windows(cx);
                 this.drop_control();
                 if let Some(sender) = this.sender.take() {
                     sender.close();
@@ -259,7 +262,12 @@ impl RdpView {
             title,
             pane_close_visible: false,
             desktop_size: (
-                launch.config.width * u16::from(launch.config.monitor_count),
+                launch.config.width
+                    * u16::from(if launch.config.remote_app.is_some() {
+                        1
+                    } else {
+                        launch.config.monitor_count
+                    }),
                 launch.config.height,
             ),
             config: launch.config.clone(),
@@ -277,6 +285,7 @@ impl RdpView {
             menu_index: 0,
             menu_scroll: gpui::ScrollHandle::new(),
             state: State::Connecting,
+            applications: remote_app::Applications::default(),
             sender: None,
             frames: None,
             images: Vec::new(),
@@ -432,6 +441,7 @@ impl RdpView {
     }
 
     pub fn set_locked(&mut self, locked: bool, cx: &mut Context<Self>) {
+        self.notify_application_lock(locked, cx);
         self.send(RdpCommand::SetLocked(locked), cx);
         if locked {
             self.invalidate_frame_acknowledgements();
@@ -462,6 +472,7 @@ impl RdpView {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.close_application_windows(cx);
         self.disconnect();
         self.closed = true;
         self.event_task = None;
@@ -474,6 +485,7 @@ impl RdpView {
 
     pub fn disconnect_or_reconnect(&mut self, cx: &mut Context<Self>) {
         if self.is_running() {
+            self.close_application_windows(cx);
             self.disconnect();
             self.resize_task = None;
             cx.emit(PaneEvent::Activity);
@@ -511,7 +523,9 @@ impl RdpView {
     }
 
     fn input_enabled(&self) -> bool {
-        self.surface_visible()
+        !self.window_state.is_locked()
+            && (self.surface_visible()
+                || (self.config.remote_app.is_some() && self.applications.active.is_some()))
             && !self.menu_open
             && self.state == State::Connected
             && !self.window_state.prompts.is_busy()

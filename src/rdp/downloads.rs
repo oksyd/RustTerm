@@ -6,7 +6,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{self, Write},
-    os::unix::fs::{DirBuilderExt, PermissionsExt},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -47,6 +47,7 @@ struct Active {
 }
 
 pub(super) struct Downloads {
+    cache: Option<PathBuf>,
     jobs: JoinSet<Result<Option<Staging>>>,
     running: Option<u64>,
     generation: u64,
@@ -54,8 +55,9 @@ pub(super) struct Downloads {
 }
 
 impl Downloads {
-    pub fn new() -> Self {
+    pub fn new(cache: Option<PathBuf>) -> Self {
         Self {
+            cache,
             jobs: JoinSet::new(),
             running: None,
             generation: 0,
@@ -177,10 +179,11 @@ impl Downloads {
             return;
         };
         let cancel = active.cancel.clone();
+        let cache = self.cache.clone();
         self.running = Some(active.generation);
         self.jobs.spawn_blocking(move || {
             check_cancelled(&cancel)?;
-            let parent = cache_directory()?;
+            let parent = cache_directory(cache.as_deref())?;
             Staging::prepare(&parent, files, cancel).map(Some)
         });
     }
@@ -412,19 +415,16 @@ fn validate_metadata(files: &[ClipboardFile]) -> Result<u64> {
     Ok(total)
 }
 
-fn cache_directory() -> Result<PathBuf> {
-    let cache = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+fn cache_directory(cache: Option<&Path>) -> Result<PathBuf> {
+    let cache = cache
         .filter(|path| path.is_absolute())
         .ok_or(RdpError::FileDownload)?;
-    let parent = cache.join("rustterm/rdp-clipboard");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&parent)
-        .map_err(file_error)?;
+    crate::config::ensure_directory(cache).map_err(|_| RdpError::FileDownload)?;
+    let parent = cache.join("rdp-clipboard");
+    crate::config::ensure_directory(&parent).map_err(|error| match error {
+        crate::config::ConfigError::Io(error) => file_error(error),
+        _ => RdpError::FileDownload,
+    })?;
     Ok(parent)
 }
 
@@ -447,6 +447,24 @@ fn file_error(error: io::Error) -> RdpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_staging_uses_the_selected_private_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("profile/cache");
+        let staging = cache_directory(Some(&cache)).unwrap();
+        assert_eq!(staging, cache.join("rdp-clipboard"));
+        for path in [&cache, &staging] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(cache_directory(None).is_err());
+        assert!(cache_directory(Some(Path::new("relative"))).is_err());
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(cache_directory(Some(&cache)).is_err());
+    }
 
     fn description(name: &str, size: u64) -> ClipboardFile {
         ClipboardFile {

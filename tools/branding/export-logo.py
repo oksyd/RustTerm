@@ -8,6 +8,7 @@ python3-gi-cairo and gir1.2-rsvg-2.0; no display server or GPU is used.
 import argparse
 from copy import deepcopy
 from pathlib import Path
+import struct
 import xml.etree.ElementTree as ET
 
 import cairo
@@ -35,6 +36,20 @@ def render_png(source, destination, width, height):
     viewport.width, viewport.height = width, height
     Rsvg.Handle.new_from_file(str(source)).render_document(cairo.Context(surface), viewport)
     surface.write_to_png(str(destination))
+
+
+def write_ico(destination, sizes):
+    """Bundle existing RGBA PNGs without resampling; ICO supports up to 256 px."""
+    images = [(size, (BRAND / f"png/rustterm-{size}.png").read_bytes())
+              for size in sizes if size <= 256]
+    header = struct.pack('<HHH', 0, 1, len(images))
+    directory = bytearray()
+    offset = len(header) + 16 * len(images)
+    for size, data in images:
+        directory.extend(struct.pack('<BBBBHHII', size % 256, size % 256,
+                                     0, 0, 1, 32, len(data), offset))
+        offset += len(data)
+    destination.write_bytes(header + directory + b''.join(data for _, data in images))
 
 
 def symbol(name, source):
@@ -82,6 +97,7 @@ def main():
     sizes = (16, 24, 32, 48, 64, 128, 256, 512)
     for size in sizes:
         render_png(master, BRAND / f"png/rustterm-{size}.png", size, size)
+    write_ico(BRAND / "rustterm.ico", sizes)
 
     symbols = "\n".join(symbol(name, path) for name, path in (
         ("app", master), ("logo", BRAND / "wordmark.svg"),
@@ -147,7 +163,7 @@ def main():
     source = preview_dir / "logo.svg"
     source.write_text(preview)
     render_png(source, preview_dir / "assets/logo-preview.png", 1440, 960)
-    print("Exported SVG variants, 8 PNG icon sizes and the logo preview.")
+    print("Exported SVG variants, 8 PNG icon sizes, the Windows ICO and the logo preview.")
 
 
 if __name__ == "__main__":

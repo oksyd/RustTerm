@@ -14,6 +14,7 @@ pub struct RdpConfig {
     pub port: u16,
     pub username: String,
     pub domain: Option<String>,
+    pub remote_app: Option<RdpRemoteApp>,
     pub credential: Option<CredentialRef>,
     pub width: u16,
     pub height: u16,
@@ -31,6 +32,12 @@ pub struct RdpConfig {
     pub monitor_count: u8,
     pub shared_folders: Vec<RdpSharedFolder>,
     pub timeout_secs: u64,
+    /// TCP idle/probe interval. Zero disables network keepalive; this does not
+    /// synthesize user input or inhibit the remote desktop's lock/sleep policy.
+    pub keepalive_secs: u64,
+    /// Periodically move and restore the remote pointer to prevent desktop idle.
+    /// Separate from TCP keepalive because this synthesizes remote input.
+    pub prevent_idle: bool,
     #[serde(
         deserialize_with = "deserialize_rdp_certificate_sha256",
         serialize_with = "serialize_rdp_certificate_sha256"
@@ -45,6 +52,7 @@ impl Default for RdpConfig {
             port: 3389,
             username: String::new(),
             domain: None,
+            remote_app: None,
             credential: None,
             width: 1280,
             height: 720,
@@ -61,8 +69,41 @@ impl Default for RdpConfig {
             monitor_count: 1,
             shared_folders: Vec::new(),
             timeout_secs: 15,
+            keepalive_secs: 30,
+            prevent_idle: false,
             certificate_sha256: None,
         }
+    }
+}
+
+/// RemoteApp launch parameters. The server must publish/allow the application.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RdpRemoteApp {
+    pub program: String,
+    pub arguments: String,
+    pub working_directory: String,
+}
+
+impl RdpRemoteApp {
+    fn validate(&self) -> Result<()> {
+        for (text, max, field) in [
+            (&self.program, 260, i18n_key::RDP_REMOTE_APP_PROGRAM),
+            (&self.arguments, 8000, i18n_key::RDP_REMOTE_APP_ARGUMENTS),
+            (
+                &self.working_directory,
+                260,
+                i18n_key::RDP_REMOTE_APP_DIRECTORY,
+            ),
+        ] {
+            if text.encode_utf16().count() > max
+                || text.chars().any(char::is_control)
+                || (field == i18n_key::RDP_REMOTE_APP_PROGRAM && text.trim().is_empty())
+            {
+                return Err(invalid(i18n_key::RDP_REMOTE_APP_INVALID_PARAMETERS).at_field(field));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -105,7 +146,7 @@ impl RdpConfig {
     /// A stored multi-monitor layout has fixed dimensions, including older profiles
     /// that also enabled automatic single-monitor resizing.
     pub fn uses_dynamic_resolution(&self) -> bool {
-        self.dynamic_resolution && self.monitor_count == 1
+        self.remote_app.is_none() && self.dynamic_resolution && self.monitor_count == 1
     }
 
     pub fn same_server(&self, other: &Self) -> bool {
@@ -118,6 +159,9 @@ impl RdpConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(app) = &self.remote_app {
+            app.validate()?;
+        }
         known_hosts::normalize_host(&self.host)
             .map_err(|error| error.at_field(i18n_key::WORKSPACE_HOST))?;
         validate_text(&self.username, 255, i18n_key::RDP_RDP_USERNAME)
@@ -135,6 +179,10 @@ impl RdpConfig {
                 i18n_key::RDP_RDP_CONNECTION_TIMEOUT_MUST_BE_BETWEEN_1_AND_600_SECONDS,
             )
             .at_field(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS));
+        }
+        if self.keepalive_secs > 3600 {
+            return Err(invalid(i18n_key::RDP_KEEPALIVE_INVALID)
+                .at_field(i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS));
         }
         if !matches!(self.color_depth, 16 | 32) {
             return Err(invalid(i18n_key::RDP_RDP_COLOR_DEPTH_MUST_BE_16_OR_32_BITS)
@@ -155,12 +203,17 @@ impl RdpConfig {
                     .at_field(i18n_key::RDP_LOCAL_REFRESH_LIMIT),
             );
         }
+        let monitor_count = if self.remote_app.is_some() {
+            1
+        } else {
+            self.monitor_count
+        };
         if !(320..=3840).contains(&self.width)
             || !(200..=2160).contains(&self.height)
             || !(1..=4).contains(&self.monitor_count)
-            || (self.monitor_count > 1 && !self.width.is_multiple_of(2))
-            || u32::from(self.width) * u32::from(self.monitor_count) > 8192
-            || u32::from(self.width) * u32::from(self.height) * u32::from(self.monitor_count)
+            || (monitor_count > 1 && !self.width.is_multiple_of(2))
+            || u32::from(self.width) * u32::from(monitor_count) > 8192
+            || u32::from(self.width) * u32::from(self.height) * u32::from(monitor_count)
                 > 33_554_432
         {
             return Err(
@@ -245,7 +298,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{RdpConfig, RdpQuality};
+    use super::{RdpConfig, RdpQuality, RdpRemoteApp};
     use crate::config::CredentialRef;
     use crate::i18n::messages as i18n_key;
     use uuid::Uuid;
@@ -256,17 +309,54 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.quality(), RdpQuality::Clear);
         assert_eq!(config.desktop_scale, None);
+        assert_eq!(config.keepalive_secs, 30);
+        assert!(!config.prevent_idle);
         assert!(config.uses_dynamic_resolution());
         config.color_depth = 16;
         config.desktop_scale = Some(175);
         config.max_fps = 30;
         config.allow_lossy_bitmaps = true;
         config.compression = false;
+        config.keepalive_secs = 45;
+        config.prevent_idle = true;
         config.validate().unwrap();
         assert_eq!(config.quality(), RdpQuality::Custom);
         let encoded = toml::to_string(&config).unwrap();
         let decoded: RdpConfig = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn keepalive_can_be_disabled_and_invalid_intervals_identify_the_field() {
+        let valid = RdpConfig {
+            username: "operator".into(),
+            ..RdpConfig::default()
+        };
+        for seconds in [0, 1, 30, 3600] {
+            let config = RdpConfig {
+                keepalive_secs: seconds,
+                ..valid.clone()
+            };
+            config.validate().unwrap();
+            let decoded: RdpConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(decoded.keepalive_secs, seconds);
+            assert!(valid.same_auth_identity(&decoded));
+        }
+        for seconds in [3601, u64::MAX] {
+            let error = RdpConfig {
+                keepalive_secs: seconds,
+                ..valid.clone()
+            }
+            .validate()
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                crate::config::ConfigError::FieldValidation {
+                    field: i18n_key::RDP_NETWORK_KEEPALIVE_SECONDS,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -435,5 +525,74 @@ mod tests {
         }
         .validate()
         .unwrap();
+    }
+    #[test]
+    fn remote_app_profiles_round_trip_without_changing_authentication_identity() {
+        let desktop = RdpConfig {
+            username: "operator".into(),
+            ..Default::default()
+        };
+        let application = RdpConfig {
+            remote_app: Some(RdpRemoteApp {
+                program: "||notepad".into(),
+                arguments: "文档.txt".into(),
+                working_directory: "C:\\Docs".into(),
+            }),
+            ..desktop.clone()
+        };
+        application.validate().unwrap();
+        RdpConfig {
+            width: 3840,
+            monitor_count: 4,
+            ..application.clone()
+        }
+        .validate()
+        .unwrap();
+        assert!(application.same_auth_identity(&desktop));
+        assert!(!application.uses_dynamic_resolution());
+        let serialized = serde_json::to_string(&application).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RdpConfig>(&serialized).unwrap(),
+            application
+        );
+        assert!(
+            serde_json::from_str::<RdpConfig>("{}")
+                .unwrap()
+                .remote_app
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn remote_app_uses_utf16_limits_and_rejects_empty_programs() {
+        for program in [
+            String::new(),
+            " ".into(),
+            "||name\0extra".into(),
+            "😀".repeat(131),
+        ] {
+            let config = RdpConfig {
+                remote_app: Some(RdpRemoteApp {
+                    program,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(config.validate().is_err());
+        }
+        let app = RdpRemoteApp {
+            program: "||app".into(),
+            arguments: "😀".repeat(4000),
+            ..Default::default()
+        };
+        app.validate().unwrap();
+        assert!(
+            RdpRemoteApp {
+                arguments: "😀".repeat(4001),
+                ..app
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

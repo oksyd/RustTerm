@@ -241,6 +241,7 @@ impl TerminalView {
             cell_width: px(font_size * 0.6),
             line_height: px(font_size * 1.4),
             bounds: None,
+            header_bounds: None,
             resize: ResizeScheduler::new((80, 24)),
             resize_receipt: None,
             requested_revision: 0,
@@ -379,7 +380,9 @@ impl TerminalView {
     }
 
     pub fn may_auto_reconnect(&self) -> bool {
-        if self.manually_disconnected || self.kind == TerminalKind::Local {
+        if self.manually_disconnected
+            || matches!(self.kind, TerminalKind::Local | TerminalKind::Container)
+        {
             return false;
         }
         self.runs.last().is_some_and(|session| {

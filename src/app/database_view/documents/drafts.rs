@@ -14,6 +14,11 @@ pub struct DatabaseDraft {
     table_scroll: gpui::UniformListScrollHandle,
     browser_open: bool,
     browser_width: f32,
+    page: WorkspacePage,
+    monitor: Option<super::super::processlist::MonitorDraft>,
+    collapsed_objects: std::collections::BTreeSet<super::super::explorer::GroupKey>,
+    editor_height: f32,
+    results_only: bool,
 }
 
 struct DocumentDraft {
@@ -137,6 +142,11 @@ impl DatabaseView {
             table_scroll: self.table_scroll.clone(),
             browser_open: self.browser_open,
             browser_width: self.browser_width,
+            page: self.page,
+            monitor: self.monitor.as_ref().map(|monitor| monitor.draft(cx)),
+            collapsed_objects: self.collapsed_objects.clone(),
+            editor_height: self.editor_height,
+            results_only: self.results_only,
         }
     }
 
@@ -162,6 +172,20 @@ impl DatabaseView {
         );
         self.browser_open = draft.browser_open;
         self.browser_width = draft.browser_width;
+        self.page = if draft.page == WorkspacePage::Sessions && self.monitor.is_none() {
+            WorkspacePage::Overview
+        } else {
+            draft.page
+        };
+        if let Some(monitor) = &mut self.monitor
+            && let Some(draft) = draft.monitor
+        {
+            monitor.restore(draft, cx);
+        }
+        self.editor_height = draft.editor_height;
+        self.results_only = draft.results_only;
+        self.collapsed_objects = draft.collapsed_objects;
+        self.update_editor_height(cx);
         if same_target {
             self.databases = draft.databases;
             self.tables = draft.tables;
@@ -179,7 +203,8 @@ impl DatabaseView {
 fn same_database(previous: &DatabaseConfig, next: &DatabaseConfig) -> bool {
     match (previous, next) {
         (DatabaseConfig::Mysql(previous), DatabaseConfig::Mysql(next))
-        | (DatabaseConfig::Postgres(previous), DatabaseConfig::Postgres(next)) => {
+        | (DatabaseConfig::Postgres(previous), DatabaseConfig::Postgres(next))
+        | (DatabaseConfig::ClickHouse(previous), DatabaseConfig::ClickHouse(next)) => {
             previous.same_auth_identity(next)
         }
         (DatabaseConfig::Sqlite(previous), DatabaseConfig::Sqlite(next)) => {

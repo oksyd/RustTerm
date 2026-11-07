@@ -8,6 +8,7 @@ mod elasticsearch;
 mod groups;
 pub mod known_hosts;
 mod local;
+mod paths;
 mod profiles;
 mod rdp;
 mod redis;
@@ -24,13 +25,16 @@ pub use elasticsearch::{ElasticsearchAuth, ElasticsearchConfig};
 pub use groups::GroupNode;
 pub use known_hosts::{HostKey, HostKeyStatus, KnownHosts};
 pub use local::{LocalConfig, LocalProfile};
+pub use paths::{AppPaths, cache_dir, config_dir};
 pub use profiles::{Connection, Group, Profile};
-pub use rdp::{RdpConfig, RdpQuality, RdpSharedFolder};
+pub use rdp::{RdpConfig, RdpQuality, RdpRemoteApp, RdpSharedFolder};
 pub use redis::{RedisConfig, RedisEndpoint, RedisTopology};
 pub use settings::{AppLockConfig, AppTheme, Settings, Theme};
 pub use sql::{DatabaseConfig, SqlConfig, SqlEngine, SqliteConfig};
 pub use ssh::{AuthMethod, ForwardKind, PortForward, SshConfig, SshJumpHost, SshProfile};
-pub use storage::{ConfigLock, config_dir};
+pub use storage::ConfigLock;
+#[cfg(target_os = "linux")]
+pub(crate) use storage::ensure_directory;
 pub use telnet::TelnetConfig;
 pub use uuid::Uuid;
 pub use workspace::{
@@ -134,6 +138,7 @@ pub struct AppConfig {
     pub groups: Vec<Group>,
     pub settings: Settings,
     pub app_lock: AppLockConfig,
+    #[serde(skip_serializing_if = "WorkspaceSnapshot::is_empty")]
     pub workspace: WorkspaceSnapshot,
     pub quick_commands: Vec<QuickCommand>,
 }
@@ -268,7 +273,9 @@ impl AppConfig {
                         return Err(invalid(i18n_key::DATABASE_A_DATABASE_SSH_TUNNEL_MUST_REFERENCE_AN_EXISTING_SSH_PROFILE));
                     }
                 }
-                Connection::Mysql(sql) | Connection::Postgres(sql) => {
+                Connection::Mysql(sql)
+                | Connection::Postgres(sql)
+                | Connection::ClickHouse(sql) => {
                     sql.validate()?;
                     if sql
                         .ssh_profile

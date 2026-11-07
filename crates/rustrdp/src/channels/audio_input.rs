@@ -335,7 +335,7 @@ mod tests {
         assert!(actions.len().is_multiple_of(2));
         let mut decoder = fdk_aac::dec::Decoder::new(fdk_aac::dec::Transport::Raw);
         decoder.config_raw(&[0x12, 0x08]).unwrap(); // AAC-LC, 44.1 kHz, mono.
-        for pair in actions.chunks_exact(2) {
+        for pair in actions.as_chunks::<2>().0 {
             assert!(matches!(&pair[0], Action::Send(data) if data == &[5]));
             let Action::Send(data) = &pair[1] else {
                 panic!("capture packet")

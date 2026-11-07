@@ -10,6 +10,8 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum SqlEngine {
     Mysql,
+    #[serde(rename = "clickhouse")]
+    ClickHouse,
     Postgres,
     Sqlite,
 }
@@ -18,6 +20,7 @@ impl SqlEngine {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Mysql => "MySQL",
+            Self::ClickHouse => "ClickHouse",
             Self::Postgres => "PostgreSQL",
             Self::Sqlite => "SQLite",
         }
@@ -43,6 +46,10 @@ pub struct SqlConfig {
 }
 
 impl SqlConfig {
+    pub fn clickhouse() -> Self {
+        Self::server_defaults(8123, "default", "default")
+    }
+
     pub fn mysql() -> Self {
         Self::server_defaults(3306, "root", "")
     }
@@ -161,6 +168,7 @@ impl SqliteConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DatabaseConfig {
     Mysql(SqlConfig),
+    ClickHouse(SqlConfig),
     Postgres(SqlConfig),
     Sqlite(SqliteConfig),
 }
@@ -169,6 +177,7 @@ impl DatabaseConfig {
     pub fn engine(&self) -> SqlEngine {
         match self {
             Self::Mysql(_) => SqlEngine::Mysql,
+            Self::ClickHouse(_) => SqlEngine::ClickHouse,
             Self::Postgres(_) => SqlEngine::Postgres,
             Self::Sqlite(_) => SqlEngine::Sqlite,
         }
@@ -176,21 +185,25 @@ impl DatabaseConfig {
 
     pub fn query_timeout_secs(&self) -> u64 {
         match self {
-            Self::Mysql(config) | Self::Postgres(config) => config.query_timeout_secs,
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {
+                config.query_timeout_secs
+            }
             Self::Sqlite(config) => config.query_timeout_secs,
         }
     }
 
     pub fn server(&self) -> Option<&SqlConfig> {
         match self {
-            Self::Mysql(config) | Self::Postgres(config) => Some(config),
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => Some(config),
             Self::Sqlite(_) => None,
         }
     }
 
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Mysql(config) | Self::Postgres(config) => config.validate(),
+            Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {
+                config.validate()
+            }
             Self::Sqlite(config) => config.validate(),
         }
     }

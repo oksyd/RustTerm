@@ -127,7 +127,9 @@ impl server::Handler for Handler {
                 return Ok(());
             }
             let request = String::from_utf8(std::mem::take(&mut self.pending)).unwrap();
-            let body = if request.starts_with("GET / HTTP/") {
+            let body = if request.contains("default_format=JSONCompact") {
+                r#"{"meta":[{"name":"version()","type":"String"}],"data":[["25.8.1"]],"rows":1}"#
+            } else if request.starts_with("GET / HTTP/") {
                 r#"{"cluster_name":"via-ssh","version":{"number":"8.19.0"}}"#
             } else {
                 r#"{"hits":{"hits":[{"_source":{"route":"ssh"}}]}}"#
@@ -554,4 +556,65 @@ async fn tunnel_accepts_encrypted_private_key_authentication() {
     disconnected(&fixture.events).await;
     assert_eq!(fixture.events.authentications.load(Ordering::SeqCst), 1);
     assert_eq!(fixture.events.shell_channels.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn clickhouse_uses_ssh_dns_and_sensitive_auth_without_a_shell() {
+    use rustterm::{
+        config::{DatabaseConfig, SqlConfig},
+        database::DatabaseClient,
+    };
+    let fixture = Fixture::new(None, false).await;
+    let directory = private_directory();
+    let (trust, mut prompts) = mpsc::channel(1);
+    let config = SqlConfig {
+        host: "clickhouse.internal.invalid".into(),
+        ssh_profile: Some(Uuid::new_v4()),
+        ..SqlConfig::clickhouse()
+    };
+    let ssh = fixture.ssh(
+        &directory.path().join("hosts.toml"),
+        SshAuth::Password("ssh-secret".into()),
+    );
+    let pending = tokio::spawn(DatabaseClient::connect(
+        DatabaseConfig::ClickHouse(config),
+        Secret::new("password".into()),
+        Some((ssh, trust)),
+    ));
+    challenge(&mut prompts).await.reply.send(true).unwrap();
+    let client = tokio::time::timeout(Duration::from_secs(3), pending)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        client
+            .execute("SELECT version()".into(), 1)
+            .await
+            .unwrap()
+            .results[0]
+            .rows[0][0]
+            .as_deref(),
+        Some("25.8.1")
+    );
+    assert_eq!(
+        *fixture.events.destinations.lock().unwrap(),
+        [
+            ("clickhouse.internal.invalid".into(), 8123),
+            ("clickhouse.internal.invalid".into(), 8123),
+            ("clickhouse.internal.invalid".into(), 8123)
+        ]
+    );
+    assert_eq!(fixture.events.shell_channels.load(Ordering::SeqCst), 0);
+    assert!(
+        fixture
+            .events
+            .http_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.contains("Basic ZGVmYXVsdDpwYXNzd29yZA=="))
+    );
+    client.close();
+    disconnected(&fixture.events).await;
 }

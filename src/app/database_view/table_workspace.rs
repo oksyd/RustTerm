@@ -255,7 +255,7 @@ impl DatabaseView {
             }
             let id = self.next_document_id;
             self.next_document_id += 1;
-            let title = format!("{}.{}", info.schema, info.name);
+            let title = info.name.clone();
             let mut document = Document::new(id, title, self.engine(), cx);
             document.editor_open = false;
             document
@@ -266,6 +266,9 @@ impl DatabaseView {
             self.documents.len() - 1
         };
         self.active_document = index;
+        self.pause_monitor();
+        self.page = WorkspacePage::Document;
+        self.object_menu = None;
         if self.viewport_size.0 < BROWSER_MIN_WIDTH {
             self.browser_open = false;
         }
@@ -323,8 +326,12 @@ impl DatabaseView {
         self.running_document = Some(id);
         let task = cx.background_executor().spawn(async move {
             match section {
+                TableAction::Details => client.table_details(info).await,
+                TableAction::Constraints => client.constraints(info).await,
+                TableAction::Parts => client.parts(info).await,
                 TableAction::Columns => client.columns(info).await,
                 TableAction::Indexes => client.indexes(info).await,
+                TableAction::Definition => client.definition(info).await,
                 TableAction::Data => unreachable!(),
             }
         });

@@ -10,6 +10,9 @@ pub(super) async fn load(client: &DatabaseClient, table: TableInfo) -> Result<Ta
     let schema_name = quote_literal(engine, &table.schema);
     let table_name = quote_literal(engine, &table.name);
     let sql = match engine {
+        SqlEngine::ClickHouse => format!(
+            "SELECT name,type,if(startsWith(type, 'Nullable('), 'YES', 'NO'),nullIf(default_expression,''),default_kind,0,'TABLE','' FROM system.columns WHERE database={schema_name} AND table={table_name} ORDER BY position"
+        ),
         SqlEngine::Mysql => format!(
             "SELECT c.COLUMN_NAME,c.COLUMN_TYPE,c.IS_NULLABLE,c.COLUMN_DEFAULT,c.EXTRA,COALESCE(k.ORDINAL_POSITION,0),t.TABLE_TYPE,t.ENGINE \
              FROM information_schema.COLUMNS c \
@@ -58,6 +61,7 @@ pub(super) async fn load(client: &DatabaseClient, table: TableInfo) -> Result<Ta
                     || extra.contains("auto_increment")
             }
             SqlEngine::Postgres => extra == "1",
+            SqlEngine::ClickHouse => matches!(extra.as_str(), "materialized" | "alias"),
             SqlEngine::Sqlite => matches!(extra.as_str(), "2" | "3"),
         };
         relation_kind = Some(required(6)?.to_owned());
@@ -79,6 +83,7 @@ pub(super) async fn load(client: &DatabaseClient, table: TableInfo) -> Result<Ta
         return Err(DatabaseError::Protocol);
     }
     let table_relation = match engine {
+        SqlEngine::ClickHouse => true,
         SqlEngine::Mysql => relation_kind.as_deref() == Some("BASE TABLE"),
         SqlEngine::Postgres => matches!(relation_kind.as_deref(), Some("r" | "p")),
         SqlEngine::Sqlite => relation_kind.as_deref() == Some("table"),
@@ -87,7 +92,9 @@ pub(super) async fn load(client: &DatabaseClient, table: TableInfo) -> Result<Ta
         .iter()
         .filter(|column| column.primary_key.is_some())
         .collect();
-    let read_only_reason = if client.is_read_only() {
+    let read_only_reason = if engine == SqlEngine::ClickHouse {
+        Some(i18n_key::DATABASE_CLICKHOUSE_GRID_READ_ONLY)
+    } else if client.is_read_only() {
         Some(i18n_key::DATABASE_THIS_CONNECTION_IS_READ_ONLY)
     } else if !table_relation {
         Some(i18n_key::DATABASE_VIEWS_ARE_READ_ONLY_IN_THE_DATA_EDITOR)
@@ -118,6 +125,7 @@ pub(super) async fn load(client: &DatabaseClient, table: TableInfo) -> Result<Ta
 fn column_kind(engine: SqlEngine, data_type: &str, postgres_type: &str) -> ValueKind {
     let data_type = data_type.to_ascii_lowercase();
     match engine {
+        SqlEngine::ClickHouse => clickhouse_kind(&data_type),
         SqlEngine::Postgres => match postgres_type {
             "int2" | "int4" | "int8" | "oid" => ValueKind::Integer,
             "numeric" => ValueKind::Decimal,
@@ -170,5 +178,33 @@ fn column_kind(engine: SqlEngine, data_type: &str, postgres_type: &str) -> Value
                 ValueKind::Text
             }
         }
+    }
+}
+
+fn clickhouse_kind(data_type: &str) -> ValueKind {
+    let mut name = data_type;
+    while let Some(inner) = name
+        .strip_prefix("nullable(")
+        .or_else(|| name.strip_prefix("lowcardinality("))
+    {
+        name = inner.strip_suffix(')').unwrap_or(inner);
+    }
+    if name.starts_with("uint") || name.starts_with("int") {
+        ValueKind::Integer
+    } else if name.starts_with("decimal") {
+        ValueKind::Decimal
+    } else if name.starts_with("float") {
+        ValueKind::Float
+    } else if name == "bool" {
+        ValueKind::Boolean
+    } else if name == "string"
+        || name.starts_with("fixedstring(")
+        || name.starts_with("date")
+        || matches!(name, "uuid" | "ipv4" | "ipv6")
+        || name.starts_with("enum")
+    {
+        ValueKind::Text
+    } else {
+        ValueKind::Unsupported
     }
 }

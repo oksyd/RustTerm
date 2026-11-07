@@ -156,6 +156,39 @@ fn input_errors_leave_session_usable_but_protocol_errors_close_it() {
 }
 
 #[test]
+fn truncated_frames_fail_terminally_at_every_connection_phase() {
+    let transcript: Vec<_> = frames().collect();
+    for (index, frame) in transcript.iter().enumerate() {
+        for length in 0..frame.len() {
+            let mut connector = connector();
+            let _initial = connector.start().unwrap();
+            let mut session = None;
+            for previous in &transcript[..index] {
+                if let Some(active) = &mut session {
+                    let _: Vec<Event> = Session::process(active, previous).unwrap();
+                } else {
+                    session = connector.advance(previous).unwrap().session;
+                }
+            }
+            if let Some(mut session) = session {
+                assert!(
+                    session.process(&frame[..length]).is_err(),
+                    "frame {index}, length {length}"
+                );
+                assert!(!session.is_active());
+                assert!(session.process(frame).is_err());
+            } else {
+                assert!(
+                    connector.advance(&frame[..length]).is_err(),
+                    "frame {index}, length {length}"
+                );
+                assert!(connector.advance(frame).is_err());
+            }
+        }
+    }
+}
+
+#[test]
 fn clipboard_publication_completes_only_after_its_own_format_response() {
     let mut session = establish(connector());
     // Fixed MCS SendDataIndication from server 1002 on cliprdr channel 1004,
