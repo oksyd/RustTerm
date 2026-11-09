@@ -1,8 +1,17 @@
+## [0.1.9] - 2026-11-09
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.8] - 2026-11-09
 
 ### 🚜 Refactor
 
 - *(ui)* Unify components
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.8
 ## [0.1.7] - 2026-11-06
 
 ### ⚙️ Miscellaneous Tasks
