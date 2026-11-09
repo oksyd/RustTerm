@@ -1,5 +1,233 @@
 use super::*;
 
+#[test]
+fn asymmetric_progressive_tiles_match_freerdp() {
+    // Synthetic RLGR1 streams: signed coefficients in every band, varying LL3
+    // deltas, and unequal horizontal/vertical quantization. BGRA references were
+    // independently decoded by FreeRDP 3.32.1; unused alpha is normalized to 255.
+    for (stream, expected) in [
+        (
+            include_bytes!("../fixtures/progressive-standard.bin").as_slice(),
+            include_bytes!("../fixtures/progressive-standard.bgra").as_slice(),
+        ),
+        (
+            include_bytes!("../fixtures/progressive-reduced.bin").as_slice(),
+            include_bytes!("../fixtures/progressive-reduced.bgra").as_slice(),
+        ),
+    ] {
+        let mut decoder = Decoder::new(64 * 64 * 4);
+        let tiles = decoder.decode_bitmap(1, 10, 64, 64, stream).unwrap();
+        assert_eq!(tiles.len(), 1);
+        assert_eq!(tiles[0].pixels.len(), expected.len());
+        for (index, (actual, expected)) in tiles[0].pixels.iter().zip(expected).enumerate() {
+            assert!(
+                actual.abs_diff(*expected) <= 1,
+                "component {index}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn signed_upgrades_and_difference_tiles_match_freerdp() {
+    // Independent FreeRDP 3.32.1 output for an asymmetric first pass, two
+    // RAW refinements and a signed difference tile. Streams are u32-length
+    // prefixed; each expected image contains 64x64 opaque BGRA pixels.
+    let mut streams = Reader::new(include_bytes!("../fixtures/progressive-upgrades.bin"));
+    let expected = include_bytes!("../fixtures/progressive-upgrades.bgra");
+    let mut decoder = Decoder::new(64 * 64 * 4);
+    for (frame, pixels) in expected.as_chunks::<{ 64 * 64 * 4 }>().0.iter().enumerate() {
+        let length = streams.u32_le().unwrap() as usize;
+        let tiles = decoder
+            .decode_bitmap(1, 10, 64, 64, streams.take(length).unwrap())
+            .unwrap();
+        assert_eq!(tiles.len(), 1);
+        for (index, (actual, expected)) in tiles[0].pixels.iter().zip(pixels).enumerate() {
+            assert!(
+                actual.abs_diff(*expected) <= 1,
+                "frame {frame}, component {index}: {actual} != {expected}"
+            );
+        }
+    }
+    streams.finish().unwrap();
+}
+
+#[test]
+fn shared_tile_regions_keep_refinement_alive_after_the_original_context_is_deleted() {
+    for tile_first in [false, true] {
+        let mut decoder = Decoder::new(64 * 64 * 4);
+        decoder.begin_frame();
+        let tile = initial(0xccc6, false, 0, &[0; 4]);
+        let (first_tiles, second_tiles) = if tile_first {
+            (vec![tile], vec![])
+        } else {
+            (vec![], vec![tile])
+        };
+        let left = packet(&first_tiles, [0, 0, 32, 64], 6, Some(1));
+        let right = packet(&second_tiles, [32, 0, 32, 64], 6, Some(1));
+        decoder.decode_bitmap(1, 10, 64, 64, &left).unwrap();
+        decoder.decode_bitmap(1, 20, 64, 64, &right).unwrap();
+        decoder.end_frame();
+        let (deleted, remaining) = if tile_first { (10, 20) } else { (20, 10) };
+        decoder.delete_context(1, deleted);
+        let upgrade = packet(
+            &[refinement([&[255; 8], &[0; 8], &[0; 8]])],
+            [0, 0, 64, 64],
+            6,
+            None,
+        );
+        let tiles = decoder
+            .decode_bitmap(1, remaining, 64, 64, &upgrade)
+            .unwrap();
+        assert!(
+            tiles[0]
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [129, 129, 129, 255])
+        );
+        decoder.delete_context(1, remaining);
+        decoder.delete_surface(1);
+        assert_eq!(decoder.bytes, 0);
+    }
+}
+
+#[test]
+fn shared_context_upgrade_survives_graphics_messages_and_frame_boundaries() {
+    use super::super::{CAPABILITIES, Gfx, pdu};
+    use crate::{Limits, graphics::Graphics};
+    let limits = Limits::default();
+    let mut gfx = Gfx::new(limits, true);
+    let mut graphics = Graphics::new(64, 64, limits).unwrap();
+    let receive = |gfx: &mut Gfx, graphics: &mut Graphics, pdus: Vec<Vec<u8>>| {
+        let mut bytes = vec![0xe0, 4];
+        bytes.extend(pdus.into_iter().flatten());
+        gfx.receive(&bytes, graphics, |_, _| Ok(())).unwrap();
+    };
+    let wire = |context: u32, stream: Vec<u8>| {
+        let mut body = vec![1, 0, 9, 0];
+        body.extend(context.to_le_bytes());
+        body.push(0x20);
+        body.extend((stream.len() as u32).to_le_bytes());
+        body.extend(stream);
+        pdu(2, &body)
+    };
+    let caps: Vec<_> = [CAPABILITIES[0].0, 4, CAPABILITIES[0].1]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let mut reset: Vec<_> = [64u32, 64, 0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    reset.resize(332, 0);
+    receive(
+        &mut gfx,
+        &mut graphics,
+        vec![
+            pdu(19, &caps),
+            pdu(14, &reset),
+            pdu(9, &[1, 0, 64, 0, 64, 0, 0x20]),
+            pdu(15, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            pdu(11, &[0, 0, 0, 0, 1, 0, 0, 0]),
+            wire(
+                10,
+                packet(
+                    &[initial(0xccc6, false, 0, &[0; 4])],
+                    [0, 0, 32, 64],
+                    6,
+                    Some(1),
+                ),
+            ),
+            wire(20, packet(&[], [32, 0, 32, 64], 6, Some(1))),
+            pdu(12, &1u32.to_le_bytes()),
+        ],
+    );
+    assert!(
+        graphics
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [128, 128, 128, 255])
+    );
+    receive(
+        &mut gfx,
+        &mut graphics,
+        vec![
+            pdu(3, &[1, 0, 10, 0, 0, 0]),
+            pdu(11, &[0, 0, 0, 0, 2, 0, 0, 0]),
+            wire(
+                20,
+                packet(
+                    &[refinement([&[255; 8], &[0; 8], &[0; 8]])],
+                    [0, 0, 64, 64],
+                    6,
+                    None,
+                ),
+            ),
+            pdu(12, &2u32.to_le_bytes()),
+        ],
+    );
+    assert!(
+        graphics
+            .pixels()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [129, 129, 129, 255])
+    );
+}
+
+#[test]
+fn deleted_pending_contexts_are_not_resurrected_and_frame_links_are_bounded() {
+    let mut decoder = Decoder::new(64 * 64 * 4);
+    for _ in 0..8 {
+        decoder.begin_frame();
+        decoder
+            .decode_bitmap(1, 10, 64, 64, &packet(&[], [0, 0, 32, 64], 6, Some(1)))
+            .unwrap();
+        decoder.delete_context(1, 10);
+        decoder
+            .decode_bitmap(
+                1,
+                20,
+                64,
+                64,
+                &packet(
+                    &[initial(0xccc6, false, 0, &[0; 4])],
+                    [32, 0, 32, 64],
+                    6,
+                    Some(1),
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            decoder.surfaces[&1].tiles[&(0, 0)]
+                .pass
+                .as_ref()
+                .unwrap()
+                .contexts,
+            BTreeSet::from([20])
+        );
+        decoder.end_frame();
+        assert!(decoder.surfaces[&1].frame_contexts.is_empty());
+        decoder.delete_context(1, 20);
+        assert_eq!(decoder.bytes, TILE_BYTES);
+    }
+    decoder.begin_frame();
+    decoder.max_bytes = decoder.bytes + 64;
+    assert!(matches!(
+        decoder.decode_bitmap(1, 30, 64, 64, &packet(&[], [0, 0, 64, 64], 6, None)),
+        Err(Error::Limit("progressive tile state"))
+    ));
+    assert_eq!(decoder.bytes, TILE_BYTES);
+    decoder.delete_surface(1);
+    assert_eq!(decoder.bytes, 0);
+    assert_eq!(decoder.masks, 0);
+}
+
 fn block(kind: u16, body: &[u8]) -> Vec<u8> {
     let mut out = kind.to_le_bytes().to_vec();
     out.extend(((body.len() + 6) as u32).to_le_bytes());
@@ -275,7 +503,18 @@ fn invalid_upgrade_context_quantization_and_region_bounds_are_rejected() {
     let mut decoder = Decoder::new(64 * 64 * 4);
     assert!(decoder.decode_bitmap(1, 10, 64, 64, &upgrade).is_err());
     decoder.decode_bitmap(1, 10, 64, 64, &first).unwrap();
-    assert!(decoder.decode_bitmap(1, 20, 64, 64, &upgrade).is_err());
+    for _ in 0..2 {
+        assert!(decoder.decode_bitmap(1, 20, 64, 64, &upgrade).is_err());
+        assert!(!decoder.surfaces[&1].contexts.contains(&20));
+        assert!(
+            !decoder.surfaces[&1].tiles[&(0, 0)]
+                .pass
+                .as_ref()
+                .unwrap()
+                .contexts
+                .contains(&20)
+        );
+    }
     let larger = packet(&[refinement([&[]; 3])], [0, 0, 64, 64], 8, None);
     assert!(decoder.decode_bitmap(1, 10, 64, 64, &larger).is_err());
     let bad_rect = packet(&[], [1, 0, 64, 64], 6, None);

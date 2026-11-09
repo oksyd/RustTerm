@@ -211,7 +211,7 @@ fn decode_subcodecs(data: &[u8], pixels: &mut [u8], width: usize, height: usize)
                     .flat_map(|p| [p[0], p[1], p[2], 255])
                     .collect()
             }
-            1 => crate::graphics::nscodec::decode(data, w, h)?,
+            1 => crate::graphics::nscodec::decode_top_down(data, w, h)?,
             2 => decode_rlex(data, w * h)?,
             _ => return Err(Error::Invalid("ClearCodec subcodec identifier")),
         };
@@ -397,5 +397,40 @@ mod tests {
                 .decode(&composite(0, 0, 0, &[9, 8, 7, 0], &[], &[]), 2, 1)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn nscodec_subcodec_and_cached_glyph_keep_top_down_rows() {
+        // MS-RDPNSC section 4's asymmetric 15x10 bitmap, carried inside
+        // MS-RDPEGFX 2.2.4.1.1.3.1. FreeRDP 3.32.1 clear_decompress returns
+        // these exact pixels without the vertical flip used by legacy surfaces.
+        let wire = include_bytes!("../graphics/fixtures/nscodec.bin");
+        let bitmap = include_bytes!("../graphics/fixtures/nscodec.bgra");
+        let mut subcodec = Vec::new();
+        for value in [2u16, 1, 15, 10] {
+            subcodec.extend_from_slice(&value.to_le_bytes());
+        }
+        subcodec.extend_from_slice(&(wire.len() as u32).to_le_bytes());
+        subcodec.push(1);
+        subcodec.extend_from_slice(wire);
+        let mut expected = [9, 8, 7, 255].repeat(19 * 13);
+        for (y, row) in bitmap.as_chunks::<{ 15 * 4 }>().0.iter().enumerate() {
+            let offset = ((y + 1) * 19 + 2) * 4;
+            expected[offset..offset + row.len()].copy_from_slice(row);
+        }
+        let mut decoder = Decoder::new();
+        let packet = composite(1, 0, 42, &[9, 8, 7, 247], &[], &subcodec);
+        for packet in [packet, vec![3, 1, 42, 0]] {
+            let pixels = decoder.decode(&packet, 19, 13).unwrap();
+            for (y, (actual, expected)) in pixels
+                .as_chunks::<{ 19 * 4 }>()
+                .0
+                .iter()
+                .zip(expected.as_chunks::<{ 19 * 4 }>().0)
+                .enumerate()
+            {
+                assert_eq!(actual, expected, "row {y}");
+            }
+        }
     }
 }

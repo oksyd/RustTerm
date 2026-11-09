@@ -10,6 +10,8 @@ use crate::{Error, Result, wire::Reader};
 
 const TILE_BYTES: usize = 4096 * (3 * 4 + 4);
 const PASS_BYTES: usize = 4096 * 3;
+// Account for the per-frame position map and its context-set entries.
+const FRAME_CONTEXT_BYTES: usize = 128;
 const MAX_MASKS: usize = 65_536;
 type Position = (u16, u16);
 
@@ -63,6 +65,19 @@ struct Surface {
     tiles: BTreeMap<Position, StoredTile>,
     contexts: BTreeSet<u32>,
     masks: BTreeMap<Position, Vec<Rect>>,
+    // A region can reuse a tile sent by another codec context, even later in
+    // this graphics frame. These links outlive each bitmap's clipping masks.
+    frame_contexts: BTreeMap<Position, BTreeSet<u32>>,
+}
+
+impl Surface {
+    fn frame_context_bytes(&self) -> usize {
+        self.frame_contexts
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            * FRAME_CONTEXT_BYTES
+    }
 }
 
 pub(super) struct Decoder {
@@ -84,7 +99,7 @@ impl Decoder {
             // tile allows partial edge tiles even for a very small surface.
             max_bytes: max_bitmap_bytes
                 .saturating_mul(5)
-                .saturating_add(TILE_BYTES + PASS_BYTES + 128),
+                .saturating_add(TILE_BYTES + PASS_BYTES + 256),
             masks: 0,
             frame: 1,
             in_frame: false,
@@ -93,12 +108,14 @@ impl Decoder {
 
     pub(super) fn begin_frame(&mut self) {
         self.clear_masks();
+        self.clear_frame_contexts();
         self.frame = self.frame.wrapping_add(1);
         self.in_frame = true;
     }
 
     pub(super) fn end_frame(&mut self) {
         self.clear_masks();
+        self.clear_frame_contexts();
         self.in_frame = false;
     }
 
@@ -109,10 +126,18 @@ impl Decoder {
         self.masks = 0;
     }
 
+    fn clear_frame_contexts(&mut self) {
+        for surface in self.surfaces.values_mut() {
+            self.bytes -= surface.frame_context_bytes();
+            surface.frame_contexts.clear();
+        }
+    }
+
     pub(super) fn delete_surface(&mut self, id: u16) {
         if let Some(surface) = self.surfaces.remove(&id) {
             self.bytes -= surface.tiles.values().map(StoredTile::bytes).sum::<usize>()
-                + surface.contexts.len() * 64;
+                + surface.contexts.len() * 64
+                + surface.frame_context_bytes();
             self.masks -= surface.masks.values().map(Vec::len).sum::<usize>();
         }
     }
@@ -122,6 +147,12 @@ impl Decoder {
             if surface.contexts.remove(&context) {
                 self.bytes -= 64;
             }
+            surface.frame_contexts.retain(|_, contexts| {
+                if contexts.remove(&context) {
+                    self.bytes -= FRAME_CONTEXT_BYTES;
+                }
+                !contexts.is_empty()
+            });
             for tile in surface.tiles.values_mut() {
                 if let Some(pass) = &mut tile.pass {
                     if pass.contexts.remove(&context) {
@@ -149,6 +180,7 @@ impl Decoder {
         // would overwrite intervening updates made by other codecs.
         self.clear_masks();
         if !self.in_frame {
+            self.clear_frame_contexts();
             self.frame = self.frame.wrapping_add(1);
         }
         if width == 0 || height == 0 {
@@ -163,10 +195,51 @@ impl Decoder {
             tiles: BTreeMap::new(),
             contexts: BTreeSet::new(),
             masks: BTreeMap::new(),
+            frame_contexts: BTreeMap::new(),
         });
+        let known_context = surface.contexts.contains(&context);
         let result = self.decode_surface(&mut surface, context, width, height, data);
         self.surfaces.insert(id, surface);
+        if result.is_err() && !known_context {
+            // A rejected first upgrade must not make that ID valid on retry.
+            self.delete_context(id, context);
+        }
         result
+    }
+
+    fn associate_tile(
+        &mut self,
+        surface: &mut Surface,
+        position: Position,
+        context: u32,
+    ) -> Result<()> {
+        if !surface
+            .frame_contexts
+            .get(&position)
+            .is_some_and(|ids| ids.contains(&context))
+        {
+            self.reserve(FRAME_CONTEXT_BYTES)?;
+            surface
+                .frame_contexts
+                .entry(position)
+                .or_default()
+                .insert(context);
+        }
+        self.link_tile_contexts(surface, position)
+    }
+
+    fn link_tile_contexts(&mut self, surface: &mut Surface, position: Position) -> Result<()> {
+        if let Some(pass) = surface
+            .tiles
+            .get_mut(&position)
+            .and_then(|tile| tile.pass.as_mut())
+            && let Some(contexts) = surface.frame_contexts.get(&position)
+        {
+            let missing = contexts.difference(&pass.contexts).count();
+            self.reserve(missing * 64)?;
+            pass.contexts.extend(contexts);
+        }
+        Ok(())
     }
 
     fn reserve(&mut self, bytes: usize) -> Result<()> {
@@ -188,7 +261,8 @@ impl Decoder {
         if (surface.width, surface.height) != (width, height) {
             return Err(Error::Invalid("progressive surface dimensions changed"));
         }
-        if !surface.contexts.contains(&context) {
+        let mut known_context = surface.contexts.contains(&context);
+        if !known_context {
             if surface.contexts.len() >= 4096 {
                 return Err(Error::Limit("progressive codec contexts"));
             }
@@ -223,7 +297,13 @@ impl Decoder {
                     }
                     block.skip(1)?;
                 }
-                0xccc4 if inside => self.region(surface, context, &mut block, &mut changed)?,
+                0xccc4 if inside => self.region(
+                    surface,
+                    context,
+                    &mut known_context,
+                    &mut block,
+                    &mut changed,
+                )?,
                 _ => {
                     block.skip(block.remaining_len())?;
                 }
@@ -250,6 +330,7 @@ impl Decoder {
         &mut self,
         surface: &mut Surface,
         context: u32,
+        known_context: &mut bool,
         input: &mut Reader<'_>,
         changed: &mut BTreeSet<Position>,
     ) -> Result<()> {
@@ -308,6 +389,7 @@ impl Decoder {
                     }
                     masks.push(mask);
                     self.masks += 1;
+                    self.associate_tile(surface, position, context)?;
                     if surface
                         .tiles
                         .get(&position)
@@ -364,6 +446,11 @@ impl Decoder {
                 }
             }
             if kind == 0xccc7 {
+                // MS-RDPEGFX 3.3.5.2 requires a known codec context, not that
+                // this context was the one that originally encoded this tile.
+                if !*known_context {
+                    return Err(Error::Invalid("progressive upgrade without context"));
+                }
                 let tile = surface
                     .tiles
                     .get_mut(&position)
@@ -374,7 +461,6 @@ impl Decoder {
                 let pass = tile
                     .pass
                     .as_ref()
-                    .filter(|pass| pass.contexts.contains(&context))
                     .ok_or(Error::Invalid("progressive upgrade without context"))?;
                 for (old, new) in pass
                     .positions
@@ -415,13 +501,11 @@ impl Decoder {
                         contexts: BTreeSet::new(),
                     });
                 }
-                if !tile.pass.as_ref().unwrap().contexts.contains(&context) {
-                    self.reserve(64)?;
-                    tile.pass.as_mut().unwrap().contexts.insert(context);
-                }
                 first(tile, &mut block, positions, difference, extrapolate)?;
+                *known_context = true;
             }
             block.finish()?;
+            self.associate_tile(surface, position, context)?;
             let tile = surface.tiles.get_mut(&position).unwrap();
             tile.frame = self.frame;
             tile.render();

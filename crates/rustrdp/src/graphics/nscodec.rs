@@ -5,6 +5,15 @@ use crate::{Error, Result, wire::Reader};
 // MS-RDPNSC 2.2.2 and 3.1.8.4. The caller validates the bitmap against its
 // dimension and decoded-byte limits before entering this codec.
 pub(crate) fn decode(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    decode_rows(data, width, height, true)
+}
+
+#[cfg(feature = "graphics")]
+pub(crate) fn decode_top_down(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    decode_rows(data, width, height, false)
+}
+
+fn decode_rows(data: &[u8], width: usize, height: usize, bottom_up: bool) -> Result<Vec<u8>> {
     if width == 0 || height == 0 {
         return Err(Error::Invalid("NSCodec bitmap dimensions"));
     }
@@ -78,9 +87,15 @@ pub(crate) fn decode(data: &[u8], width: usize, height: usize) -> Result<Vec<u8>
     pixels.resize(output_size, 0);
     let chroma_shift = usize::from(subsampled);
     let recover = |value: u8| i16::from(value.wrapping_shl(u32::from(loss - 1)) as i8);
-    // Wire planes are bottom-up. Combine and flip in one pass; the alpha plane
-    // is tightly packed even when the color planes have subsampling padding.
-    for (y, row) in pixels.chunks_exact_mut(width * 4).rev().enumerate() {
+    // Legacy Surface Bits carries bottom-up planes; a ClearCodec subcodec is
+    // top-down. Select the source row before subsampled chroma and alpha lookup.
+    // Alpha remains tightly packed even when the color planes have padding.
+    for (output_y, row) in pixels.chunks_exact_mut(width * 4).enumerate() {
+        let y = if bottom_up {
+            height - 1 - output_y
+        } else {
+            output_y
+        };
         let chroma_row = (y >> chroma_shift) * chroma_stride;
         for (x, target) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let luma = i16::from(luma[y * luma_stride + x]);
