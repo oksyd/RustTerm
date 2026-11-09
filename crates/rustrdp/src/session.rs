@@ -1636,7 +1636,10 @@ mod tests {
         let [Event::Send(packet)] = events.as_slice() else {
             panic!("expected a single input packet and no graphics changes");
         };
-        assert_eq!(packet, &[8, 16, 0x20, 0, 8, 0, 0, 1, 0, 0x20, 0, 8, 1, 0, 1, 0]);
+        assert_eq!(
+            packet,
+            &[8, 16, 0x20, 0, 8, 0, 0, 1, 0, 0x20, 0, 8, 1, 0, 1, 0]
+        );
         assert_eq!(session.graphics().pointer_position(), (1, 1));
         assert_eq!(session.graphics().pixels(), pixels);
         session.state = State::Closed;

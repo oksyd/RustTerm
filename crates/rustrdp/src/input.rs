@@ -111,7 +111,10 @@ impl InputState {
         if info.width == 0 || info.height == 0 {
             return Err(Error::Invalid("input dimensions"));
         }
-        let (x, y) = (position.0.min(info.width - 1), position.1.min(info.height - 1));
+        let (x, y) = (
+            position.0.min(info.width - 1),
+            position.1.min(info.height - 1),
+        );
         let nearby = if info.width > 1 {
             (if x + 1 < info.width { x + 1 } else { x - 1 }, y)
         } else if info.height > 1 {
@@ -499,7 +502,11 @@ mod tests {
                 (1, 2, (0, 0), [(0, 1), (0, 0)]),
                 (1, 2, (0, 1), [(0, 0), (0, 1)]),
             ] {
-                let info = ConnectionInfo { width, height, ..info(fast) };
+                let info = ConnectionInfo {
+                    width,
+                    height,
+                    ..info(fast)
+                };
                 let packets = state.keep_awake(origin, &info).unwrap();
                 assert_eq!(packets.len(), 1);
                 assert_eq!(decode_activity(&packets[0], fast), expected);
@@ -513,14 +520,25 @@ mod tests {
         for fast in [true, false] {
             let info = info(fast);
             for input in [
-                Input::Key { scancode: 0x1d, pressed: true },
-                Input::MouseButton { button: MouseButton::Left, pressed: true, x: 3, y: 4 },
+                Input::Key {
+                    scancode: 0x1d,
+                    pressed: true,
+                },
+                Input::MouseButton {
+                    button: MouseButton::Left,
+                    pressed: true,
+                    x: 3,
+                    y: 4,
+                },
             ] {
                 let mut state = InputState::default();
                 state.encode(input, &info).unwrap();
                 let before = (state.keys.clone(), state.buttons.clone(), state.position);
                 assert!(state.keep_awake((7, 8), &info).unwrap().is_empty());
-                assert_eq!((state.keys.clone(), state.buttons.clone(), state.position), before);
+                assert_eq!(
+                    (state.keys.clone(), state.buttons.clone(), state.position),
+                    before
+                );
                 assert!(!state.encode(Input::ReleaseAll, &info).unwrap().is_empty());
                 assert_eq!(state.keep_awake((7, 8), &info).unwrap().len(), 1);
             }
