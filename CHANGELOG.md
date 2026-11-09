@@ -1,8 +1,17 @@
+## [0.1.10] - 2026-11-09
+
+### 🐛 Bug Fixes
+
+- *(rdp)* Correct NSCodec orientation and Progressive context lifetime
 ## [0.1.9] - 2026-11-09
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.9
 ## [0.1.8] - 2026-11-09
 
 ### 🚜 Refactor
