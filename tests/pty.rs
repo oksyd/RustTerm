@@ -204,7 +204,13 @@ fn cancellation_interrupts_backpressured_input() {
     let start = Instant::now();
     session.close();
     assert!(start.elapsed() < Duration::from_millis(100));
-    wait_until(|| matches!(session.state(), SessionState::Disconnected { .. }));
+    wait_until(|| match session.state() {
+        SessionState::Disconnected { .. } => true,
+        SessionState::Failed { kind, message } => {
+            panic!("cancellation failed: {kind:?}: {message}")
+        }
+        _ => false,
+    });
     assert!(
         start.elapsed() < Duration::from_secs(2),
         "cancellation waited for I/O timeout"

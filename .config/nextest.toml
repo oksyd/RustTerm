@@ -1,0 +1,3 @@
+[profile.default]
+# Surface stalled tests and fail instead of waiting indefinitely for Ctrl-C.
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "2s" }

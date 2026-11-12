@@ -70,7 +70,11 @@ pub(super) async fn run(
                 _ = shared.io_stop.cancelled() => break,
                 permit = transport.input.reserve(), if write_pending => {
                     let Ok(permit) = permit else {
-                        shared.failed(FailureKind::Write, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED));
+                        // A cancelled writer can close the channel before the
+                        // select's cancellation branch gets scheduled.
+                        if !shared.io_stop.is_cancelled() {
+                            shared.failed(FailureKind::Write, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED));
+                        }
                         break;
                     };
                     let write = deferred_resize.take().or_else(|| outbox.pop()).expect("pending terminal write");
@@ -145,7 +149,12 @@ pub(super) async fn run(
                         drain_deadline.get_or_insert(tokio::time::Instant::now() + if transfer.active() { SHUTDOWN_TIMEOUT } else { EXIT_DRAIN_TIMEOUT });
                         shared.closing();
                     },
-                    Some(Output::Error(kind,message)) => { shared.failed(kind,message); break; },
+                    Some(Output::Error(kind,message)) => {
+                        // Transport cancellation also wakes pending reads/writes
+                        // with errors. An intentional disconnect is not a failure.
+                        if !shared.io_stop.is_cancelled() { shared.failed(kind,message); }
+                        break;
+                    },
                 },
                 command = async {
                     if !transfer_active && let Some(command) = deferred_input.pop_front() {

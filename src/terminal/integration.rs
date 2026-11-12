@@ -165,12 +165,14 @@ fn quote_fish(value: &str) -> String {
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+#[cfg(all(test, unix))]
+mod test_process;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::process::{Command, Stdio};
 
+    #[cfg(unix)]
     fn remote_bash(profile: &str, input: &[u8]) -> (std::process::Output, tempfile::TempDir) {
         let fixture = tempfile::tempdir().unwrap();
         let home = fixture.path().join("user ' with spaces");
@@ -188,21 +190,18 @@ mod tests {
             "printf 'logout\\n' >> \"$RUSTTERM_TEST_TRACE\"\n",
         )
         .unwrap();
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", &remote_command()])
-            .env("SHELL", "/bin/bash")
-            .env("HOME", &home)
-            .env("TMPDIR", &scratch)
-            .env("ENV", "previous-env")
-            .env("RUSTTERM_TEST_TRACE", fixture.path().join("trace"))
-            .env_remove("BASH_ENV")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child.stdin.take().unwrap().write_all(input).unwrap();
-        let output = child.wait_with_output().unwrap();
+        let output = test_process::output(
+            test_process::command("/bin/sh")
+                .args(["-c", &remote_command()])
+                .env("SHELL", "/bin/bash")
+                .env("HOME", &home)
+                .env("TMPDIR", &scratch)
+                .env("ENV", "previous-env")
+                .env("RUSTTERM_TEST_TRACE", fixture.path().join("trace")),
+            input,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(home.join(".bash_profile")).unwrap(),
             profile
@@ -212,6 +211,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn remote_bash_preserves_login_configuration_input_and_exit_status() {
         let (output, fixture) = remote_bash(
             "printf 'profile\\n' >> \"$RUSTTERM_TEST_TRACE\"\nsource \"$HOME/.bashrc\"\n",
@@ -231,6 +231,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn remote_startup_cleanup_survives_profile_exit_or_exec() {
         for (profile, status) in [("exit 19\n", 19), ("exec /bin/sh -c 'exit 23'\n", 23)] {
             let (output, _) = remote_bash(profile, b"");
@@ -271,15 +272,23 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(unix)]
     fn directory_restore_does_not_interpret_shell_metacharacters() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("quote' slash\\ $(false); space");
         std::fs::create_dir(&path).unwrap();
         let command = directory_command("bash", path.to_str().unwrap()).unwrap();
-        let output = std::process::Command::new("/bin/bash")
-            .args(["--noprofile", "--norc", "-c", &(command + "pwd -P")])
-            .output()
-            .unwrap();
+        let output = test_process::output(
+            test_process::command("/bin/bash").args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                &(command + "pwd -P"),
+            ]),
+            b"",
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
         assert!(output.status.success());
         assert_eq!(
             String::from_utf8(output.stdout).unwrap().trim_end(),

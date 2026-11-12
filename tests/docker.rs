@@ -351,7 +351,7 @@ impl Fixture {
             1000,
         )
         .unwrap();
-        wait(|| session.state() == SessionState::Connected).await;
+        wait_connected(&session, &events).await;
         let client = session.docker().unwrap();
         Self {
             session,
@@ -362,14 +362,38 @@ impl Fixture {
         }
     }
 }
-async fn wait(mut condition: impl FnMut() -> bool) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !condition() {
+#[track_caller]
+fn wait(mut condition: impl FnMut() -> bool) -> impl std::future::Future<Output = ()> {
+    let caller = std::panic::Location::caller();
+    async move {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("condition timed out at {caller}"));
+    }
+}
+async fn wait_connected(session: &Session, events: &Events) {
+    let connected = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = session.state();
+            if state == SessionState::Connected || !state.is_running() {
+                return;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("condition timed out");
+    .await;
+    assert!(
+        connected.is_ok() && session.state() == SessionState::Connected,
+        "connection did not become ready: {:?}; channels opened={}, closed={}; requests={:?}",
+        session.state(),
+        events.opened.load(Ordering::SeqCst),
+        events.closed.load(Ordering::SeqCst),
+        events.requests.lock().unwrap(),
+    );
 }
 #[tokio::test]
 async fn api_reuses_authentication_and_management_channel_while_logs_are_independent() {
@@ -412,19 +436,13 @@ async fn monitor_identity_is_shared_by_session_consumers_and_isolates_endpoints(
 #[tokio::test]
 async fn mutations_are_not_retried_after_an_ambiguous_disconnect() {
     let f = Fixture::new(Mode::Mock).await;
-    assert!(matches!(
-        f.client.action(ID, Action::Stop).await,
-        Err(rustterm::docker::Error::Uncertain(_))
-    ));
+    let result = f.client.action(ID, Action::Stop).await;
+    assert!(matches!(result, Err(rustterm::docker::Error::Uncertain(_))));
+    let requests = f.events.requests.lock().unwrap().clone();
     assert_eq!(
-        f.events
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|p| p.contains("/stop?"))
-            .count(),
-        1
+        requests.iter().filter(|p| p.contains("/stop?")).count(),
+        1,
+        "unexpected action result: {result:?}; requests={requests:?}",
     );
     assert_eq!(f.client.containers().await.unwrap().len(), 1);
 }
@@ -440,7 +458,7 @@ async fn console_uses_engine_upgrade_and_closes_only_its_own_channel() {
     let f = Fixture::new(Mode::Mock).await;
     let console =
         Session::spawn_container(f.client.clone(), ID.into(), Shell::Sh, 80, 24, 1000).unwrap();
-    wait(|| console.state() == SessionState::Connected).await;
+    wait_connected(&console, &f.events).await;
     console
         .send(Command::Input(b"from-container\r\n".to_vec()))
         .unwrap();
@@ -523,7 +541,7 @@ async fn real_engine_over_ssh() {
     drop(logs);
     let console =
         Session::spawn_container(f.client.clone(), id.clone(), Shell::Sh, 80, 24, 1000).unwrap();
-    wait(|| console.state() == SessionState::Connected).await;
+    wait_connected(&console, &f.events).await;
     console
         .send(Command::Input(
             b"printf 'container-console-ok\\n'; exit\n".to_vec(),
@@ -581,8 +599,10 @@ async fn streaming_channels_are_bounded_and_released_on_drop() {
 #[tokio::test]
 async fn inspect_rejects_a_response_for_a_different_container() {
     let f = Fixture::new(Mode::Mock).await;
-    assert!(matches!(
-        f.client.inspect(&"c".repeat(64)).await,
-        Err(rustterm::docker::Error::InvalidResponse)
-    ));
+    let result = f.client.inspect(&"c".repeat(64)).await;
+    assert!(
+        matches!(result, Err(rustterm::docker::Error::InvalidResponse)),
+        "unexpected inspect result: {result:?}; requests={:?}",
+        f.events.requests.lock().unwrap()
+    );
 }
