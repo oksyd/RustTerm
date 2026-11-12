@@ -863,6 +863,26 @@ mod tests {
             assert_eq!(overlay, expected);
             assert_eq!(graphics.pixels(), background);
             assert!(shape.composite(&mut [0; 3]).is_err());
+
+            let mut overlay = background.clone();
+            shape.composite_overlay(&mut overlay).unwrap();
+            let a = u32::from(overlay[3]);
+            let mut blended = background.clone();
+            for channel in 0..3 {
+                blended[channel] = ((u32::from(overlay[channel]) * a
+                    + u32::from(background[channel]) * (255 - a)
+                    + 127)
+                    / 255) as u8;
+            }
+            assert_eq!(blended, expected);
+            assert_eq!(
+                shape.requires_background(),
+                mask != 0 && (!alpha || color[3] == 255) && color[..3] != [0; 3]
+            );
+            if color == [0; 4] {
+                assert_eq!(overlay[3], 0, "unchanged desktop must not be repainted");
+            }
+            assert!(shape.composite_overlay(&mut [0; 3]).is_err());
         }
     }
 

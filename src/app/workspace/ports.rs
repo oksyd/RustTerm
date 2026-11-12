@@ -9,7 +9,7 @@ use rustterm::{
 #[derive(Default)]
 pub(super) struct Ports {
     pub registry: ForwardRegistry,
-    panels: HashMap<Uuid, Entity<TunnelPanel>>,
+    panel: Option<Entity<TunnelPanel>>,
     synchronized: HashMap<Uuid, ForwardSettings>,
     poll: Option<Task<()>>,
     status: (usize, usize),
@@ -65,19 +65,16 @@ impl Workspace {
                                 this.config.profiles.iter_mut().find(|p| p.id == id)
                             else {
                                 this.ports.registry.remove(id);
-                                this.ports.panels.remove(&id);
                                 this.ports.synchronized.remove(&id);
                                 continue;
                             };
                             let Connection::Ssh(config) = &mut profile.connection else {
                                 this.ports.registry.remove(id);
-                                this.ports.panels.remove(&id);
                                 this.ports.synchronized.remove(&id);
                                 continue;
                             };
                             if !this.ports.registry.matches_target(id, config) {
                                 this.ports.registry.remove(id);
-                                this.ports.panels.remove(&id);
                                 this.ports.synchronized.remove(&id);
                                 visible = true;
                                 continue;
@@ -108,27 +105,8 @@ impl Workspace {
                                 *previous = runtime;
                                 changed = true;
                             }
-                            let open = this.pane_profiles.iter().any(|(pane, profile)| {
-                                profile.id == id
-                                    && this.tools.get(pane) == Some(&SessionTool::Ports)
-                            });
-                            if open
-                                && this
-                                    .ports
-                                    .panels
-                                    .get(&id)
-                                    .is_none_or(|panel| !panel.read(cx).uses(&controller))
-                            {
-                                let state = this.window_state.clone();
-                                this.ports.panels.insert(
-                                    id,
-                                    cx.new(|cx| TunnelPanel::new(controller, state, cx)),
-                                );
-                                visible = true;
-                            } else if !open {
-                                this.ports.panels.remove(&id);
-                            }
                         }
+                        this.sync_port_panel(cx);
                         if changed {
                             this.save(cx);
                         }
@@ -154,36 +132,13 @@ impl Workspace {
     }
 
     pub(super) fn active_ports(&self) -> Option<Entity<TunnelPanel>> {
-        if self.tools.get(&self.focused) != Some(&SessionTool::Ports) {
-            return None;
-        }
-        self.pane_profiles
-            .get(&self.focused)
-            .and_then(|p| self.ports.panels.get(&p.id))
-            .cloned()
+        (self.left_tool == Some(SessionTool::Ports))
+            .then(|| self.ports.panel.clone())
+            .flatten()
     }
 
     pub(super) fn open_ports(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(profile) = self.pane_profiles.get(&self.focused) else {
-            return;
-        };
-        let id = profile.id;
-        let Some(controller) = self.ports.registry.get(id) else {
-            self.tools.insert(self.focused, SessionTool::Ports);
-            cx.notify();
-            return;
-        };
-        let panel = self
-            .ports
-            .panels
-            .entry(id)
-            .or_insert_with(|| {
-                cx.new(|cx| TunnelPanel::new(controller, self.window_state.clone(), cx))
-            })
-            .clone();
-        self.tools.insert(self.focused, SessionTool::Ports);
-        panel.read(cx).focus(window, cx);
-        cx.notify();
+        self.open_all_ports(window, cx);
     }
 
     pub(super) fn background_port_count(&self) -> usize {
@@ -205,7 +160,21 @@ impl Workspace {
         if self.lock_screen.locked || self.modal.is_some() {
             return;
         }
-        let mut connections = self
+        self.select_tool(SessionTool::Ports, cx);
+        self.sync_port_panel(cx);
+        if let Some(panel) = self.active_ports() {
+            panel.read(cx).focus(window, cx);
+        } else {
+            self.utility_focus.focus(window);
+        }
+        cx.notify();
+    }
+
+    fn sync_port_panel(&mut self, cx: &mut Context<Self>) {
+        if self.left_tool != Some(SessionTool::Ports) && self.ports.panel.is_none() {
+            return;
+        }
+        let mut connections: Vec<_> = self
             .ports
             .registry
             .connections()
@@ -215,22 +184,23 @@ impl Workspace {
                     .config
                     .profiles
                     .iter()
-                    .find(|p| p.id == id)
-                    .map(|p| p.name.clone())
+                    .find(|profile| profile.id == id)
+                    .map(|profile| profile.name.clone())
                     .unwrap_or_else(|| "SSH".into());
                 (name, controller)
             })
-            .collect::<Vec<_>>();
+            .collect();
         connections.sort_by(|a, b| a.0.cmp(&b.0));
         if connections.is_empty() {
-            return;
+            self.ports.panel = None;
+        } else if let Some(panel) = &self.ports.panel {
+            panel.update(cx, |panel, cx| panel.update_connections(connections, cx));
+        } else {
+            self.ports.panel =
+                Some(cx.new(|cx| {
+                    TunnelPanel::connections(connections, self.window_state.clone(), cx)
+                }));
         }
-        let state = self.window_state.clone();
-        self.modal = Some(Modal::Tunnels(
-            cx.new(|cx| TunnelPanel::connections(connections, state, cx)),
-        ));
-        self.modal_focus.focus(window);
-        cx.notify();
     }
 
     pub(super) fn ports_own_focus(&self, window: &Window, cx: &App) -> bool {

@@ -187,6 +187,7 @@ impl Workspace {
         }
     }
     pub(super) fn open_resources(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(SessionTool::Resources, cx);
         if self.resource_target(self.focused, cx).is_none() {
             return;
         }

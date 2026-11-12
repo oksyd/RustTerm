@@ -157,8 +157,9 @@ impl Render for RdpView {
                     );
             }
             body = body
-                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    this.mouse_move(event.position, cx)
+                .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                    this.mouse_move(event.position, cx);
+                    this.defer_native_cursor(window, cx);
                 }))
                 .on_scroll_wheel(cx.listener(Self::scroll))
                 .child(
@@ -205,6 +206,7 @@ impl Render for RdpView {
                                     );
                                 }
                                 this.paint_desktop(bounds, window);
+                                this.defer_native_cursor(window, cx);
                             });
                         },
                     )
@@ -263,6 +265,25 @@ impl Render for RdpView {
 }
 
 impl RdpView {
+    fn defer_native_cursor(&self, window: &Window, cx: &mut Context<Self>) {
+        cx.defer_in(window, |this, window, cx| {
+            let desktop =
+                (this.remote_input_enabled() && this.hide_local_pointer && !this.images.is_empty())
+                    .then_some(this.bounds)
+                    .flatten()
+                    .map(|bounds| desktop_bounds(bounds, this.image_size, this.zoom, this.pan));
+            let visible = desktop
+                .zip(this.bounds)
+                .map(|(desktop, bounds)| desktop.intersect(&bounds));
+            if this.cursor.sync_native(desktop, visible, window) {
+                this.window_state.record_values(
+                    "rdp-native-cursor",
+                    [this.index as u64, u64::from(this.cursor.native_active()), 0],
+                );
+                cx.notify();
+            }
+        });
+    }
     fn display_action_available(&self, window: &Window) -> bool {
         self.surface_visible()
             && window.is_window_active()
@@ -288,7 +309,7 @@ impl RdpView {
         .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(window, cx)))
     }
 
-    pub fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_status(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
         use super::clipboard::Feedback;
 
         let feedback = self
@@ -411,15 +432,18 @@ impl RdpView {
                     })),
                 )
             })
-            .when(!has_feedback && self.state == State::Connected, |context| {
-                context.child(
-                    div()
-                        .flex_shrink_0()
-                        .font_family(ui::MONOSPACE_FONT)
-                        .text_color(rgb(ui::colors().muted))
-                        .child(resolution),
-                )
-            })
+            .when(
+                !compact && !has_feedback && self.state == State::Connected,
+                |context| {
+                    context.child(
+                        div()
+                            .flex_shrink_0()
+                            .font_family(ui::MONOSPACE_FONT)
+                            .text_color(rgb(ui::colors().muted))
+                            .child(resolution),
+                    )
+                },
+            )
             .child(
                 div()
                     .id(("rdp-status", self.index))

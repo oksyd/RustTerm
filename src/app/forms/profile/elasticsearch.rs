@@ -1,6 +1,6 @@
 use super::super::{column, hint, parse_value, row};
 use super::ProfileForm;
-use crate::app::ui::{self, ButtonStyle};
+use crate::app::ui;
 use gpui::{AnyElement, App, Context, div, prelude::*};
 use rustterm::{
     config::{Connection, ElasticsearchAuth, ElasticsearchConfig, Profile, Uuid},
@@ -105,26 +105,18 @@ impl ProfileForm {
                 ),
             ]
             .map(|(id, label, auth)| {
-                ui::text_button(
-                    id,
-                    label,
-                    if self.es_auth == auth {
-                        ButtonStyle::Primary
-                    } else {
-                        ButtonStyle::Neutral
-                    },
-                )
-                .tab_index(0)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if this.native_pending || this.prompts.is_blocked() {
-                        return;
-                    }
-                    if this.es_auth != auth {
-                        this.credentials.reset(cx);
-                        this.es_auth = auth;
-                        cx.notify();
-                    }
-                }))
+                ui::choice_button(id, label, self.es_auth == auth, true)
+                    .tab_index(0)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.native_pending || this.prompts.is_blocked() {
+                            return;
+                        }
+                        if this.es_auth != auth {
+                            this.credentials.reset(cx);
+                            this.es_auth = auth;
+                            cx.notify();
+                        }
+                    }))
             }),
         );
         column()
@@ -135,7 +127,6 @@ impl ProfileForm {
                 body.child(self.fields.selected_rows(&[msg::WORKSPACE_USERNAME]))
             })
             .child(self.credential_editor(cx))
-            .child(self.network_options(cx))
             .into_any_element()
     }
 }

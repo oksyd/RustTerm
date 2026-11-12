@@ -27,7 +27,7 @@ impl ProfileForm {
             .settings
             .desktop_scale
             .filter(|scale| !COMMON_SCALES.contains(scale));
-        section(i18n_key::RDP_DISPLAY_AND_PERFORMANCE)
+        column().gap(px(12.))
             .when(self.rdp.settings.remote_app.is_none(), |body| body.child(self.rdp_choices(
                 "rdp-display-mode", i18n_key::RDP_DESKTOP_SIZE, mode,
                 [(DisplayMode::FollowWindow, i18n_key::RDP_FOLLOW_WINDOW), (DisplayMode::Fixed, i18n_key::RDP_FIXED_RESOLUTION), (DisplayMode::VirtualMonitors, i18n_key::RDP_VIRTUAL_MONITORS)],

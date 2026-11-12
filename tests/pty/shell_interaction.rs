@@ -25,24 +25,41 @@ fn input(session: &Session, bytes: &[u8]) {
     session.send(Command::Input(bytes.to_vec())).unwrap();
 }
 
-#[test]
-fn bash_prompt_and_history_search_do_not_claim_a_specific_editor_mode() {
+fn bash(rc: &str, remote: bool) -> (Session, tempfile::TempDir) {
     let fixture = tempfile::tempdir().unwrap();
     fs::write(
         fixture.path().join(".bashrc"),
-        r#"
+        format!(
+            r#"
 PS1='test> '
 HISTFILE=/dev/null
 HISTSIZE=100
 set -o emacs
+bind 'set enable-bracketed-paste on'
 history -s 'printf rustterm_search_needle'
-"#,
+{rc}
+"#
+        ),
     )
     .unwrap();
+    // The remote bootstrap starts a login shell, just like an SSH connection.
+    fs::write(fixture.path().join(".bash_profile"), "source ~/.bashrc\n").unwrap();
     let session = Session::spawn_local(
         LocalOptions {
-            shell: "/bin/bash".into(),
-            env: BTreeMap::from([("HOME".into(), fixture.path().to_string_lossy().into_owned())]),
+            shell: if remote { "/bin/sh" } else { "/bin/bash" }.into(),
+            args: if remote {
+                vec![
+                    "-c".into(),
+                    rustterm::terminal::integration::remote_command(),
+                ]
+            } else {
+                vec![]
+            },
+            env: BTreeMap::from([
+                ("HOME".into(), fixture.path().to_string_lossy().into_owned()),
+                ("SHELL".into(), "/bin/bash".into()),
+                ("INPUTRC".into(), "/dev/null".into()),
+            ]),
             ..Default::default()
         },
         80,
@@ -52,23 +69,133 @@ history -s 'printf rustterm_search_needle'
     .unwrap();
     wait_mode(&session, ShellInteraction::Prompt);
     assert_eq!(session.snapshot().shell.shell, Some("bash"));
+    (session, fixture)
+}
+
+#[test]
+fn bash_search_cancel_accept_resize_and_execution_report_actual_modes() {
+    let (session, _fixture) = bash("", false);
     input(&session, b"\x12needle");
-    // Assert the real shell entered search. Production does not parse this text.
-    wait_until(|| fresh_text(&session).contains("reverse-i-search"));
-    assert!(!session.snapshot().shell.history_search_supported);
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    assert!(session.snapshot().shell.history_search_supported);
+    assert!(!session.can_insert_command());
+    input(&session, b"-no-match");
+    wait_until(|| fresh_text(&session).contains("failed reverse-i-search"));
     assert_eq!(
         session.snapshot().shell.interaction,
-        ShellInteraction::Prompt
+        ShellInteraction::HistorySearch
     );
+    session
+        .send(Command::Resize {
+            columns: 110,
+            rows: 32,
+        })
+        .unwrap();
+    wait_until(|| {
+        fresh_text(&session);
+        session.snapshot().columns == 110
+    });
+    wait_mode(&session, ShellInteraction::HistorySearch);
     input(&session, b"\x07");
-    wait_until(|| !fresh_text(&session).contains("reverse-i-search"));
+    wait_mode(&session, ShellInteraction::Prompt);
+    assert!(session.can_insert_command());
+    input(&session, b"\x12needle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    input(&session, b"\x1b"); // Accept the result without executing it.
+    wait_mode(&session, ShellInteraction::Prompt);
+    input(&session, b"\r");
+    wait_until(|| {
+        fresh_text(&session);
+        session
+            .snapshot()
+            .shell
+            .commands
+            .iter()
+            .any(|command| command.command.contains("rustterm_search_needle"))
+    });
     wait_mode(&session, ShellInteraction::Prompt);
     input(&session, b"read -r test_answer\r");
     wait_mode(&session, ShellInteraction::Executing);
     input(&session, b"done\r");
     wait_mode(&session, ShellInteraction::Prompt);
+    input(&session, b"\x12needle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    input(&session, b"\x03");
+    wait_mode(&session, ShellInteraction::Prompt);
     input(&session, b"\x04");
-    wait_until(|| session.state() == SessionState::Disconnected { exit_code: Some(0) });
+    wait_until(|| matches!(session.state(), SessionState::Disconnected { .. }));
+    wait_mode(&session, ShellInteraction::Unknown);
+}
+
+#[test]
+fn bash_custom_search_binding_is_preserved_without_interpreting_ctrl_r() {
+    let (session, _fixture) = bash(
+        r#"
+bind '"\C-r": beginning-of-line'
+bind '"\C-xr": reverse-search-history'
+"#,
+        false,
+    );
+    input(&session, b"text\x12");
+    wait_until(|| fresh_text(&session).contains("text") && session.snapshot().cursor.column == 6);
+    assert_eq!(
+        session.snapshot().shell.interaction,
+        ShellInteraction::Prompt
+    );
+    input(&session, b"\x05\x15\x18rneedle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    input(&session, b"\x07");
+    wait_mode(&session, ShellInteraction::Prompt);
+    session.close();
+}
+
+#[test]
+fn bash_multiline_search_survives_resize_and_search_direction_changes() {
+    let (session, _fixture) = bash(
+        r#"
+bind '"\C-xf": forward-search-history'
+history -s $'echo first_line\necho a_long_result_with_中文_and_multiline_needle'
+"#,
+        false,
+    );
+    input(&session, b"\x12multiline_needle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    for (columns, rows) in [(110, 32), (140, 24), (80, 18)] {
+        session.send(Command::Resize { columns, rows }).unwrap();
+        wait_until(|| {
+            fresh_text(&session);
+            session.snapshot().columns == columns
+        });
+        wait_mode(&session, ShellInteraction::HistorySearch);
+        assert!(!session.can_insert_command());
+    }
+    input(&session, b"\x07");
+    wait_mode(&session, ShellInteraction::Prompt);
+    input(&session, b"\x18f");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    assert!(!fresh_text(&session).contains("reverse-i-search"));
+    input(&session, b"\x07");
+    wait_mode(&session, ShellInteraction::Prompt);
+    session.close();
+}
+
+#[test]
+fn bash_ssh_bootstrap_recognizes_search_with_a_multiline_colored_prompt() {
+    let (session, _fixture) = bash(r#"PS1='\[\e[32m\]test host\[\e[0m\]\n$ '"#, true);
+    input(&session, b"\x12needle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    input(&session, b"\x07");
+    wait_mode(&session, ShellInteraction::Prompt);
+    input(&session, b"\x12needle\r");
+    wait_until(|| {
+        fresh_text(&session);
+        !session.snapshot().shell.commands.is_empty()
+    });
+    wait_mode(&session, ShellInteraction::Prompt);
+    input(&session, b"\x12needle");
+    wait_mode(&session, ShellInteraction::HistorySearch);
+    session.disconnect();
+    wait_until(|| matches!(session.state(), SessionState::Disconnected { .. }));
     wait_mode(&session, ShellInteraction::Unknown);
 }
 

@@ -20,6 +20,8 @@ workspace-additional-tab-count = { $title } + { $count }
 
 workspace-application-menu = Application menu
 
+workspace-settings-ctrl-comma = Settings · Ctrl+,
+
 workspace-apply-and-save = Apply and save
 
 workspace-arguments-json-array = Arguments (JSON array)
@@ -77,6 +79,8 @@ workspace-connection-profiles = Connection profiles
 workspace-connection-timeout-seconds = Connection timeout (seconds)
 
 workspace-connections = Connections
+
+workspace-enabled-port-count = Enabled port forwards: { $count }
 
 workspace-copy-connection-address = Copy connection address
 
@@ -517,3 +521,13 @@ workspace-move-group-to-root = Move to top level
 workspace-group-parent = Parent group
 workspace-group-root = Top level
 workspace-delete-group-keep-children = Connections and subgroups will move to the parent group, or to the top level if this group has no parent. Nothing inside the group will be deleted.
+
+workspace-local = Local
+workspace-all-types = All types
+workspace-filter-connections = Search connections
+workspace-all-tabs = All tabs
+workspace-tool-needs-ssh = Select an SSH session to use this tool.
+workspace-no-ports = Open an SSH connection to manage port forwards.
+workspace-all-connections = All connections
+
+workspace-speed-search = Quick locate: ↑/↓ selects a match, Enter opens it, Esc closes search.

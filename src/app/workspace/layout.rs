@@ -77,7 +77,7 @@ impl Workspace {
             return;
         }
         if self.sidebar_overlay_open {
-            self.sidebar_focus.focus(window);
+            self.focus_library(window, cx);
             return;
         }
         if self.utility_overlay {
@@ -101,6 +101,8 @@ impl Workspace {
                 files.read(cx).focus(window);
                 return;
             }
+            self.utility_focus.focus(window);
+            return;
         }
         if let Some(p) = self.panes.get(&self.focused) {
             p.focus_handle(cx).focus(window);
@@ -216,7 +218,6 @@ impl Workspace {
         if reveal_group {
             self.expand_active_tab_group();
         }
-        self.scroll_active_tab_into_view();
         let tab = &self.tabs[self.active];
         window.set_window_title(&format!("{} — RustTerm", self.workspace_tab_title(tab)));
         let ids = tab.layout.leaves();
@@ -229,6 +230,7 @@ impl Workspace {
             ids[0]
         };
         self.tabs[self.active].focused = self.focused;
+        self.follow_left_tool(window, cx);
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
         self.utility_overlay = self.utility_is_open()
@@ -256,6 +258,7 @@ impl Workspace {
                 .is_some_and(|view| view.read(cx).input_composing(cx))
             || self.modal_composing(cx)
             || self.session_filter.read(cx).is_composing()
+            || self.library_search.query.read(cx).is_composing()
             || self
                 .panes
                 .get(&self.focused)
@@ -265,12 +268,20 @@ impl Workspace {
             })
     }
     pub(super) fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal.is_some()
+        if self.lock_screen.locked
+            || self.modal.is_some()
             || self.input_composing(window, cx)
             || self.window_state.prompts.is_busy()
         {
             return;
         }
+        let had_tool = self.left_tool.take().is_some();
+        self.tools.clear();
+        self.utility_overlay = false;
+        self.release_rdp_control(cx);
+        self.sync_resources(window, cx);
+        self.sync_docker(window, cx);
+        self.sync_visibility(cx);
         let layout = WorkspaceLayout::new(
             f32::from(
                 WindowFrame::new(window)
@@ -283,16 +294,17 @@ impl Workspace {
             self.utility_is_open(),
         );
         if !layout.sidebar_fits {
-            self.sidebar_overlay_open = !self.sidebar_overlay_open;
+            self.sidebar_overlay_open = had_tool || !self.sidebar_overlay_open;
             if self.sidebar_overlay_open {
-                self.sidebar_focus.focus(window);
+                self.focus_library(window, cx);
             } else {
                 self.restore_focus(window, cx);
             }
         } else {
-            self.config.settings.sidebar_visible = !self.config.settings.sidebar_visible;
+            self.config.settings.sidebar_visible =
+                had_tool || !self.config.settings.sidebar_visible;
             if self.config.settings.sidebar_visible {
-                self.sidebar_focus.focus(window);
+                self.focus_library(window, cx);
             } else {
                 self.restore_focus(window, cx);
             }
@@ -301,7 +313,8 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn toggle_zoom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.modal.is_some()
+        if self.lock_screen.locked
+            || self.modal.is_some()
             || self.input_composing(window, cx)
             || self.window_state.prompts.is_busy()
         {
@@ -348,13 +361,13 @@ impl Workspace {
         match self.dragging {
             Some(DragTarget::Sidebar) => {
                 self.config.settings.sidebar_width =
-                    f32::from(event.position.x - bounds.left()).clamp(180., 400.);
+                    f32::from(event.position.x - bounds.left()).clamp(240., 400.);
                 cx.notify();
                 return;
             }
             Some(DragTarget::Files) => {
                 self.config.settings.files_width =
-                    f32::from(bounds.right() - event.position.x).clamp(360., 800.);
+                    f32::from(event.position.x - bounds.left()).clamp(360., 800.);
                 cx.notify();
                 return;
             }

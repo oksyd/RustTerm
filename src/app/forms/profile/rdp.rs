@@ -8,7 +8,7 @@ pub(super) use navigation::RdpFormView;
 use super::super::{column, hint, parse_value, row};
 use super::ProfileForm;
 use crate::app::ui::{self, ButtonStyle, Icon};
-use gpui::{AnyElement, App, Context, Div, Window, div, prelude::*, px, rgb};
+use gpui::{AnyElement, App, Context, Window, div, prelude::*, px, rgb};
 use rustterm::{
     config::{Connection, Profile, RdpConfig, RdpQuality, RdpRemoteApp, RdpSharedFolder, Uuid},
     i18n::tr,
@@ -194,33 +194,16 @@ impl ProfileForm {
                         .into_iter()
                         .enumerate()
                         .map(|(index, (value, label))| {
-                            ui::text_button(
-                                (id, index),
-                                label,
-                                if selected == value {
-                                    ButtonStyle::Primary
-                                } else {
-                                    ButtonStyle::Neutral
-                                },
-                            )
-                            .tab_index(0)
-                            .whitespace_nowrap()
-                            .border_1()
-                            .border_color(rgb(if selected == value {
-                                ui::colors().accent
-                            } else {
-                                ui::colors().border
-                            }))
-                            .focus(|style| style.border_color(rgb(ui::colors().text)))
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
+                            ui::choice_button((id, index), label, selected == value, true)
+                                .whitespace_nowrap()
+                                .focus(|style| style.border_color(rgb(ui::colors().text)))
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     if this.native_pending || this.prompts.is_blocked() {
                                         return;
                                     }
                                     select(this, value, window, cx);
                                     cx.notify();
-                                },
-                            ))
+                                }))
                         }),
                 ),
         )
@@ -235,37 +218,7 @@ impl ProfileForm {
         toggle: fn(&mut RdpConfig),
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_2()
-            .py_1()
-            .px_2()
-            .border_1()
-            .border_color(rgb(ui::colors().border))
-            .cursor_pointer()
-            .tab_index(0)
-            .focus(|style| style.border_color(rgb(ui::colors().accent)))
-            .child(
-                div()
-                    .size(px(14.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .border_1()
-                    .rounded(px(2.))
-                    .border_color(rgb(if checked {
-                        ui::colors().accent
-                    } else {
-                        ui::colors().border
-                    }))
-                    .when(checked, |checkbox| {
-                        checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
-                    }),
-            )
-            .child(div().flex_1().min_w_0().child(tr(label)))
+        ui::toggle_row(id, tr(label), Option::<&str>::None, checked)
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.native_pending || this.prompts.is_blocked() {
                     return;
@@ -275,15 +228,6 @@ impl ProfileForm {
             }))
             .into_any_element()
     }
-}
-
-fn section(label: &'static str) -> Div {
-    column().pt_3().child(
-        div()
-            .pb_1()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .child(tr(label)),
-    )
 }
 
 fn preserve_references(

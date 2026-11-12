@@ -131,19 +131,13 @@ impl ProfileForm {
                             this.forward_editor = None;
                             this.forward_subscription = None;
                             this.forward_error = None;
-                            this.fields
-                                .field(i18n_key::WORKSPACE_HOST)
-                                .read(cx)
-                                .focus(window);
+                            this.page_focus[1].focus(window);
                         }
                         crate::app::port_editor::EditorEvent::Cancel => {
                             this.forward_editor = None;
                             this.forward_subscription = None;
                             this.forward_error = None;
-                            this.fields
-                                .field(i18n_key::WORKSPACE_HOST)
-                                .read(cx)
-                                .focus(window);
+                            this.page_focus[1].focus(window);
                         }
                         crate::app::port_editor::EditorEvent::Changed => {
                             this.forward_error = None;
@@ -163,22 +157,21 @@ impl ProfileForm {
             .flex_col()
             .gap_2()
             .mt_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(rgb(ui::colors().border))
             .child(
-                ui::text_button(
+                ui::toggle_row(
                     "ssh-auto-ports",
-                    i18n_key::PORTS_AUTO,
-                    if self.auto_forward.enabled {
-                        ButtonStyle::Primary
-                    } else {
-                        ButtonStyle::Neutral
-                    },
+                    tr(i18n_key::PORTS_AUTO),
+                    Some(tr(i18n_key::PORTS_AUTO_HINT)),
+                    self.auto_forward.enabled,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.auto_forward.enabled = !this.auto_forward.enabled;
                     cx.notify();
                 })),
-            )
-            .child(hint(i18n_key::PORTS_AUTO_HINT));
+            );
         for (index, rule) in self.forwards.iter().enumerate() {
             let edit = rule.clone();
             let id = rule.id;
@@ -219,8 +212,12 @@ impl ProfileForm {
             );
         }
         body = body.child(
-            ui::text_button("ssh-add-port", i18n_key::PORTS_ADD, ButtonStyle::Neutral)
-                .on_click(cx.listener(|this, _, window, cx| this.edit_forward(None, window, cx))),
+            div().flex().child(
+                ui::text_button("ssh-add-port", i18n_key::PORTS_ADD, ButtonStyle::Neutral)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.edit_forward(None, window, cx)),
+                    ),
+            ),
         );
         if let Some(editor) = &self.forward_editor {
             body = body.child(editor.clone());
@@ -506,16 +503,22 @@ impl ProfileForm {
     pub(super) fn ssh_body(&self, cx: &mut Context<Self>) -> AnyElement {
         column()
             .child(
-                ui::text_button(
-                    "import-openssh",
-                    i18n_key::CONNECTIONS_READ_HOST_FROM_SSH_CONFIG,
-                    ButtonStyle::Neutral,
-                )
-                .tab_index(0)
-                .on_click(cx.listener(|this, _, _, cx| this.import_ssh(cx))),
+                div().flex().justify_end().child(
+                    ui::text_button(
+                        "import-openssh",
+                        i18n_key::CONNECTIONS_READ_HOST_FROM_SSH_CONFIG,
+                        ButtonStyle::Neutral,
+                    )
+                    .tab_index(0)
+                    .on_click(cx.listener(|this, _, _, cx| this.import_ssh(cx))),
+                ),
             )
             .when_some(self.ssh_import_error.clone(), |body, error| {
-                body.child(div().text_color(rgb(ui::colors().danger)).child(error.render()))
+                body.child(
+                    div()
+                        .text_color(rgb(ui::colors().danger))
+                        .child(error.render()),
+                )
             })
             .child(self.host_port())
             .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_USERNAME]))
@@ -526,25 +529,16 @@ impl ProfileForm {
                         (SshAuthentication::Password, i18n_key::WORKSPACE_PASSWORD),
                         (SshAuthentication::PrivateKey, i18n_key::COMMON_PRIVATE_KEY),
                         (SshAuthentication::Agent, i18n_key::CONNECTIONS_SSH_AGENT),
-                        (SshAuthentication::KeyboardInteractive, i18n_key::CONNECTIONS_INTERACTIVE_MFA),
+                        (
+                            SshAuthentication::KeyboardInteractive,
+                            i18n_key::CONNECTIONS_INTERACTIVE_MFA,
+                        ),
                     ]
                     .into_iter()
                     .map(|(auth, label)| {
-                        ui::text_button(
-                            label,
-                            label,
-                            if self.ssh_auth == auth {
-                                ButtonStyle::Primary
-                            } else {
-                                ButtonStyle::Neutral
-                            },
-                        )
-                        .tab_index(0)
-                        .border_1()
-                        .border_color(rgb(ui::colors().border))
-                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
+                        ui::choice_button(label, label, self.ssh_auth == auth, true)
+                            .focus(|style| style.border_color(rgb(ui::colors().accent)))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 if this.native_pending || this.prompts.is_blocked() {
                                     return;
                                 }
@@ -554,18 +548,26 @@ impl ProfileForm {
                                 this.ssh_auth = auth;
                                 this.picker_error = None;
                                 if auth == SshAuthentication::PrivateKey {
-                                    this.fields.field(i18n_key::CONNECTIONS_PRIVATE_KEY_PATH).read(cx).focus(window);
+                                    this.fields
+                                        .field(i18n_key::CONNECTIONS_PRIVATE_KEY_PATH)
+                                        .read(cx)
+                                        .focus(window);
                                 } else {
-                                    this.fields.field(i18n_key::WORKSPACE_USERNAME).read(cx).focus(window);
+                                    this.fields
+                                        .field(i18n_key::WORKSPACE_USERNAME)
+                                        .read(cx)
+                                        .focus(window);
                                 }
                                 cx.notify();
-                            },
-                        ))
+                            }))
                     }),
                 ),
             ))
             .when(self.ssh_auth == SshAuthentication::Agent, |body| {
-                body.child(self.fields.selected_rows(&[i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL]))
+                body.child(
+                    self.fields
+                        .selected_rows(&[i18n_key::CONNECTIONS_SSH_AGENT_SOCKET_OPTIONAL]),
+                )
             })
             .when(self.ssh_auth == SshAuthentication::PrivateKey, |body| {
                 body.child(row(
@@ -575,10 +577,11 @@ impl ProfileForm {
                         .items_center()
                         .gap_1()
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(self.fields.field(i18n_key::CONNECTIONS_PRIVATE_KEY_PATH).clone()),
+                            div().flex_1().min_w_0().child(
+                                self.fields
+                                    .field(i18n_key::CONNECTIONS_PRIVATE_KEY_PATH)
+                                    .clone(),
+                            ),
                         )
                         .child(
                             ui::text_button_enabled(
@@ -602,54 +605,22 @@ impl ProfileForm {
                 body.child(div().text_color(rgb(ui::colors().danger)).child(tr(error)))
             })
             .child(self.credential_editor(cx))
-            .child(self.advanced_toggle(i18n_key::CONNECTIONS_ADVANCED_SSH_SETTINGS,
-                rustterm::trf!(i18n_key::CONNECTIONS_SSH_OPTIONS_SUMMARY,
-                    jumps = self.fields.get(i18n_key::CONNECTIONS_JUMP_HOSTS_COMMA_SEPARATED, cx).split(',').filter(|part| !part.trim().is_empty()).count(),
-                    forwards = self.forwards.len(),
-                    seconds = self.fields.get(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS, cx)), cx))
-            .when(self.advanced, |body| {
-                body.child(row(
-                    i18n_key::CONNECTIONS_SHELL_INTEGRATION,
-                    div()
-                        .id("ssh-shell-integration")
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .py_1()
-                        .px_2()
-                        .cursor_pointer()
-                        .tab_index(0)
-                        .border_1()
-                        .border_color(rgb(ui::colors().border))
-                        .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                        .child(
-                            div()
-                                .size(px(14.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .border_1()
-                                .rounded(px(2.))
-                                .border_color(rgb(if self.shell_integration {
-                                    ui::colors().accent
-                                } else {
-                                    ui::colors().border
-                                }))
-                                .when(self.shell_integration, |checkbox| {
-                                    checkbox.child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
-                                }),
-                        )
-                        .child(tr(i18n_key::CONNECTIONS_LOAD_SHELL_INTEGRATION_AUTOMATICALLY))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.shell_integration = !this.shell_integration;
-                            cx.notify();
-                        })),
-                ))
-                    .child(hint(i18n_key::CONNECTIONS_AUTOMATICALLY_INTEGRATES_BASH_ZSH_AND_FISH_WITHOUT_CHANGING_YOUR_STARTUP))
-                    .child(self.fields.selected_rows(SSH_ADVANCED))
-                    .child(hint(i18n_key::CONNECTIONS_JUMP_HOSTS_USE_SSH_AGENT_IDENTITIES_UNLESS_IMPORTED_WITH_A))
-                    .child(self.forward_rules(cx))
-            })
+            .into_any_element()
+    }
+
+    pub(super) fn ssh_advanced(&self, cx: &mut Context<Self>) -> AnyElement {
+        column().gap(px(16.))
+            .child(ui::toggle_row(
+                "ssh-shell-integration", tr(i18n_key::CONNECTIONS_SHELL_INTEGRATION),
+                Some(tr(i18n_key::CONNECTIONS_AUTOMATICALLY_INTEGRATES_BASH_ZSH_AND_FISH_WITHOUT_CHANGING_YOUR_STARTUP)),
+                self.shell_integration,
+            ).on_click(cx.listener(|this, _, _, cx| {
+                this.shell_integration = !this.shell_integration;
+                cx.notify();
+            })))
+            .child(self.fields.selected_rows(SSH_ADVANCED))
+            .child(hint(i18n_key::CONNECTIONS_JUMP_HOSTS_USE_SSH_AGENT_IDENTITIES_UNLESS_IMPORTED_WITH_A))
+            .child(self.forward_rules(cx))
             .into_any_element()
     }
 }

@@ -20,9 +20,7 @@ pub use credentials::CredentialChange;
 use self::ssh::SshAuthentication;
 use super::{Fields, column, hint, input, parse_value};
 use crate::app::{interaction::PromptGate, text_input::TextInput, ui};
-use gpui::{
-    App, Context, Entity, FocusHandle, ScrollHandle, Subscription, Window, prelude::*, px, rgb,
-};
+use gpui::{App, Context, Entity, FocusHandle, ScrollHandle, Subscription, Window, prelude::*, px};
 use rustterm::config::{
     Connection, Group, Profile, SqlConfig, SqlEngine, SshConfig, TelnetConfig, Uuid,
 };
@@ -40,6 +38,23 @@ pub enum ProfileKind {
     Postgres,
     Sqlite,
     Rdp,
+}
+
+impl ProfileKind {
+    pub fn icon(self) -> ui::Icon {
+        match self {
+            Self::Local => ui::Icon::Local,
+            Self::Ssh => ui::Icon::Ssh,
+            Self::Telnet => ui::Icon::Telnet,
+            Self::Redis => ui::Icon::Redis,
+            Self::Elasticsearch => ui::Icon::Elasticsearch,
+            Self::Mysql => ui::Icon::Mysql,
+            Self::ClickHouse => ui::Icon::ClickHouse,
+            Self::Postgres => ui::Icon::Postgres,
+            Self::Sqlite => ui::Icon::Sqlite,
+            Self::Rdp => ui::Icon::Desktop,
+        }
+    }
 }
 
 struct ArgumentRow {
@@ -109,6 +124,8 @@ pub struct ProfileForm {
     tunnel_focus: FocusHandle,
     tunnel_scroll: ScrollHandle,
     advanced: bool,
+    page_focus: [FocusHandle; 2],
+    page_scroll: [ScrollHandle; 2],
     arguments: Vec<ArgumentRow>,
     environment: Vec<EnvironmentRow>,
     next_row: usize,
@@ -359,7 +376,7 @@ impl ProfileForm {
             group_open: false,
             suppress_group_key_up: false,
             group_cursor: 0,
-            group_focus: cx.focus_handle(),
+            group_focus: cx.focus_handle().tab_stop(true),
             group_scroll: ScrollHandle::new(),
             ssh_auth,
             shell_integration,
@@ -380,9 +397,11 @@ impl ProfileForm {
             tunnel_open: false,
             suppress_tunnel_key_up: false,
             tunnel_cursor: 0,
-            tunnel_focus: cx.focus_handle(),
+            tunnel_focus: cx.focus_handle().tab_stop(true),
             tunnel_scroll: ScrollHandle::new(),
             advanced: false,
+            page_focus: std::array::from_fn(|_| cx.focus_handle()),
+            page_scroll: std::array::from_fn(|_| ScrollHandle::new()),
             arguments,
             environment,
             next_row,
@@ -500,24 +519,83 @@ impl ProfileForm {
 }
 
 impl Render for ProfileForm {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_name_suggestion(cx);
-        column().text_size(px(12.)).text_color(rgb(ui::colors().text))
-            .when(self.kind == ProfileKind::Rdp, |form| form.h_full().min_h_0())
-            .child(match self.kind {
+        let compact = crate::app::window_frame::WindowFrame::new(window)
+            .content_size(window.viewport_size())
+            .width
+            < px(720.);
+        if self.kind == ProfileKind::Rdp {
+            return self.rdp_body(compact, cx);
+        }
+        let body = if self.advanced {
+            match self.kind {
+                ProfileKind::Ssh => self.ssh_advanced(cx),
+                ProfileKind::Local => self.local_body(cx),
+                _ => self.network_options(cx),
+            }
+        } else {
+            column().gap(px(16.)).child(match self.kind {
                 ProfileKind::Local => self.local_body(cx),
                 ProfileKind::Ssh => self.ssh_body(cx),
                 ProfileKind::Telnet => column().child(self.host_port())
                     .child(hint(i18n_key::CONNECTIONS_TELNET_IS_UNENCRYPTED_ENTER_LOGIN_CREDENTIALS_IN_THE_TERMINAL_WHEN))
-                    .child(self.network_options(cx))
                     .into_any_element(),
                 ProfileKind::Redis => self.redis_body(cx),
                 ProfileKind::Elasticsearch => self.elasticsearch_body(cx),
                 ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::ClickHouse => self.sql_body(cx),
                 ProfileKind::Sqlite => self.sqlite_body(cx),
-                ProfileKind::Rdp => self.rdp_body(cx),
-            })
-            .when(self.kind != ProfileKind::Rdp, |form| form.child(self.profile_details(cx)))
+                ProfileKind::Rdp => unreachable!(),
+            }).child(self.profile_details(cx)).into_any_element()
+        };
+        let navigation = ui::preferences_navigation(compact).children(
+            [false, true].into_iter().map(|advanced| {
+                ui::preferences_item(
+                    ("profile-section", usize::from(advanced)),
+                    rustterm::i18n::tr(self.page_label(advanced)),
+                    if advanced {
+                        ui::Icon::Settings
+                    } else {
+                        self.kind.icon()
+                    },
+                    self.advanced == advanced,
+                    compact,
+                )
+                .track_focus(
+                    &self.page_focus[usize::from(advanced)]
+                        .clone()
+                        .tab_stop(self.advanced == advanced),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_page(advanced, window, cx);
+                }))
+                .on_key_down(cx.listener(
+                    move |this, event: &gpui::KeyDownEvent, window, cx| {
+                        if event.keystroke.modifiers.modified() {
+                            return;
+                        }
+                        let next = match event.keystroke.key.as_str() {
+                            "left" | "right" | "up" | "down" => !advanced,
+                            "home" => false,
+                            "end" => true,
+                            _ => return,
+                        };
+                        this.select_page(next, window, cx);
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    },
+                ))
+            }),
+        );
+        ui::preferences_layout(
+            navigation,
+            ("profile-content", usize::from(self.advanced)),
+            rustterm::i18n::tr(self.page_label(self.advanced)),
+            body,
+            self.page_scroll[usize::from(self.advanced)].clone(),
+            compact,
+        )
+        .into_any_element()
     }
 }
 

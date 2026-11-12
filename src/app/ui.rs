@@ -5,13 +5,15 @@ use rustterm::i18n::messages as i18n_key;
 mod components;
 pub mod metrics;
 pub mod popup;
+mod preferences;
 pub mod prompt;
 mod scroll_area;
 mod scrollbar;
 mod theme;
 pub use components::{
-    dialog_surface, empty_state, feedback, form_row, panel_header, setting_row, toolbar,
+    dialog_surface, empty_state, feedback, form_row, panel_header, setting_row, toggle_row, toolbar,
 };
+pub use preferences::{preferences_item, preferences_layout, preferences_navigation};
 pub use theme::{Colors, colors, set_theme};
 
 pub use scroll_area::scrollable;
@@ -39,10 +41,9 @@ pub fn preserve_scroll_axes<E: Styled>(mut element: E) -> E {
 // a portable font selection on the Linux text system.
 pub const MONOSPACE_FONT: &str = "DejaVu Sans Mono";
 
-pub const TITLE_HEIGHT: f32 = 32.0;
-pub const TAB_HEIGHT: f32 = 36.0;
+pub const TITLE_HEIGHT: f32 = 42.0;
 pub const PANE_HEADER_HEIGHT: f32 = 36.0;
-pub const STATUS_HEIGHT: f32 = 24.0;
+pub const STATUS_HEIGHT: f32 = 30.0;
 pub const SEARCH_HEIGHT: f32 = 30.0;
 
 // Keep enum, path lookup and embedded bytes in one catalog so a new icon cannot
@@ -69,6 +70,10 @@ icons! {
     Menu => "menu",
     Sidebar => "sidebar",
     Terminal => "terminal",
+    Ssh => "ssh",
+    Local => "local",
+    Telnet => "telnet",
+    Connections => "connections",
     Database => "database",
     Redis => "redis",
     Elasticsearch => "elasticsearch",
@@ -127,7 +132,9 @@ impl Icon {
             Connection::Postgres(_) => Self::Postgres,
             Connection::Sqlite(_) => Self::Sqlite,
             Connection::Rdp(_) => Self::Desktop,
-            Connection::Local(_) | Connection::Ssh(_) | Connection::Telnet(_) => Self::Terminal,
+            Connection::Local(_) => Self::Local,
+            Connection::Ssh(_) => Self::Ssh,
+            Connection::Telnet(_) => Self::Telnet,
         }
     }
 
@@ -142,6 +149,9 @@ impl Icon {
 
     fn color(self) -> u32 {
         match self {
+            Self::Ssh => colors().blue,
+            Self::Local => colors().muted,
+            Self::Telnet => colors().warning,
             Self::Redis => colors().danger,
             Self::Mysql | Self::ClickHouse => colors().warning,
             Self::Postgres => colors().blue,
@@ -167,13 +177,22 @@ pub fn icon_button(id: impl Into<ElementId>, glyph: Icon, label: &'static str) -
     styled_icon_button(id, glyph, label, ButtonStyle::Neutral)
 }
 
+pub fn icon_button_with_size(
+    id: impl Into<ElementId>,
+    glyph: Icon,
+    label: &'static str,
+    icon_size: f32,
+) -> Stateful<Div> {
+    icon_button_control(id, glyph, label, ButtonStyle::Neutral, true, icon_size)
+}
+
 pub fn icon_button_enabled(
     id: impl Into<ElementId>,
     glyph: Icon,
     label: &'static str,
     enabled: bool,
 ) -> Stateful<Div> {
-    icon_button_control(id, glyph, label, ButtonStyle::Neutral, enabled)
+    icon_button_control(id, glyph, label, ButtonStyle::Neutral, enabled, 14.)
         .tab_index(0)
         .tab_stop(enabled)
 }
@@ -203,7 +222,7 @@ pub fn styled_icon_button(
     label: &'static str,
     style: ButtonStyle,
 ) -> Stateful<Div> {
-    icon_button_control(id, glyph, label, style, true)
+    icon_button_control(id, glyph, label, style, true, 14.)
 }
 
 fn icon_button_control(
@@ -212,6 +231,7 @@ fn icon_button_control(
     label: &'static str,
     style: ButtonStyle,
     enabled: bool,
+    icon_size: f32,
 ) -> Stateful<Div> {
     let (hover_bg, hover_fg) = style.hover_colors();
     let foreground = match style {
@@ -245,6 +265,7 @@ fn icon_button_control(
         .tooltip(move |_, cx| cx.new(|_| Tooltip(tr(label).to_owned())).into())
         .child(
             icon(glyph)
+                .size(px(icon_size))
                 .text_color(rgb(foreground))
                 .when(enabled, |icon| {
                     icon.group_hover("icon-button", |s| s.text_color(rgb(hover_fg)))
@@ -269,6 +290,31 @@ pub fn text_button_enabled(
     text_button_control(id, label, style, enabled)
         .tab_index(0)
         .tab_stop(enabled)
+}
+
+/// A persistent option uses a quieter selection than a primary action.
+pub fn choice_button(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    selected: bool,
+    enabled: bool,
+) -> Stateful<Div> {
+    text_button_enabled(id, label, ButtonStyle::Neutral, enabled)
+        .bg(rgb(if selected {
+            colors().selected
+        } else {
+            colors().input
+        }))
+        .text_color(rgb(if selected {
+            colors().accent
+        } else {
+            colors().muted
+        }))
+        .border_color(rgb(if selected {
+            colors().accent
+        } else {
+            colors().border
+        }))
 }
 
 fn disabled_button(button: Stateful<Div>) -> Stateful<Div> {

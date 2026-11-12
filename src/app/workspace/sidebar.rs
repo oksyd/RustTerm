@@ -1,5 +1,8 @@
-use super::Workspace;
 use super::menus::Menu;
+use super::{
+    Workspace,
+    connection_kind::{ConnectionKind, target},
+};
 use crate::app::forms::ProfileKind;
 use crate::app::ui;
 use crate::app::ui::{Icon, icon, icon_button};
@@ -10,7 +13,20 @@ use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 use std::collections::{HashMap, HashSet};
 
-use super::menus::MenuAction;
+mod search;
+pub(super) use search::LibrarySearch;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LibraryItem {
+    Group(Option<Uuid>),
+    Profile(Uuid),
+}
+
+struct LibraryRow {
+    item: LibraryItem,
+    parent: Option<Uuid>,
+    name: String,
+}
 
 #[derive(Clone)]
 struct LibraryDrag {
@@ -32,7 +48,12 @@ impl gpui::Render for LibraryDrag {
 }
 
 fn profile_matches(profile: &Profile, group: &str, query: &str) -> bool {
-    if query.is_empty() {
+    if query.is_empty()
+        || ConnectionKind::of(&profile.connection)
+            .label()
+            .to_lowercase()
+            .contains(query)
+    {
         return true;
     }
     let target = match &profile.connection {
@@ -85,9 +106,15 @@ fn library_sections<'a>(
     config: &'a AppConfig,
     collapsed: &HashSet<Uuid>,
     query: &str,
+    kind: Option<ConnectionKind>,
 ) -> Vec<LibrarySection<'a>> {
     let mut profiles: HashMap<_, Vec<_>> = HashMap::new();
-    for (index, profile) in config.profiles.iter().enumerate() {
+    for (index, profile) in config
+        .profiles
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| kind.is_none_or(|kind| ConnectionKind::of(&p.connection) == kind))
+    {
         profiles
             .entry(profile.group)
             .or_default()
@@ -123,10 +150,12 @@ fn library_sections<'a>(
                 name,
                 depth,
                 count: profiles.len(),
-                matched: query.is_empty()
-                    || !profiles.is_empty()
-                    || path.to_lowercase().contains(query),
-                collapsed: query.is_empty() && id.is_some_and(|id| collapsed.contains(&id)),
+                matched: !profiles.is_empty()
+                    || (kind.is_none()
+                        && (query.is_empty() || path.to_lowercase().contains(query))),
+                collapsed: query.is_empty()
+                    && kind.is_none()
+                    && id.is_some_and(|id| collapsed.contains(&id)),
                 path,
                 profiles,
             }
@@ -148,6 +177,9 @@ fn library_sections<'a>(
     }
     let mut hidden_depth = None;
     sections.retain(|section| {
+        if section.id.is_none() && section.profiles.is_empty() {
+            return false;
+        }
         if hidden_depth.is_some_and(|depth| section.depth > depth) {
             return false;
         }
@@ -182,7 +214,8 @@ impl Workspace {
         let query = self.session_filter.read(cx).value().trim().to_lowercase();
         let mut rows = Vec::new();
         let mut row = 0;
-        for section in library_sections(&self.config, &self.collapsed, &query) {
+        for section in library_sections(&self.config, &self.collapsed, &query, self.connection_type)
+        {
             row += 1;
             if section.collapsed {
                 continue;
@@ -197,7 +230,7 @@ impl Workspace {
     pub(super) fn selected_filtered_profile(&self, cx: &App) -> Option<Profile> {
         let rows = self.filtered_profile_rows(cx);
         rows.iter()
-            .find(|(profile, _)| Some(profile.id) == self.selected_profile)
+            .find(|(profile, _)| Some(profile.id) == self.selected_library_profile())
             .or_else(|| rows.first())
             .map(|(profile, _)| (*profile).clone())
     }
@@ -211,26 +244,44 @@ impl Workspace {
         let navigating_filter = filter.focus_handle().is_focused(window)
             && !filter.is_composing()
             && matches!(event.keystroke.key.as_str(), "up" | "down");
-        let context_menu = event.keystroke.key == "f10"
-            && event.keystroke.modifiers
-                == gpui::Modifiers {
-                    shift: true,
-                    ..Default::default()
-                };
+        let input = self.library_search.query.read(cx);
+        let typing = input.focus_handle().is_focused(window);
         if !self.sidebar_visible
-            || (!self.sidebar_focus.is_focused(window) && !navigating_filter)
+            || (!self.sidebar_focus.is_focused(window) && !typing && !navigating_filter)
             || self.modal.is_some()
-            || (event.keystroke.modifiers != gpui::Modifiers::default() && !context_menu)
+            || self.menu.is_some()
+            || self.lock_screen.locked
+            || self.closing
+            || self.window_state.prompts.is_busy()
+            || self.authentication.read(cx).is_active()
+            || input.is_composing()
         {
             return false;
         }
-        if context_menu || event.keystroke.key == "menu" {
-            if let Some((id, row)) = self
-                .filtered_profile_rows(cx)
-                .into_iter()
-                .find(|(profile, _)| Some(profile.id) == self.selected_profile)
-                .map(|(profile, row)| (profile.id, row))
-                && let Some(bounds) = self.sidebar_scroll.bounds_for_item(row)
+        let query = input.value().trim().to_owned();
+        let searching = !input.value().is_empty();
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+        let context_menu = key == "menu"
+            || (key == "f10"
+                && modifiers
+                    == gpui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    });
+        if (modifiers.control || modifiers.alt || modifiers.platform || modifiers.shift)
+            && !context_menu
+        {
+            return false; // Text input handles layouts, AltGr and editing shortcuts.
+        }
+        let rows = self.library_rows(cx);
+        let current = rows
+            .iter()
+            .position(|row| Some(row.item) == self.library_selection);
+        let matches = search::matching_rows(&rows, &query);
+        if context_menu {
+            if let Some(index) = current
+                && let Some(bounds) = self.sidebar_scroll.bounds_for_item(index)
             {
                 let viewport = self.sidebar_scroll.bounds();
                 let position = gpui::point(
@@ -238,86 +289,131 @@ impl Workspace {
                     (bounds.bottom() + self.sidebar_scroll.offset().y)
                         .clamp(viewport.top(), viewport.bottom()),
                 );
-                self.open_profile_menu(id, position, window, cx);
+                match rows[index].item {
+                    LibraryItem::Group(Some(id)) => self.open_group_menu(id, position, window, cx),
+                    LibraryItem::Profile(id) => self.open_profile_menu(id, position, window, cx),
+                    LibraryItem::Group(None) => {}
+                }
             }
-            cx.stop_propagation();
-            window.prevent_default();
-            return true;
-        }
-        match event.keystroke.key.as_str() {
-            "up" | "down" | "home" | "end" => {
-                let profiles = self.filtered_profile_rows(cx);
-                if !profiles.is_empty() {
-                    let current = profiles
-                        .iter()
-                        .position(|(p, _)| Some(p.id) == self.selected_profile);
-                    let next = match event.keystroke.key.as_str() {
-                        "home" => 0,
-                        "end" => profiles.len() - 1,
-                        "up" => current
-                            .map(|i| i.saturating_sub(1))
-                            .unwrap_or(profiles.len() - 1),
-                        _ => current
-                            .map(|i| (i + 1).min(profiles.len() - 1))
-                            .unwrap_or(0),
+        } else {
+            match key {
+                "up" | "down" | "home" | "end" => {
+                    if searching && matches!(key, "home" | "end") {
+                        return false;
+                    }
+                    let next = if searching {
+                        search::next_match(&matches, current.unwrap_or(usize::MAX), key == "up")
+                    } else if rows.is_empty() {
+                        None
+                    } else {
+                        Some(match key {
+                            "home" => 0,
+                            "end" => rows.len() - 1,
+                            "up" => current
+                                .map(|i| i.saturating_sub(1))
+                                .unwrap_or(rows.len() - 1),
+                            _ => current.map(|i| (i + 1).min(rows.len() - 1)).unwrap_or(0),
+                        })
                     };
-                    let (id, row) = (profiles[next].0.id, profiles[next].1);
-                    self.selected_profile = Some(id);
-                    self.sidebar_scroll.scroll_to_item(row);
-                    if navigating_filter {
-                        self.sidebar_focus.focus(window);
+                    if let Some(index) = next {
+                        self.library_selection = Some(rows[index].item);
+                        self.sidebar_scroll.scroll_to_item(index);
+                        if navigating_filter {
+                            self.focus_library(window, cx);
+                        }
                     }
                 }
-            }
-            "enter" => {
-                if let Some(profile) = self.selected_filtered_profile(cx) {
-                    self.open_or_focus_profile(profile, window, cx);
+                "enter" => {
+                    if !event.is_held
+                        && let Some(index) =
+                            current.filter(|index| !searching || matches.contains(index))
+                    {
+                        let item = rows[index].item;
+                        self.clear_library_search(cx);
+                        match item {
+                            LibraryItem::Group(Some(id)) => {
+                                if !self.collapsed.remove(&id) && !searching {
+                                    self.collapsed.insert(id);
+                                }
+                            }
+                            LibraryItem::Profile(id) => {
+                                if let Some(profile) =
+                                    self.config.profiles.iter().find(|p| p.id == id).cloned()
+                                {
+                                    self.open_or_focus_profile(profile, window, cx);
+                                }
+                            }
+                            LibraryItem::Group(None) => {}
+                        }
+                    }
                 }
-            }
-            "left" | "right" => {
-                if self.session_filter.read(cx).value().trim().is_empty()
-                    && let Some(group) = self
-                        .config
-                        .profiles
-                        .iter()
-                        .find(|profile| Some(profile.id) == self.selected_profile)
-                        .and_then(|profile| profile.group)
-                {
-                    if event.keystroke.key == "left" {
-                        self.collapsed.insert(group);
+                "left" | "right" if !searching => {
+                    if let Some(index) = current {
+                        let row = &rows[index];
+                        let mut next = None;
+                        match (key, row.item) {
+                            ("left", LibraryItem::Group(Some(id)))
+                                if !self.collapsed.contains(&id)
+                                    && self.session_filter.read(cx).value().trim().is_empty()
+                                    && self.connection_type.is_none() =>
+                            {
+                                self.collapsed.insert(id);
+                            }
+                            ("right", LibraryItem::Group(Some(id)))
+                                if self.collapsed.remove(&id) => {}
+                            ("right", LibraryItem::Group(group)) => {
+                                next = rows
+                                    .get(index + 1)
+                                    .filter(|child| child.parent == group)
+                                    .map(|_| index + 1);
+                            }
+                            ("left", item)
+                                if row.parent.is_some()
+                                    || matches!(item, LibraryItem::Profile(_)) =>
+                            {
+                                next = rows.iter().position(|candidate| {
+                                    candidate.item == LibraryItem::Group(row.parent)
+                                });
+                            }
+                            _ => {}
+                        }
+                        if let Some(next) = next {
+                            self.library_selection = Some(rows[next].item);
+                            self.sidebar_scroll.scroll_to_item(next);
+                        }
+                    }
+                }
+                "f2" | "delete" if !searching => match self.library_selection {
+                    Some(LibraryItem::Group(Some(id))) => {
+                        if key == "delete" {
+                            self.delete_group(id, window, cx);
+                        } else {
+                            self.edit_group(Some(id), None, window, cx);
+                        }
+                    }
+                    Some(LibraryItem::Profile(id)) => {
+                        if let Some(profile) =
+                            self.config.profiles.iter().find(|p| p.id == id).cloned()
+                        {
+                            if key == "delete" {
+                                self.delete_profile(id, window, cx);
+                            } else {
+                                let kind = ConnectionKind::of(&profile.connection).profile_kind();
+                                self.edit_profile(Some(profile), kind, window, cx);
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                "escape" => {
+                    if !self.library_search.query.read(cx).value().is_empty() {
+                        self.clear_library_search(cx);
                     } else {
-                        self.expand_library_group(group);
+                        self.restore_focus(window, cx);
                     }
                 }
+                _ => return false,
             }
-            "f2" | "delete" => {
-                if let Some(profile) = self
-                    .filtered_profile_rows(cx)
-                    .into_iter()
-                    .find(|(profile, _)| Some(profile.id) == self.selected_profile)
-                    .map(|(profile, _)| profile.clone())
-                {
-                    if event.keystroke.key == "delete" {
-                        self.delete_profile(profile.id, window, cx);
-                    } else {
-                        let kind = match &profile.connection {
-                            Connection::Local(_) => ProfileKind::Local,
-                            Connection::Ssh(_) => ProfileKind::Ssh,
-                            Connection::Telnet(_) => ProfileKind::Telnet,
-                            Connection::Redis(_) => ProfileKind::Redis,
-                            Connection::Elasticsearch(_) => ProfileKind::Elasticsearch,
-                            Connection::Mysql(_) => ProfileKind::Mysql,
-                            Connection::ClickHouse(_) => ProfileKind::ClickHouse,
-                            Connection::Postgres(_) => ProfileKind::Postgres,
-                            Connection::Sqlite(_) => ProfileKind::Sqlite,
-                            Connection::Rdp(_) => ProfileKind::Rdp,
-                        };
-                        self.edit_profile(Some(profile), kind, window, cx);
-                    }
-                }
-            }
-            "escape" => self.restore_focus(window, cx),
-            _ => return false,
         }
         cx.stop_propagation();
         window.prevent_default();
@@ -370,7 +466,7 @@ impl Workspace {
                 })
                 .unwrap_or(self.config.profiles.len());
             self.config.profiles.insert(to, item);
-            self.selected_profile = Some(drag.id);
+            self.library_selection = Some(LibraryItem::Profile(drag.id));
             if let Some(group) = group {
                 self.expand_library_group(group);
             }
@@ -378,12 +474,18 @@ impl Workspace {
         self.save(cx);
         cx.notify();
     }
-    pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let query = self.session_filter.read(cx).value().trim().to_lowercase();
-        let selected = self.selected_profile;
+        let speed_query = self.library_search.query.read(cx).value().trim();
+        let selected = self.selected_library_profile();
+        let show_details = self.config.settings.sidebar_connection_details;
         let sidebar = div()
             .id("connection-sidebar")
             .track_focus(&self.sidebar_focus)
+            .relative()
+            .capture_key_down(cx.listener(|this, event, window, cx| {
+                this.sidebar_key(event, window, cx);
+            }))
             .w(px(self.sidebar_width))
             .h_full()
             .flex_shrink_0()
@@ -407,26 +509,91 @@ impl Workspace {
                             .child(tr(i18n_key::WORKSPACE_CONNECTIONS)),
                     )
                     .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(ui::colors().faint))
+                            .child(self.config.profiles.len().to_string()),
+                    )
+                    .child(
                         icon_button(
-                            "hide-connection-sidebar",
-                            Icon::Sidebar,
-                            i18n_key::WORKSPACE_HIDE_CONNECTION_LIBRARY_CTRL_SHIFT_B,
+                            "add-connection",
+                            Icon::Plus,
+                            i18n_key::COMMON_NEW_CONNECTION,
                         )
                         .tab_index(0)
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.edit_profile(None, ProfileKind::Ssh, window, cx)
+                        })),
+                    )
+                    .child(
+                        icon_button(
+                            "library-actions",
+                            Icon::More,
+                            i18n_key::WORKSPACE_CONNECTIONS,
+                        )
+                        .tab_index(0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_menu(Menu::Create, window, cx)
+                        })),
                     ),
             )
             .child(
                 div()
-                    .px_3()
-                    .pb_2()
+                    .mx_3()
+                    .mb_2()
+                    .h(px(32.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(rgb(
+                        if self
+                            .session_filter
+                            .read(cx)
+                            .focus_handle()
+                            .is_focused(window)
+                        {
+                            ui::colors().accent
+                        } else {
+                            ui::colors().border
+                        },
+                    ))
+                    .bg(rgb(ui::colors().input))
+                    .overflow_hidden()
                     .flex_shrink_0()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .child(div().pl_2().child(icon(Icon::Search).size(px(12.))))
                     .child(div().flex_1().min_w_0().child(self.session_filter.clone()))
+                    .child(
+                        div()
+                            .id("connection-type-filter")
+                            .tab_index(0)
+                            .h(px(30.))
+                            .max_w(px(108.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .border_l_1()
+                            .border_color(rgb(ui::colors().border))
+                            .cursor_pointer()
+                            .text_size(px(11.))
+                            .text_color(rgb(if self.connection_type.is_some() {
+                                ui::colors().accent
+                            } else {
+                                ui::colors().muted
+                            }))
+                            .hover(|style| style.bg(rgb(ui::colors().hover)))
+                            .child(div().truncate().child(
+                                self.connection_type.map_or(
+                                    tr(i18n_key::WORKSPACE_ALL_TYPES),
+                                    ConnectionKind::label,
+                                ),
+                            ))
+                            .child(icon(Icon::ChevronDown).size(px(10.)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_menu(Menu::ConnectionType, window, cx)
+                            })),
+                    )
                     .when(!query.is_empty(), |d| {
                         d.child(
                             icon_button(
@@ -439,33 +606,9 @@ impl Workspace {
                             })),
                         )
                     }),
-            )
-            .child(
-                div()
-                    .id("add-connection")
-                    .tab_index(0)
-                    .h(px(32.))
-                    .mx_3()
-                    .mb_3()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .gap_2()
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(rgb(ui::colors().border))
-                    .text_size(px(12.))
-                    .text_color(rgb(ui::colors().text))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(ui::colors().hover)))
-                    .child(icon(Icon::Plus))
-                    .child(tr(i18n_key::COMMON_NEW_CONNECTION))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_menu(Menu::Create, window, cx)
-                    })),
             );
-        let sections = library_sections(&self.config, &self.collapsed, &query);
+        let sections =
+            library_sections(&self.config, &self.collapsed, &query, self.connection_type);
         let has_matches = !sections.is_empty();
         let mut tree = div()
             .id("session-tree")
@@ -503,6 +646,10 @@ impl Workspace {
                 .h(px(32.))
                 .pl(px(12. + indent))
                 .pr_3()
+                .when(
+                    self.library_selection == Some(LibraryItem::Group(group)),
+                    |d| d.bg(rgb(ui::colors().selected)),
+                )
                 .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(heading_path.clone())).into())
                 .when_some(group, |d, id| {
                     d.on_mouse_down(
@@ -536,12 +683,34 @@ impl Workspace {
                         .text_color(rgb(ui::colors().muted))
                         .font_weight(FontWeight::MEDIUM)
                         .child(
-                            icon(if collapsed {
-                                Icon::ChevronRight
-                            } else {
-                                Icon::ChevronDown
-                            })
-                            .size(px(12.)),
+                            div()
+                                .id(("group-disclosure", group_index))
+                                .size(px(16.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .hover(|d| d.bg(rgb(ui::colors().hover)))
+                                .child(
+                                    icon(if collapsed {
+                                        Icon::ChevronRight
+                                    } else {
+                                        Icon::ChevronDown
+                                    })
+                                    .size(px(12.)),
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.clear_library_search(cx);
+                                    this.library_selection = Some(LibraryItem::Group(group));
+                                    this.release_rdp_control(cx);
+                                    this.focus_library(window, cx);
+                                    if let Some(id) = group
+                                        && !this.collapsed.remove(&id)
+                                    {
+                                        this.collapsed.insert(id);
+                                    }
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                })),
                         )
                         .child(
                             div()
@@ -550,11 +719,14 @@ impl Workspace {
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .child(if query.is_empty() {
-                                    name.clone()
-                                } else {
-                                    path.clone()
-                                }),
+                                .child(search::highlighted(
+                                    if query.is_empty() {
+                                        name.clone()
+                                    } else {
+                                        path.clone()
+                                    },
+                                    speed_query,
+                                )),
                         )
                         .child(
                             div()
@@ -572,14 +744,21 @@ impl Workspace {
                                 |drag, _, _, cx| cx.new(|_| drag.clone()),
                             )
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(id) = group
-                                && !this.collapsed.remove(&id)
-                            {
-                                this.collapsed.insert(id);
-                            }
-                            cx.notify();
-                        })),
+                        .on_click(cx.listener(
+                            move |this, event: &gpui::ClickEvent, window, cx| {
+                                this.clear_library_search(cx);
+                                this.library_selection = Some(LibraryItem::Group(group));
+                                this.release_rdp_control(cx);
+                                this.focus_library(window, cx);
+                                if event.click_count() == 2
+                                    && let Some(id) = group
+                                    && !this.collapsed.remove(&id)
+                                {
+                                    this.collapsed.insert(id);
+                                }
+                                cx.notify();
+                            },
+                        )),
                 );
             if let Some(id) = group {
                 // A separate upper-edge drop target retains sibling ordering;
@@ -718,7 +897,7 @@ impl Workspace {
                 tree = tree.child(
                     div()
                         .id(("profile", index))
-                        .h(px(36.))
+                        .h(px(if show_details { 44. } else { 32. }))
                         .mx_2()
                         .pl(px(24. + indent))
                         .pr_2()
@@ -736,7 +915,7 @@ impl Workspace {
                         .hover(|s| s.bg(rgb(ui::colors().hover)))
                         .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
                         .child(
-                            icon(glyph).when(glyph == Icon::Terminal && open_count > 0, |icon| {
+                            icon(glyph).when(glyph == Icon::Ssh && open_count > 0, |icon| {
                                 icon.text_color(rgb(ui::colors().blue))
                             }),
                         )
@@ -744,28 +923,65 @@ impl Workspace {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(profile.name.clone()),
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(rgb(ui::colors().text))
+                                                .child(search::highlighted(
+                                                    profile.name.clone(),
+                                                    speed_query,
+                                                )),
+                                        )
+                                        .when(open_count > 1, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(ui::colors().muted))
+                                                    .child(open_count.to_string()),
+                                            )
+                                        })
+                                        .when(open_count > 0, |d| {
+                                            d.child(
+                                                div()
+                                                    .size(px(6.))
+                                                    .flex_shrink_0()
+                                                    .rounded_full()
+                                                    .bg(rgb(status)),
+                                            )
+                                        }),
+                                )
+                                .when(show_details, |row| {
+                                    row.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .text_size(px(11.))
+                                            .text_color(rgb(ui::colors().muted))
+                                            .child(div().w(px(84.)).flex_shrink_0().child(
+                                                ConnectionKind::of(&profile.connection).label(),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(target(&profile.connection)),
+                                            ),
+                                    )
+                                }),
                         )
-                        .when(open_count > 1, |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(ui::colors().muted))
-                                    .child(open_count.to_string()),
-                            )
-                        })
-                        .when(open_count > 0, |d| {
-                            d.child(
-                                div()
-                                    .size(px(6.))
-                                    .flex_shrink_0()
-                                    .rounded_full()
-                                    .bg(rgb(status)),
-                            )
-                        })
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -776,8 +992,10 @@ impl Workspace {
                         )
                         .on_click(
                             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                                this.selected_profile = Some(id);
-                                this.sidebar_focus.focus(window);
+                                this.clear_library_search(cx);
+                                this.library_selection = Some(LibraryItem::Profile(id));
+                                this.release_rdp_control(cx);
+                                this.focus_library(window, cx);
                                 if event.click_count() == 2 {
                                     this.open_or_focus_profile(connect.clone(), window, cx);
                                 }
@@ -806,7 +1024,7 @@ impl Workspace {
                     .py_4()
                     .text_size(px(11.))
                     .text_color(rgb(ui::colors().faint))
-                    .child(if query.is_empty() {
+                    .child(if query.is_empty() && self.connection_type.is_none() {
                         tr(i18n_key::WORKSPACE_NO_SAVED_CONNECTIONS_YET_CHOOSE_NEW_CONNECTION_TO_ADD_ONE)
                     } else {
                         tr(i18n_key::WORKSPACE_NO_MATCHING_CONNECTION_PROFILES)
@@ -815,35 +1033,7 @@ impl Workspace {
         }
         sidebar
             .child(ui::scrollable(tree, Some(self.sidebar_scroll.clone())))
-            .child(
-                div()
-                    .h(px(44.))
-                    .px_3()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(rgb(ui::colors().border))
-                    .child(
-                        div()
-                            .id("settings")
-                            .tab_index(0)
-                            .h_full()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .cursor_pointer()
-                            .text_size(px(12.))
-                            .text_color(rgb(ui::colors().muted))
-                            .hover(|s| s.text_color(rgb(ui::colors().text)))
-                            .child(icon(Icon::Settings))
-                            .child(tr(i18n_key::COMMON_SETTINGS))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.menu_action(MenuAction::Settings, window, cx)
-                            })),
-                    ),
-            )
+            .child(self.render_library_search(window, cx))
             .into_any_element()
     }
 }
@@ -870,7 +1060,7 @@ mod tests {
     use super::*;
     use rustterm::config::LocalConfig;
 
-    fn library() -> AppConfig {
+    pub(super) fn library() -> AppConfig {
         let company = Group::new("Company A");
         let other = Group::new("Company B");
         let mut project = Group::new("Project");
@@ -892,13 +1082,13 @@ mod tests {
     fn collapsed_company_hides_its_subtree_but_keeps_recursive_count() {
         let config = library();
         let collapsed = HashSet::from([config.groups[0].id]);
-        let sections = library_sections(&config, &collapsed, "");
-        assert_eq!(sections.len(), 4); // Ungrouped, Company A, Company B, its project.
-        assert_eq!(sections[1].count, 1);
-        assert!(sections[1].collapsed);
-        assert_eq!(sections[3].path, "Company B / Project");
-        assert_eq!(sections[3].depth, 1);
-        assert_eq!(sections[3].profiles[0].1.name, "Database");
+        let sections = library_sections(&config, &collapsed, "", None);
+        assert_eq!(sections.len(), 3); // Company A, Company B, its project.
+        assert_eq!(sections[0].count, 1);
+        assert!(sections[0].collapsed);
+        assert_eq!(sections[2].path, "Company B / Project");
+        assert_eq!(sections[2].depth, 1);
+        assert_eq!(sections[2].profiles[0].1.name, "Database");
     }
 
     #[test]
@@ -906,17 +1096,39 @@ mod tests {
         let config = library();
         let collapsed = HashSet::from([config.groups[0].id, config.groups[1].id]);
         for query in ["company a", "app server", "company a / project"] {
-            let sections = library_sections(&config, &collapsed, query);
+            let sections = library_sections(&config, &collapsed, query, None);
             assert_eq!(sections.len(), 2);
             assert_eq!(sections[0].name, "Company A");
             assert_eq!(sections[1].path, "Company A / Project");
             assert!(!sections[0].collapsed && !sections[1].collapsed);
             assert_eq!(sections[1].profiles[0].1.id, config.profiles[0].id);
         }
-        let both = library_sections(&config, &collapsed, "project");
+        let both = library_sections(&config, &collapsed, "project", None);
         assert_eq!(both.len(), 4);
         assert_ne!(both[1].path, both[3].path);
         assert_eq!(collapsed.len(), 2); // Searching never changes saved collapse choices.
-        assert!(library_sections(&config, &collapsed, "missing").is_empty());
+        assert!(library_sections(&config, &collapsed, "missing", None).is_empty());
+    }
+    #[test]
+    fn type_filter_preserves_group_paths_and_reveals_collapsed_matches() {
+        let mut config = library();
+        config.profiles[0].connection = Connection::Ssh(Default::default());
+        let collapsed = HashSet::from([config.groups[0].id, config.groups[1].id]);
+        let sections = library_sections(&config, &collapsed, "", Some(ConnectionKind::Ssh));
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].count, 1);
+        assert!(!sections[0].collapsed && !sections[1].collapsed);
+        assert_eq!(sections[1].path, "Company A / Project");
+        assert_eq!(sections[1].profiles[0].1.id, config.profiles[0].id);
+        assert!(
+            library_sections(&config, &collapsed, "database", Some(ConnectionKind::Ssh)).is_empty()
+        );
+        assert!(library_sections(&config, &collapsed, "", Some(ConnectionKind::Rdp)).is_empty());
+        assert!(profile_matches(&config.profiles[0], "", "ssh"));
+        assert!(profile_matches(
+            &config.profiles[1],
+            "",
+            &ConnectionKind::Local.label().to_lowercase()
+        ));
     }
 }

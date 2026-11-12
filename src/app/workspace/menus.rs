@@ -2,6 +2,7 @@ use rustterm::i18n::messages as i18n_key;
 mod render;
 mod tabs;
 
+use super::sidebar::LibraryItem;
 use super::{Modal, Workspace};
 use crate::app::forms::{Fields, ProfileKind, SettingsSection};
 use crate::app::layout::Axis;
@@ -18,6 +19,8 @@ pub(super) enum Menu {
     Session,
     Help,
     NewConnection,
+    ConnectionType,
+    Tabs,
     Create,
     Profile(Uuid),
     Group(Uuid),
@@ -32,6 +35,8 @@ pub(super) const APPLICATION_MENUS: [(Menu, &str); 5] = [
 ];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum MenuAction {
+    FilterType(Option<super::connection_kind::ConnectionKind>),
+    ActivateTab(usize),
     Palette,
     Forwards,
     NewTerminal,
@@ -84,15 +89,16 @@ pub(super) enum MenuAction {
     CloseTabsToRight,
     CloseTabGroup,
 }
+#[derive(Clone)]
 struct MenuItem {
-    label: &'static str,
+    label: std::borrow::Cow<'static, str>,
     shortcut: &'static str,
     action: MenuAction,
 }
 impl MenuItem {
     const fn new(label: &'static str, shortcut: &'static str, action: MenuAction) -> Self {
         Self {
-            label,
+            label: std::borrow::Cow::Borrowed(label),
             shortcut,
             action,
         }
@@ -103,7 +109,12 @@ impl Menu {
         match self {
             Self::File | Self::NewConnection => Some(Self::File),
             Self::Edit | Self::View | Self::Session | Self::Help => Some(self),
-            Self::Create | Self::Profile(_) | Self::Group(_) | Self::Tab(_) => None,
+            Self::Create
+            | Self::Profile(_)
+            | Self::Group(_)
+            | Self::Tab(_)
+            | Self::ConnectionType
+            | Self::Tabs => None,
         }
     }
 
@@ -117,6 +128,7 @@ impl Menu {
     fn items(self) -> &'static [MenuItem] {
         use MenuAction::*;
         match self {
+            Self::ConnectionType | Self::Tabs => &[],
             Self::Tab(menu) => menu.items(),
             Self::File => {
                 const {
@@ -276,6 +288,34 @@ impl Menu {
 }
 
 impl Workspace {
+    fn menu_items(&self, menu: Menu) -> Vec<MenuItem> {
+        match menu {
+            Menu::ConnectionType => std::iter::once(MenuItem::new(
+                i18n_key::WORKSPACE_ALL_TYPES,
+                "",
+                MenuAction::FilterType(None),
+            ))
+            .chain(
+                super::connection_kind::ConnectionKind::ALL
+                    .into_iter()
+                    .map(|kind| {
+                        MenuItem::new(kind.label(), "", MenuAction::FilterType(Some(kind)))
+                    }),
+            )
+            .collect(),
+            Menu::Tabs => self
+                .tabs
+                .iter()
+                .map(|tab| MenuItem {
+                    label: self.workspace_tab_title(tab).into(),
+                    shortcut: "",
+                    action: MenuAction::ActivateTab(tab.id),
+                })
+                .collect(),
+            _ => menu.items().to_vec(),
+        }
+    }
+
     pub(super) fn edit_group(
         &mut self,
         editing: Option<Uuid>,
@@ -326,7 +366,8 @@ impl Workspace {
             self.restore_popup_focus(window, cx);
         }
         self.release_rdp_control(cx);
-        self.sidebar_focus.focus(window);
+        self.library_selection = Some(LibraryItem::Group(Some(id)));
+        self.focus_library(window, cx);
         self.remember_popup_focus(window, cx);
         self.menu = Some(Menu::Group(id));
         self.menu_anchor = position;
@@ -404,9 +445,9 @@ impl Workspace {
         if self.menu.take().is_some() {
             self.restore_popup_focus(window, cx);
         }
-        self.selected_profile = Some(id);
+        self.library_selection = Some(LibraryItem::Profile(id));
         self.release_rdp_control(cx);
-        self.sidebar_focus.focus(window);
+        self.focus_library(window, cx);
         self.remember_popup_focus(window, cx);
         self.menu = Some(Menu::Profile(id));
         self.menu_anchor = position;
@@ -452,8 +493,8 @@ impl Workspace {
                 );
             }
             self.menu = Some(menu);
-            self.menu_index = menu
-                .items()
+            self.menu_index = self
+                .menu_items(menu)
                 .iter()
                 .position(|item| self.action_enabled(item.action, cx))
                 .unwrap_or(0);
@@ -476,9 +517,9 @@ impl Workspace {
         if modifiers.control || modifiers.alt || modifiers.platform {
             return false;
         }
-        self.menu_index = self.menu_index.min(menu.items().len() - 1);
-        let enabled: Vec<_> = menu
-            .items()
+        let items = self.menu_items(menu);
+        self.menu_index = self.menu_index.min(items.len().saturating_sub(1));
+        let enabled: Vec<_> = items
             .iter()
             .map(|item| self.action_enabled(item.action, cx))
             .collect();
@@ -495,7 +536,10 @@ impl Workspace {
                     self.menu_index = index;
                 }
             }
-            "right" if menu.items()[self.menu_index].action == MenuAction::NewConnection => {
+            "right"
+                if items.get(self.menu_index).map(|item| item.action)
+                    == Some(MenuAction::NewConnection) =>
+            {
                 self.menu_action(MenuAction::NewConnection, window, cx);
             }
             "left" | "right" => {
@@ -522,7 +566,9 @@ impl Workspace {
                 self.menu_action(MenuAction::DeleteProfile, window, cx)
             }
             "enter" | "return" | "space" => {
-                self.menu_action(menu.items()[self.menu_index].action, window, cx)
+                if let Some(item) = items.get(self.menu_index) {
+                    self.menu_action(item.action, window, cx);
+                }
             }
             _ => {}
         }
@@ -595,9 +641,7 @@ impl Workspace {
                 );
         }
         if matches!(action, Forwards) {
-            return self.panes.get(&self.focused).is_some_and(
-                |pane| matches!(pane, Pane::Terminal(view) if view.read(cx).forwarding().is_some()),
-            );
+            return true;
         }
         if matches!(action, Copy | Paste) {
             return match self.panes.get(&self.focused) {
@@ -692,6 +736,18 @@ impl Workspace {
             self.restore_focus(window, cx);
         }
         match action {
+            FilterType(kind) => {
+                self.connection_type = kind;
+                self.library_selection = None;
+                self.sidebar_scroll.scroll_to_item(0);
+                self.session_filter.read(cx).focus_handle().focus(window);
+                cx.notify();
+            }
+            ActivateTab(id) => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                    self.set_active(index, window, cx);
+                }
+            }
             NewTabSession | CloseTab | CloseOtherTabs | CloseTabsToRight | CloseTabGroup => {
                 unreachable!("tab actions are dispatched with their explicit context")
             }

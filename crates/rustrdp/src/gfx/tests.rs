@@ -37,6 +37,65 @@ fn setup() -> (Gfx, Graphics) {
 }
 
 #[test]
+fn progressive_shared_tile_refinement_with_a_new_context_reaches_the_desktop() {
+    let (mut gfx, mut output) = setup();
+    gfx.receive(
+        &message([
+            reset(64, 64),
+            pdu(10, &[1, 0]),
+            pdu(9, &[1, 0, 64, 0, 64, 0, 0x20]),
+            pdu(15, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ]),
+        &mut output,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let mut streams = Reader::new(include_bytes!("fixtures/progressive-upgrades.bin"));
+    let expected = include_bytes!("fixtures/progressive-upgrades.bgra");
+    for (frame, pixels) in expected.as_chunks::<{ 64 * 64 * 4 }>().0.iter().enumerate() {
+        let context = if frame == 0 { 10u32 } else { 20u32 };
+        let length = streams.u32_le().unwrap();
+        let mut body = vec![1, 0, 9, 0];
+        body.extend(context.to_le_bytes());
+        body.push(0x20);
+        body.extend(length.to_le_bytes());
+        body.extend(streams.take(length as usize).unwrap());
+        let frame_id = frame as u32 + 1;
+        let mut completed = false;
+        gfx.receive(
+            &message([
+                start(frame_id),
+                pdu(2, &body),
+                pdu(12, &frame_id.to_le_bytes()),
+            ]),
+            &mut output,
+            |event, graphics| {
+                if let FrameEvent::End { id, .. } = event {
+                    assert_eq!(id, frame_id);
+                    completed = true;
+                    for (actual, expected) in graphics.pixels().iter().zip(pixels) {
+                        assert!(actual.abs_diff(*expected) <= 1);
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(completed);
+        if frame == 1 {
+            // The new bitmap now owns the shared tile's refinement state.
+            gfx.receive(
+                &message([pdu(3, &[1, 0, 10, 0, 0, 0])]),
+                &mut output,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+        }
+    }
+    streams.finish().unwrap();
+}
+
+#[test]
 fn clarity_keeps_the_pipeline_but_disables_avc_in_every_version() {
     let limits = Limits::default();
     let gfx = Gfx::new(limits, false);

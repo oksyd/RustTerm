@@ -86,6 +86,8 @@ impl Workspace {
     fn menu_size(&self, menu: Menu, available: Size<Pixels>) -> Size<Pixels> {
         let width = match menu {
             Menu::Tab(_) => 240.,
+            Menu::ConnectionType => 196.,
+            Menu::Tabs => 320.,
             Menu::File => 320.,
             Menu::Create | Menu::NewConnection | Menu::Profile(_) | Menu::Group(_) => 300.,
             _ => 380.,
@@ -97,7 +99,7 @@ impl Workspace {
         };
         size(
             px(width).min(available.width),
-            px(menu.items().len() as f32 * ROW_HEIGHT + 2. * MENU_PADDING + header)
+            px(self.menu_items(menu).len() as f32 * ROW_HEIGHT + 2. * MENU_PADDING + header)
                 .min(available.height),
         )
     }
@@ -165,7 +167,7 @@ impl Workspace {
             .overflow_y_scroll()
             .map(ui::preserve_scroll_axes)
             .track_scroll(scroll);
-        for (index, item) in menu.items().iter().enumerate() {
+        for (index, item) in self.menu_items(menu).iter().enumerate() {
             let action = item.action;
             let submenu = matches!(action, MenuAction::NewConnection);
             let enabled = self.action_enabled(action, cx);
@@ -196,7 +198,7 @@ impl Workspace {
                         i18n_key::COMMON_RECONNECT
                     }
                 }
-                _ => item.label,
+                _ => item.label.as_ref(),
             };
             let shortcut = if action == MenuAction::Disconnect
                 && matches!(self.panes.get(&self.focused), Some(Pane::Terminal(view)) if !view.read(cx).is_running())
@@ -206,6 +208,10 @@ impl Workspace {
                 item.shortcut
             };
             let checked = match action {
+                MenuAction::FilterType(kind) => self.connection_type == kind,
+                MenuAction::ActivateTab(id) => {
+                    self.tabs.get(self.active).is_some_and(|tab| tab.id == id)
+                }
                 MenuAction::LineNumbers => self.config.settings.line_numbers,
                 MenuAction::LineTimestamps => self.config.settings.line_timestamps,
                 MenuAction::Highlight => self.config.settings.highlight,
@@ -256,9 +262,32 @@ impl Workspace {
                         div()
                             .w(px(14.))
                             .flex_shrink_0()
-                            .when(checked, |d| d.child(icon(Icon::Check))),
+                            .when(checked, |d| d.child(icon(Icon::Check)))
+                            .when(!checked, |d| {
+                                d.when_some(
+                                    match action {
+                                        MenuAction::FilterType(Some(kind)) => Some(kind.icon()),
+                                        MenuAction::ActivateTab(id) => self
+                                            .tabs
+                                            .iter()
+                                            .find(|tab| tab.id == id)
+                                            .and_then(|tab| self.pane_profiles.get(&tab.focused))
+                                            .map(|profile| {
+                                                Icon::for_connection(&profile.connection)
+                                            }),
+                                        _ => None,
+                                    },
+                                    |d, glyph| d.child(icon(glyph)),
+                                )
+                            }),
                     )
-                    .child(div().flex_1().min_w_0().truncate().child(tr(label)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(tr(label).to_owned()),
+                    )
                     .when(submenu, |d| d.child(icon(Icon::ChevronRight).size(px(12.))))
                     .when(!submenu && !shortcut.is_empty(), |d| {
                         d.child(

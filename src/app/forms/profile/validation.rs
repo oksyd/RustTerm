@@ -61,8 +61,8 @@ impl ProfileForm {
             .update(cx, |input, cx| input.clear_validation_error(cx));
         if self.kind == ProfileKind::Rdp {
             self.reveal_rdp_field(field);
-        } else if self.advanced_fields().contains(&field) {
-            self.advanced = true;
+        } else {
+            self.advanced = self.advanced_fields().contains(&field);
         }
         input.update(cx, |input, cx| input.set_validation_error(message, cx));
         input.read(cx).focus(window);

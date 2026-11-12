@@ -148,3 +148,38 @@ pub fn setting_row(
         )
         .child(control)
 }
+
+pub fn toggle_row(
+    id: &'static str,
+    label: impl IntoElement,
+    description: Option<impl IntoElement>,
+    selected: bool,
+) -> gpui::Stateful<Div> {
+    setting_row(
+        label,
+        description,
+        div()
+            .w(px(34.))
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .px(px(3.))
+            .rounded(px(10.))
+            .bg(rgb(if selected {
+                colors().accent
+            } else {
+                colors().border
+            }))
+            .when(selected, |rail| rail.justify_end())
+            .child(div().size(px(14.)).rounded(px(7.)).bg(rgb(if selected {
+                colors().on_accent
+            } else {
+                colors().text
+            }))),
+    )
+    .id(id)
+    .cursor_pointer()
+    .tab_index(0)
+    .hover(|style| style.bg(rgb(colors().hover)))
+    .focus(|style| style.border_color(rgb(colors().accent)))
+}

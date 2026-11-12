@@ -65,6 +65,7 @@ pub struct TextInput {
     password_visibility_toggle: bool,
     password_revealed: bool,
     read_only: bool,
+    borderless: bool,
     size: InputSize,
     multiline: bool,
     multiline_height: f32,
@@ -98,13 +99,15 @@ impl TextInput {
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
-            focus: cx.focus_handle(),
+            // GPUI uses the tracked handle's tab-stop flag, not the div's.
+            focus: cx.focus_handle().tab_stop(true),
             content: Zeroizing::new(String::new()),
             placeholder: placeholder.into(),
             password,
             password_visibility_toggle: false,
             password_revealed: false,
             read_only: false,
+            borderless: false,
             size: InputSize::Normal,
             multiline: false,
             multiline_height: 180.,
@@ -285,8 +288,13 @@ impl TextInput {
         }
     }
 
-    /// Use the compact geometry for sidebar filters and inline terminal search.
-    /// This changes presentation only; selection, focus and composition are retained.
+    /// Embed the input in a composite control that draws its own focus border.
+    pub fn set_borderless(&mut self, borderless: bool, cx: &mut Context<Self>) {
+        self.borderless = borderless;
+        cx.notify();
+    }
+
+    /// Use compact geometry without changing selection, focus or composition.
     pub fn set_compact(&mut self, compact: bool, cx: &mut Context<Self>) {
         self.set_size(
             if compact {
@@ -1053,6 +1061,7 @@ impl Render for TextInput {
             } else {
                 ui::colors().border
             }))
+            .when(self.borderless, |d| d.border_0().rounded_none())
             .bg(rgb(crate::app::ui::colors().input))
             .when(self.read_only, |d| d.opacity(0.65))
             .cursor(CursorStyle::IBeam)

@@ -1,5 +1,7 @@
+mod activity;
 mod chrome;
 mod command_notice;
+mod connection_kind;
 mod connections;
 mod dialogs;
 mod docker;
@@ -47,7 +49,6 @@ struct Tab {
     focused: usize,
 }
 enum Modal {
-    Tunnels(Entity<crate::app::tunnel_panel::TunnelPanel>),
     Profile(Entity<ProfileForm>),
     Settings(Entity<SettingsForm>),
     Group {
@@ -94,8 +95,6 @@ pub struct Workspace {
     paths: rustterm::config::AppPaths,
     _lock: ConfigLock,
     tabs: Vec<Tab>,
-    tab_scroll: gpui::ScrollHandle,
-    tab_scroll_edges: (bool, bool),
     collapsed_tab_groups: HashSet<Uuid>,
     tab_group_colors: tab_groups::TabGroupColors,
     save_confirmation: Option<gpui::Task<()>>,
@@ -152,12 +151,15 @@ pub struct Workspace {
     files_subscriptions: HashMap<usize, Subscription>,
     files_follow: HashSet<usize>,
     tools: HashMap<usize, SessionTool>,
+    left_tool: Option<SessionTool>,
+    connection_type: Option<connection_kind::ConnectionKind>,
     command_views: HashMap<usize, Entity<CommandHistoryView>>,
     command_subscriptions: HashMap<usize, Subscription>,
     resources: resources::Resources,
     docker: docker::Dockers,
     ports: ports::Ports,
-    selected_profile: Option<Uuid>,
+    library_selection: Option<sidebar::LibraryItem>,
+    library_search: sidebar::LibrarySearch,
     sidebar_focus: FocusHandle,
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_visible: bool,
@@ -194,7 +196,6 @@ impl Workspace {
         set_language(config.settings.language);
         Session::set_global_history_budget(config.settings.global_history_bytes);
         let bounds = cx.observe_window_bounds(window, |this, window, cx| {
-            this.scroll_active_tab_into_view();
             let tiled = matches!(
                 window.window_decorations(),
                 gpui::Decorations::Client { tiling } if tiling.is_tiled()
@@ -213,9 +214,9 @@ impl Workspace {
             .filter_map(profile_reference)
             .collect();
         let session_filter = cx.new(|cx| {
-            let mut input =
-                TextInput::new(i18n_key::WORKSPACE_FILTER_BY_NAME_HOST_OR_GROUP, false, cx);
+            let mut input = TextInput::new(i18n_key::WORKSPACE_FILTER_CONNECTIONS, false, cx);
             input.set_compact(true, cx);
+            input.set_borderless(true, cx);
             input
         });
         let filter_subscription =
@@ -258,8 +259,6 @@ impl Workspace {
             paths,
             _lock: lock,
             tabs: Vec::new(),
-            tab_scroll: gpui::ScrollHandle::new(),
-            tab_scroll_edges: (false, false),
             collapsed_tab_groups: HashSet::new(),
             tab_group_colors: tab_groups::TabGroupColors::default(),
             save_confirmation: None,
@@ -316,12 +315,15 @@ impl Workspace {
             files_subscriptions: HashMap::new(),
             files_follow: HashSet::new(),
             tools: HashMap::new(),
+            left_tool: None,
+            connection_type: None,
             command_views: HashMap::new(),
             command_subscriptions: HashMap::new(),
             resources: resources::Resources::default(),
             docker: docker::Dockers::default(),
             ports: ports::Ports::default(),
-            selected_profile: None,
+            library_selection: None,
+            library_search: sidebar::LibrarySearch::new(window, cx),
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_visible: false,

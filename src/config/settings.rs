@@ -54,6 +54,7 @@ pub struct Settings {
     pub window_width: f32,
     pub window_height: f32,
     pub sidebar_visible: bool,
+    pub sidebar_connection_details: bool,
     pub sidebar_width: f32,
     pub files_width: f32,
     pub theme: Theme,
@@ -87,7 +88,8 @@ impl Default for Settings {
             window_width: 1100.,
             window_height: 740.,
             sidebar_visible: true,
-            sidebar_width: 244.,
+            sidebar_connection_details: true,
+            sidebar_width: 300.,
             files_width: 384.,
             theme: Theme::default(),
         }
@@ -200,7 +202,8 @@ mod tests {
     fn panel_preferences_default_for_existing_configs_and_reject_invalid_sizes() {
         let settings: Settings = toml::from_str("font_size = 15.0").unwrap();
         assert!(settings.sidebar_visible);
-        assert_eq!(settings.sidebar_width, 244.);
+        assert!(settings.sidebar_connection_details);
+        assert_eq!(settings.sidebar_width, 300.);
         assert_eq!(settings.files_width, 384.);
         for size in [f32::NAN, f32::INFINITY, 0., 401.] {
             assert!(
@@ -224,6 +227,7 @@ mod tests {
         }
         let encoded = toml::to_string(&Settings {
             sidebar_visible: false,
+            sidebar_connection_details: false,
             sidebar_width: 300.,
             files_width: 600.,
             ..settings
@@ -231,6 +235,7 @@ mod tests {
         .unwrap();
         let decoded: Settings = toml::from_str(&encoded).unwrap();
         assert!(!decoded.sidebar_visible);
+        assert!(!decoded.sidebar_connection_details);
         assert_eq!((decoded.sidebar_width, decoded.files_width), (300., 600.));
     }
 

@@ -10,7 +10,7 @@ use rustterm::i18n::tr;
 
 impl Workspace {
     pub(super) fn utility_is_open(&self) -> bool {
-        self.tools.contains_key(&self.focused)
+        self.left_tool.is_some()
     }
 
     pub(super) fn active_commands(&self) -> Option<&Entity<CommandHistoryView>> {
@@ -58,7 +58,7 @@ impl Workspace {
             return;
         }
         self.menu = None;
-        if self.tools.get(&self.focused) == Some(&tool) {
+        if self.left_tool == Some(tool) {
             self.close_utility_panel(window, cx);
             return;
         }
@@ -71,7 +71,8 @@ impl Workspace {
         }
     }
 
-    fn open_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(SessionTool::Commands, cx);
         let pane = self.focused;
         let Some(Pane::Terminal(terminal)) = self.panes.get(&pane) else {
             return;
@@ -125,7 +126,10 @@ impl Workspace {
         {
             return;
         }
-        self.tools.remove(&self.focused);
+        self.left_tool = None;
+        self.tools.clear();
+        self.config.settings.sidebar_visible = false;
+        self.save(cx);
         self.utility_overlay = false;
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
@@ -135,13 +139,18 @@ impl Workspace {
     }
 
     pub(super) fn render_utility_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tool = *self.tools.get(&self.focused)?;
-        let name = self.pane_display_name(self.focused).or_else(|| {
-            match self.panes.get(&self.focused)? {
-                Pane::Terminal(view) => Some(view.read(cx).display_name().to_owned()),
-                _ => None,
-            }
-        })?;
+        let tool = self.left_tool?;
+        let name = if tool == SessionTool::Ports {
+            Some(tr(i18n_key::WORKSPACE_ALL_CONNECTIONS).to_owned())
+        } else {
+            self.pane_display_name(self.focused).or_else(|| {
+                match self.panes.get(&self.focused)? {
+                    Pane::Terminal(view) => Some(view.read(cx).display_name().to_owned()),
+                    _ => None,
+                }
+            })
+        }
+        .unwrap_or_default();
         let (icon, label) = match tool {
             SessionTool::Files => (Icon::Folder, "SFTP"),
             SessionTool::Commands => (Icon::Terminal, i18n_key::WORKSPACE_COMMANDS),
@@ -166,7 +175,17 @@ impl Workspace {
             div()
                 .p_4()
                 .text_color(rgb(ui::colors().muted))
-                .child(tr(i18n_key::WORKSPACE_WAITING_FOR_SSH_CONNECTION))
+                .child(tr(if tool == SessionTool::Ports {
+                    i18n_key::WORKSPACE_NO_PORTS
+                } else if self
+                    .pane_profiles
+                    .get(&self.focused)
+                    .is_some_and(|p| matches!(p.connection, rustterm::config::Connection::Ssh(_)))
+                {
+                    i18n_key::WORKSPACE_WAITING_FOR_SSH_CONNECTION
+                } else {
+                    i18n_key::WORKSPACE_TOOL_NEEDS_SSH
+                }))
                 .into_any_element()
         });
         Some(

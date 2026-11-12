@@ -394,7 +394,6 @@ impl Workspace {
             }
             self.collapsed_tab_groups = collapsed;
             self.regroup_tabs();
-            self.scroll_active_tab_into_view();
             cx.notify();
             return false;
         };

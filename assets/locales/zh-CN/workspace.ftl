@@ -20,6 +20,8 @@ workspace-additional-tab-count = { $title } + { $count }
 
 workspace-application-menu = 应用菜单
 
+workspace-settings-ctrl-comma = 设置 · Ctrl+,
+
 workspace-apply-and-save = 应用并保存
 
 workspace-arguments-json-array = 参数（JSON 数组）
@@ -73,6 +75,8 @@ workspace-connection-profiles = 连接配置
 workspace-connection-timeout-seconds = 连接超时（秒）
 
 workspace-connections = 连接
+
+workspace-enabled-port-count = 已启用的端口转发：{ $count }
 
 workspace-copy-connection-address = 复制连接地址
 
@@ -481,3 +485,13 @@ workspace-move-group-to-root = 移至顶层
 workspace-group-parent = 上级分组
 workspace-group-root = 顶层
 workspace-delete-group-keep-children = 连接和子组将移至上一级；若没有上级分组，则移至顶层。组内内容不会被删除。
+
+workspace-local = 本地
+workspace-all-types = 全部类型
+workspace-filter-connections = 搜索连接
+workspace-all-tabs = 全部标签页
+workspace-tool-needs-ssh = 选择一个 SSH 会话以使用此工具。
+workspace-no-ports = 打开 SSH 连接后可管理端口转发。
+workspace-all-connections = 所有连接
+
+workspace-speed-search = 快速定位：↑↓切换匹配项，回车打开，Esc 退出搜索。

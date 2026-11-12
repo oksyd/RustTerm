@@ -523,6 +523,9 @@ impl Terminal {
             return;
         }
         let width_changed = size.columns != self.size.columns;
+        let readline_prompt = width_changed
+            .then(|| self.readline_prompt_distance())
+            .flatten();
         self.line_times
             .before_resize(self.term.grid(), self.is_alternate());
         let inactive_primary_shrinks = self.is_alternate() && size.rows < self.size.rows;
@@ -551,6 +554,7 @@ impl Terminal {
         if width_changed {
             // Reflow replaces identities, but reuse the active tracker's allocations.
             self.reset_rows();
+            self.restore_readline_prompt(readline_prompt);
             self.viewport_anchor = None;
             self.anchor_viewport();
             let had_selection = self.selection_anchor.is_some();
@@ -803,7 +807,7 @@ impl Terminal {
         let point = cursor.point;
         let cursor_row = point.line.0 as usize + offset;
         let mut snapshot = Snapshot {
-            shell: self.shell.snapshot.clone(),
+            shell: self.shell_snapshot(),
             search: self.search_status(),
             has_selection: self.selection_anchor.is_some(),
             selection_invalidated: self.selection_invalidated,

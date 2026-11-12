@@ -127,28 +127,6 @@ fn apply_order(tabs: &mut [Tab], groups: &[TabGroup]) {
     tabs.sort_by_key(|tab| positions[&tab.id]);
 }
 
-/// Return the direct child index of a tab, or its header while collapsed.
-fn visible_index(groups: &[TabGroup], collapsed: &HashSet<Uuid>, tab: usize) -> Option<usize> {
-    let mut index = 0;
-    for group in groups {
-        let folded = group
-            .profile
-            .is_some_and(|profile| collapsed.contains(&profile));
-        if let Some(member) = group.tabs.iter().position(|id| *id == tab) {
-            return Some(
-                index
-                    + if folded {
-                        0
-                    } else {
-                        usize::from(group.profile.is_some()) + member
-                    },
-            );
-        }
-        index += usize::from(group.profile.is_some()) + if folded { 0 } else { group.tabs.len() };
-    }
-    None
-}
-
 fn move_tab(
     tabs: &mut [Tab],
     profiles: &HashMap<usize, Profile>,
@@ -207,28 +185,9 @@ impl Workspace {
         }
     }
 
-    pub(super) fn scroll_active_tab_into_view(&self) {
-        if let Some(index) = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| visible_index(&self.tab_groups(), &self.collapsed_tab_groups, tab.id))
-        {
-            self.tab_scroll.scroll_to_item(index);
-        }
-    }
-
     pub(super) fn toggle_tab_group(&mut self, profile: Uuid, cx: &mut Context<Self>) {
         if !self.collapsed_tab_groups.remove(&profile) {
             self.collapsed_tab_groups.insert(profile);
-        }
-        let groups = self.tab_groups();
-        if let Some(group) = groups.iter().find(|group| group.profile == Some(profile)) {
-            // The first member follows its header when expanded.
-            if let Some(index) = visible_index(&groups, &self.collapsed_tab_groups, group.tabs[0]) {
-                self.tab_scroll.scroll_to_item(
-                    index - usize::from(!self.collapsed_tab_groups.contains(&profile)),
-                );
-            }
         }
         cx.notify();
     }
@@ -245,7 +204,6 @@ impl Workspace {
         if let Some(index) = active.and_then(|id| self.tabs.iter().position(|tab| tab.id == id)) {
             self.active = index;
         }
-        self.scroll_active_tab_into_view();
         cx.notify();
     }
 }

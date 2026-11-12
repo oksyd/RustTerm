@@ -400,9 +400,6 @@ impl TerminalView {
                     })),
                 )
             })
-            .when(self.kind == TerminalKind::Ssh, |d| {
-                d.child(self.tool_button(SessionTool::Files, cx))
-            })
             .when(self.kind != TerminalKind::Container, |d| {
                 d.child(self.tool_button(SessionTool::Commands, cx))
             })
@@ -410,10 +407,6 @@ impl TerminalView {
                 matches!(self.kind, TerminalKind::Ssh | TerminalKind::Container),
                 |d| d.child(self.tool_button(SessionTool::Resources, cx)),
             )
-            .when(self.kind == TerminalKind::Ssh, |d| {
-                d.child(self.tool_button(SessionTool::Docker, cx))
-                    .child(self.tool_button(SessionTool::Ports, cx))
-            })
             .child(
                 ui::icon_button_enabled(
                     ("search-open", index),

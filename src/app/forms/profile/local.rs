@@ -82,6 +82,12 @@ impl ProfileForm {
     }
 
     pub(super) fn local_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.advanced {
+            return self.fields.selected_rows(&[
+                i18n_key::WORKSPACE_SHELL,
+                i18n_key::COMMON_WORKING_DIRECTORY,
+            ]);
+        }
         let imported_controls = self
             .arguments
             .iter()
@@ -92,11 +98,7 @@ impl ProfileForm {
                     .chain(row.original_value.chars())
                     .any(char::is_control)
             });
-        column()
-            .child(self.fields.selected_rows(&[i18n_key::WORKSPACE_SHELL, i18n_key::COMMON_WORKING_DIRECTORY]))
-            .child(self.advanced_toggle(i18n_key::CONNECTIONS_STARTUP_OPTIONS,
-                rustterm::trf!(i18n_key::CONNECTIONS_STARTUP_SUMMARY, arguments = self.arguments.len(), variables = self.environment.len()), cx))
-            .when(self.advanced, |body| body.child(column()
+        column().gap(gpui::px(16.))
             .child(row(
                 i18n_key::CONNECTIONS_ARGUMENTS,
                 column()
@@ -104,7 +106,7 @@ impl ProfileForm {
                         let id = argument.id;
                         div()
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap_1()
                             .child(div().flex_1().min_w_0().child(argument.value.clone()))
                             .child(
@@ -131,7 +133,7 @@ impl ProfileForm {
                                         {
                                             row.value.read(cx).focus(window);
                                         } else {
-                                            this.fields.field(i18n_key::WORKSPACE_SHELL).read(cx).focus(window);
+                                            this.page_focus[1].focus(window);
                                         }
                                         cx.notify();
                                     },
@@ -139,7 +141,7 @@ impl ProfileForm {
                             )
                     }))
                     .child(
-                        div().child(
+                        div().flex().child(
                             ui::text_button_enabled(
                                 "add-argument",
                                 i18n_key::CONNECTIONS_ADD_ARGUMENT,
@@ -165,7 +167,7 @@ impl ProfileForm {
                         let id = entry.id;
                         div()
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap_1()
                             .child(div().flex_1().min_w_0().child(entry.key.clone()))
                             .child(div().flex_1().min_w_0().child(entry.value.clone()))
@@ -192,10 +194,7 @@ impl ProfileForm {
                                         ) {
                                             row.key.read(cx).focus(window);
                                         } else {
-                                            this.fields
-                                                .field(i18n_key::COMMON_WORKING_DIRECTORY)
-                                                .read(cx)
-                                                .focus(window);
+                                            this.page_focus[1].focus(window);
                                         }
                                         cx.notify();
                                     },
@@ -203,7 +202,7 @@ impl ProfileForm {
                             )
                     }))
                     .child(
-                        div().child(
+                        div().flex().child(
                             ui::text_button_enabled(
                                 "add-environment",
                                 i18n_key::CONNECTIONS_ADD_VARIABLE,
@@ -225,7 +224,6 @@ impl ProfileForm {
                 ))
             })
             .child(hint(i18n_key::CONNECTIONS_ENVIRONMENT_VARIABLES_AND_STARTUP_ARGUMENTS_ARE_SAVED_AS_PLAIN_CONFIGURATION))
-            ))
             .into_any_element()
     }
 }

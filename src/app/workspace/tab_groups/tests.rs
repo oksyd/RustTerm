@@ -103,33 +103,6 @@ fn mixed_splits_stay_independent_and_homogeneous_splits_join_their_profile() {
 }
 
 #[test]
-fn scroll_targets_account_for_group_headers_and_collapsed_members() {
-    let a = Profile::ssh("A", Default::default());
-    let b = Profile::ssh("B", Default::default());
-    let (tabs, profiles) = fixture(&[
-        a.clone(),
-        a.clone(),
-        Profile::local("local", Default::default()),
-        b.clone(),
-        b.clone(),
-    ]);
-    let groups = group_tabs(&tabs, &profiles);
-    let mut collapsed = HashSet::new();
-    for (tab, index) in [(1, 1), (2, 2), (3, 3), (4, 5), (5, 6)] {
-        assert_eq!(visible_index(&groups, &collapsed, tab), Some(index));
-    }
-    collapsed.insert(a.id);
-    for (tab, index) in [(1, 0), (2, 0), (3, 1), (4, 3), (5, 4)] {
-        assert_eq!(visible_index(&groups, &collapsed, tab), Some(index));
-    }
-    collapsed.insert(b.id);
-    assert_eq!(visible_index(&groups, &collapsed, 5), Some(2));
-    collapsed.remove(&a.id);
-    assert_eq!(visible_index(&groups, &collapsed, 5), Some(4));
-    assert_eq!(visible_index(&groups, &collapsed, 99), None);
-}
-
-#[test]
 fn groups_appear_on_second_tab_and_disappear_when_only_one_remains() {
     let a = Profile::ssh("A", Default::default());
     let (mut tabs, mut profiles) = fixture(&[
@@ -137,13 +110,12 @@ fn groups_appear_on_second_tab_and_disappear_when_only_one_remains() {
         Profile::local("local", Default::default()),
         a.clone(),
     ]);
-    let collapsed = HashSet::from([a.id]);
     let groups = group_tabs(&tabs, &profiles);
     apply_order(&mut tabs, &groups);
     tabs.retain(|tab| tab.id != 3);
     let groups = group_tabs(&tabs, &profiles);
     assert_eq!(groups[0].profile, None);
-    assert_eq!(visible_index(&groups, &collapsed, 1), Some(0));
+    assert_eq!(groups[0].tabs, [1]);
     profiles.insert(4, a.clone());
     tabs.push(Tab {
         id: 4,

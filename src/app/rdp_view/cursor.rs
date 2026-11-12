@@ -3,6 +3,9 @@ use super::*;
 use gpui::{ContentMask, point, size};
 use rustrdp::graphics::{Pointer, PointerState};
 
+#[cfg(any(target_os = "linux", windows))]
+mod native;
+
 #[derive(Default)]
 pub(super) struct PaintStats {
     pub uploads: u64,
@@ -18,8 +21,10 @@ pub(super) struct CursorOverlay {
     prepared: Option<(u64, (u16, u16))>,
     image: Option<Arc<RenderImage>>,
     uploaded: bool,
-    origin: (i32, i32),
-    size: (u16, u16),
+    #[cfg(any(target_os = "linux", windows))]
+    local_position: bool,
+    #[cfg(any(target_os = "linux", windows))]
+    native: native::Cursor,
 }
 
 impl CursorOverlay {
@@ -28,19 +33,77 @@ impl CursorOverlay {
             != self.state.as_ref().map(|s| s.position_revision)
         {
             self.position = state.as_ref().map(|s| s.position);
+            #[cfg(any(target_os = "linux", windows))]
+            {
+                self.local_position = false;
+            }
         }
-        self.prepared = None;
+        if state.as_ref().map(|s| &s.image) != self.state.as_ref().map(|s| &s.image) {
+            self.prepared = None;
+        }
         self.state = state;
     }
 
     pub fn move_to(&mut self, position: (u16, u16)) -> bool {
         let changed = self.position != Some(position);
         self.position = Some(position);
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            self.local_position = true;
+        }
         changed
+            && !self.native_active()
             && self
                 .state
                 .as_ref()
                 .is_some_and(|s| matches!(s.image, Pointer::Custom(_)))
+    }
+
+    pub fn native_active(&self) -> bool {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            self.native.active()
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            false
+        }
+    }
+
+    pub fn suspend_native(&mut self) {
+        #[cfg(any(target_os = "linux", windows))]
+        self.native.reset();
+    }
+
+    /// Called after GPUI applies the desktop's None cursor. Only shape/scale
+    /// changes upload pixels; ordinary movement is handled by the compositor.
+    pub fn sync_native(
+        &mut self,
+        desktop: Option<Bounds<Pixels>>,
+        visible: Option<Bounds<Pixels>>,
+        window: &Window,
+    ) -> bool {
+        let before = self.native_active();
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            let shape = self.state.as_ref().and_then(|state| match &state.image {
+                Pointer::Custom(shape) if self.local_position => Some(shape),
+                _ => None,
+            });
+            let scale = desktop
+                .zip(self.frame.as_ref())
+                .map(|(desktop, frame)| {
+                    (
+                        f32::from(desktop.size.width) / f32::from(frame.width.max(1)),
+                        f32::from(desktop.size.height) / f32::from(frame.height.max(1)),
+                    )
+                })
+                .unwrap_or((1., 1.));
+            self.native.apply(shape, visible, scale, window);
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let _ = (desktop, visible, window);
+        before != self.native_active()
     }
 
     pub fn hides_platform_cursor(&self) -> Option<bool> {
@@ -54,6 +117,10 @@ impl CursorOverlay {
     }
 
     pub fn clear(&mut self, window: &Window) {
+        #[cfg(any(target_os = "linux", windows))]
+        {
+            self.native = native::Cursor::default();
+        }
         super::render::retire_images(window, self.image.take().into_iter().collect());
         self.frame = None;
         self.prepared = None;
@@ -65,6 +132,9 @@ impl CursorOverlay {
         visible: Bounds<Pixels>,
         window: &mut Window,
     ) -> PaintStats {
+        if self.native_active() {
+            return PaintStats::default();
+        }
         let Some(PointerState {
             image: Pointer::Custom(shape),
             ..
@@ -81,27 +151,33 @@ impl CursorOverlay {
             return PaintStats::default();
         }
         let position = (x.min(frame.width - 1), y.min(frame.height - 1));
-        let key = (frame.sequence, position);
+        let (width, height) = shape.size();
+        let hotspot = shape.hotspot();
+        let origin = (
+            i32::from(position.0) - i32::from(hotspot.0),
+            i32::from(position.1) - i32::from(hotspot.1),
+        );
+        let requires_background = shape.requires_background();
+        let key = overlay_key(requires_background, frame.sequence, position);
         if self.prepared != Some(key) {
-            let (width, height) = shape.size();
-            let hotspot = shape.hotspot();
-            let origin = (
-                i32::from(position.0) - i32::from(hotspot.0),
-                i32::from(position.1) - i32::from(hotspot.1),
-            );
-            let mut pixels = Vec::with_capacity(usize::from(width) * usize::from(height) * 4);
-            for y in 0..height {
-                for x in 0..width {
-                    pixels.extend_from_slice(&background(
-                        frame,
-                        origin.0 + i32::from(x),
-                        origin.1 + i32::from(y),
-                    ));
+            let mut pixels = vec![0; usize::from(width) * usize::from(height) * 4];
+            if requires_background {
+                for y in 0..height {
+                    for x in 0..width {
+                        let offset = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
+                        pixels[offset..offset + 4].copy_from_slice(&background(
+                            frame,
+                            origin.0 + i32::from(x),
+                            origin.1 + i32::from(y),
+                        ));
+                    }
                 }
             }
-            // Preserve alpha and legacy screen-AND/XOR pixels exactly, using
-            // the same immutable desktop snapshot that is painted underneath.
-            if shape.composite(&mut pixels).is_err() {
+            // The desktop and cursor are sampled independently at fit/HiDPI scales.
+            // Repainting a captured background here would warp a moving rectangle
+            // around the cursor. Leave unchanged pixels transparent; only XOR
+            // pixels need colors from the desktop snapshot below the pointer.
+            if shape.composite_overlay(&mut pixels).is_err() {
                 return PaintStats {
                     errors: 1,
                     ..PaintStats::default()
@@ -118,20 +194,23 @@ impl CursorOverlay {
                 super::render::tile_buffer(&tile),
             )]));
             super::render::retire_images(window, self.image.replace(image).into_iter().collect());
-            self.origin = origin;
-            self.size = (width, height);
             self.prepared = Some(key);
             self.uploaded = false;
         }
         let Some(image) = &self.image else {
             return PaintStats::default();
         };
-        let bounds = cursor_bounds(desktop, (frame.width, frame.height), self.origin, self.size);
+        let bounds = cursor_bounds(
+            desktop,
+            (frame.width, frame.height),
+            origin,
+            (width, height),
+        );
         let clipped = bounds.intersect(&visible);
         if clipped.is_empty() {
             return PaintStats::default();
         }
-        let padded = super::render::padded_tile_bounds(bounds, size(self.size.0, self.size.1));
+        let padded = super::render::padded_tile_bounds(bounds, size(width, height));
         let painted = window.with_content_mask(Some(ContentMask { bounds: clipped }), |window| {
             window.paint_image(padded, Default::default(), image.clone(), 0, false)
         });
@@ -140,7 +219,7 @@ impl CursorOverlay {
                 self.uploaded = true;
                 PaintStats {
                     uploads: 1,
-                    bytes: (u64::from(self.size.0) + 2) * (u64::from(self.size.1) + 2) * 4,
+                    bytes: (u64::from(width) + 2) * (u64::from(height) + 2) * 4,
                     errors: 0,
                 }
             }
@@ -150,6 +229,19 @@ impl CursorOverlay {
                 ..PaintStats::default()
             },
         }
+    }
+}
+
+fn overlay_key(
+    requires_background: bool,
+    sequence: u64,
+    position: (u16, u16),
+) -> (u64, (u16, u16)) {
+    if requires_background {
+        (sequence, position)
+    } else {
+        // Shape updates invalidate `prepared`; movement and desktop frames do not.
+        (0, (0, 0))
     }
 }
 
@@ -191,6 +283,45 @@ fn background(frame: &RdpFrame, x: i32, y: i32) -> [u8; 4] {
 mod tests {
     use super::*;
     use gpui::px;
+
+    #[test]
+    fn only_xor_overlays_depend_on_desktop_frames_and_pointer_motion() {
+        let alpha = overlay_key(false, 1, (4, 5));
+        let xor = overlay_key(true, 1, (4, 5));
+        for (sequence, position) in [(2, (4, 5)), (1, (10, 20)), (3, (40, 50))] {
+            assert_eq!(overlay_key(false, sequence, position), alpha);
+            assert_ne!(overlay_key(true, sequence, position), xor);
+        }
+        let mut cursor = CursorOverlay::default();
+        let mut state = PointerState {
+            image: Pointer::Default,
+            position: (4, 5),
+            position_revision: 0,
+        };
+        cursor.update(Some(state.clone()));
+        cursor.prepared = Some(alpha);
+        cursor.move_to((40, 50));
+        #[cfg(any(target_os = "linux", windows))]
+        assert!(cursor.local_position);
+        state.position = (10, 20);
+        cursor.update(Some(state.clone()));
+        assert_eq!(cursor.position, Some((40, 50)));
+        #[cfg(any(target_os = "linux", windows))]
+        assert!(cursor.local_position);
+        assert_eq!(cursor.prepared, Some(alpha));
+        state.position_revision += 1;
+        cursor.update(Some(state.clone()));
+        assert_eq!(cursor.position, Some((10, 20)));
+        #[cfg(any(target_os = "linux", windows))]
+        assert!(
+            !cursor.local_position,
+            "server warps temporarily use the positioned overlay"
+        );
+        assert_eq!(cursor.prepared, Some(alpha));
+        state.image = Pointer::Hidden;
+        cursor.update(Some(state));
+        assert_eq!(cursor.prepared, None);
+    }
 
     #[test]
     fn cursor_hotspot_tracks_desktop_edges_during_zoom_and_pan() {

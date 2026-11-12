@@ -149,6 +149,39 @@ impl Shape {
         (self.hotspot_x, self.hotspot_y)
     }
 
+    /// Whether an overlay needs desktop pixels to resolve legacy XOR colors.
+    /// Ordinary alpha, opaque and transparent pointers can be cached independently
+    /// of the desktop contents and pointer position.
+    pub fn requires_background(&self) -> bool {
+        self.pixels
+            .iter()
+            .any(|pixel| self.uses_mask(pixel) && pixel.and && pixel.color[..3] != [0, 0, 0])
+    }
+
+    /// Convert a cursor-sized, top-down BGRA background into a straight-alpha overlay.
+    ///
+    /// Unlike [`Self::composite`], unchanged desktop pixels become transparent and
+    /// alpha pixels retain their original alpha. Only legacy XOR pixels consume
+    /// the background. If [`Self::requires_background`] is false, the buffer's
+    /// initial contents do not matter. Alpha-blending the result over that background
+    /// reproduces [`Self::composite`] without repainting the cursor's bounding box.
+    pub fn composite_overlay(&self, background: &mut [u8]) -> Result<()> {
+        if background.len() != self.width * self.height * 4 {
+            return Err(Error::Invalid("cursor background dimensions"));
+        }
+        for (index, destination) in background.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let pixel = &self.pixels[index];
+            if !self.uses_mask(pixel) {
+                *destination = pixel.color;
+            } else if pixel.and && pixel.color[..3] == [0, 0, 0] {
+                *destination = [0; 4];
+            } else {
+                self.composite_pixel(index, destination);
+            }
+        }
+        Ok(())
+    }
+
     /// Composite onto a cursor-sized, top-down BGRA background, in place.
     /// The exact background is required for legacy AND/XOR and inversion pixels.
     pub fn composite(&self, background: &mut [u8]) -> Result<()> {
@@ -163,7 +196,7 @@ impl Shape {
 
     pub(super) fn composite_pixel(&self, index: usize, destination: &mut [u8]) {
         let pixel = &self.pixels[index];
-        if !self.alpha || pixel.and && pixel.color[3] == 255 {
+        if self.uses_mask(pixel) {
             for (dest, &source) in destination[..3].iter_mut().zip(&pixel.color[..3]) {
                 *dest = (if pixel.and { *dest } else { 0 }) ^ source;
             }
@@ -176,6 +209,10 @@ impl Shape {
         }
         destination[3] = 255;
     }
+
+    fn uses_mask(&self, pixel: &Pixel) -> bool {
+        !self.alpha || pixel.and && pixel.color[3] == 255
+    }
 }
 
 fn bit(mask: &[u8], index: usize) -> bool {
@@ -185,6 +222,81 @@ fn bit(mask: &[u8], index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn over(pixel: [u8; 4], background: [u8; 4]) -> [u8; 4] {
+        let alpha = u32::from(pixel[3]);
+        let mut result = background;
+        for channel in 0..3 {
+            result[channel] = ((u32::from(pixel[channel]) * alpha
+                + u32::from(background[channel]) * (255 - alpha)
+                + 127)
+                / 255) as u8;
+        }
+        result
+    }
+
+    #[test]
+    fn transparent_cursor_pixels_never_repaint_a_differently_sampled_background() {
+        // At fractional zoom/HiDPI the desktop and cursor textures can sample
+        // different source pixels. An unchanged cursor pixel must remain a no-op.
+        for (alpha, and, color) in [
+            (false, true, [0, 0, 0, 255]),
+            (true, false, [120, 80, 40, 0]),
+            (true, true, [0, 0, 0, 255]),
+        ] {
+            let shape = Shape {
+                hotspot_x: 0,
+                hotspot_y: 0,
+                width: 1,
+                height: 1,
+                pixels: vec![Pixel { color, and }],
+                alpha,
+            };
+            assert!(!shape.requires_background());
+            let captured = [10, 30, 50, 255];
+            let displayed = [200, 160, 100, 255];
+            let mut flattened = captured;
+            shape.composite(&mut flattened).unwrap();
+            assert_ne!(over(flattened, displayed), displayed); // Previous overlay path.
+            let mut overlay = captured;
+            shape.composite_overlay(&mut overlay).unwrap();
+            assert_eq!(overlay[3], 0);
+            assert_eq!(over(overlay, displayed), displayed);
+        }
+    }
+
+    #[test]
+    fn overlay_preserves_alpha_and_mask_operations_without_modifying_unused_background() {
+        for alpha in [false, true] {
+            for and in [false, true] {
+                for color in [[0, 0, 0, 0], [0, 0, 0, 255], [255; 4], [30, 90, 160, 128]] {
+                    let shape = Shape {
+                        hotspot_x: 0,
+                        hotspot_y: 0,
+                        width: 1,
+                        height: 1,
+                        pixels: vec![Pixel { color, and }],
+                        alpha,
+                    };
+                    for background in [[0, 0, 0, 255], [20, 40, 60, 255], [255; 4]] {
+                        let mut expected = background;
+                        shape.composite(&mut expected).unwrap();
+                        let mut overlay = background;
+                        shape.composite_overlay(&mut overlay).unwrap();
+                        assert_eq!(over(overlay, background), expected);
+                        if !shape.requires_background() {
+                            let mut without_background = [0; 4];
+                            shape.composite_overlay(&mut without_background).unwrap();
+                            assert_eq!(without_background, overlay);
+                        }
+                    }
+                    let mut invalid = [123; 3];
+                    assert!(shape.composite_overlay(&mut invalid).is_err());
+                    assert_eq!(invalid, [123; 3]);
+                }
+            }
+        }
+    }
 
     #[test]
     fn oversized_pointer_headers_are_rejected_before_mask_allocation() {

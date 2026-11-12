@@ -19,6 +19,7 @@ impl gpui::Render for Workspace {
         let frame = WindowFrame::new(window);
         frame.configure(window);
         let content_size = frame.content_size(window.viewport_size());
+        self.follow_left_tool(window, cx);
         self.sync_tools(cx);
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
@@ -60,7 +61,6 @@ impl gpui::Render for Workspace {
             };
         let height = (f32::from(content_size.height)
             - ui::TITLE_HEIGHT
-            - ui::TAB_HEIGHT
             - ui::STATUS_HEIGHT
             - if self.error.is_some() {
                 self.error_banner_height
@@ -126,7 +126,6 @@ impl gpui::Render for Workspace {
             self.restore_focus(window, cx);
         }
         let toolbar = self.render_titlebar(window, cx);
-        let tabbar = self.render_tabs(cx);
         let statusbar = self.render_statusbar(window, cx);
         let mut utility_panel = self.render_utility_panel(cx);
         let session_header = external_header
@@ -150,10 +149,10 @@ impl gpui::Render for Workspace {
                     .into_any_element()
                 });
         let weak = cx.weak_entity();
-        let mut workspace = div().flex().flex_1().min_h_0();
+        let mut workspace = div().relative().flex().flex_1().min_h_0();
         if layout.sidebar_inline {
             workspace = workspace
-                .child(self.render_sidebar(cx))
+                .child(self.render_sidebar(window, cx))
                 .child(self.panel_divider("sidebar-divider", DragTarget::Sidebar, cx));
         }
         let terminal = div()
@@ -175,50 +174,19 @@ impl gpui::Render for Workspace {
                 .size_full(),
             )
             .child(content);
-        let mut body = div().relative().flex_1().min_h_0().flex().child(terminal);
-        if layout.files_docked {
-            if let Some(panel) = utility_panel.take() {
-                body = body
-                    .child(self.panel_divider("files-divider", DragTarget::Files, cx))
-                    .child(
-                        div()
-                            .w(px(layout.files_width))
-                            .h_full()
-                            .flex_shrink_0()
-                            .child(panel),
-                    );
-            }
-        } else if let Some(panel) = utility_panel.take() {
-            body = body
+        let body = div().relative().flex_1().min_h_0().flex().child(terminal);
+        if layout.files_docked
+            && let Some(panel) = utility_panel.take()
+        {
+            workspace = workspace
                 .child(
                     div()
-                        .absolute()
-                        .inset_0()
-                        .bg(rgba(0x00000055))
-                        .occlude()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                this.close_utility_panel(window, cx);
-                                cx.stop_propagation();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right_0()
-                        .w(px(layout.files_width.min(width)))
-                        .max_w_full()
-                        .bg(rgb(ui::colors().surface))
-                        .border_l_1()
-                        .border_color(rgb(ui::colors().border))
-                        .occlude()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .w(px(layout.files_width))
+                        .h_full()
+                        .flex_shrink_0()
                         .child(panel),
-                );
+                )
+                .child(self.panel_divider("files-divider", DragTarget::Files, cx));
         }
         workspace = workspace.child(
             div()
@@ -226,13 +194,40 @@ impl gpui::Render for Workspace {
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(tabbar)
                 .when(self.compact_panes, |d| {
                     d.child(self.render_pane_switcher(cx))
                 })
                 .children(session_header)
                 .child(body),
         );
+        if let Some(panel) = utility_panel.take() {
+            workspace = workspace.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .bg(rgba(0x00000055))
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.close_utility_panel(window, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .h_full()
+                            .w(px(layout.files_width.min(f32::from(content_size.width))))
+                            .bg(rgb(ui::colors().surface))
+                            .occlude()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(panel),
+                    ),
+            );
+        }
         let mut root = div()
             .track_focus(&self.workspace_focus)
             .capture_key_down(
@@ -367,7 +362,7 @@ impl gpui::Render for Workspace {
                     }
                     if this.sidebar_overlay_open {
                         if !this.sidebar_focus.contains_focused(window, cx) {
-                            this.sidebar_focus.focus(window);
+                            this.focus_library(window, cx);
                         }
                     } else if this.utility_overlay
                         && !this.utility_focus.contains_focused(window, cx)
@@ -455,7 +450,7 @@ impl gpui::Render for Workspace {
                             .w(px(layout.sidebar_width))
                             .occlude()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(self.render_sidebar(cx)),
+                            .child(self.render_sidebar(window, cx)),
                     ),
             );
         }

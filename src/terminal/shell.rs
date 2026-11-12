@@ -34,7 +34,8 @@ struct CommandAnchors {
     output: Option<reading::SelectionAnchor>,
 }
 
-/// Confirmed by shell integration, never inferred from keys or rendered text.
+/// Shell integration state, with a prompt-scoped Readline fallback for Bash.
+/// Keyboard shortcuts alone never imply an editor mode.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ShellInteraction {
     #[default]
@@ -52,6 +53,7 @@ pub struct ShellSnapshot {
     pub shell: Option<&'static str>,
     pub at_prompt: bool,
     pub interaction: ShellInteraction,
+    /// Search hooks or recognition of the shell's standard Readline prompt.
     pub history_search_supported: bool,
     pub focused_command: Option<u64>,
     pub command_unavailable: bool,
@@ -67,6 +69,8 @@ pub(super) struct ShellTracker {
     osc_bytes: usize,
     discarded: bool,
     prompt: Option<(u64, usize)>,
+    readline_prompt: Option<u64>,
+    readline_prompt_is_literal: bool,
     output_start: Option<(u64, usize)>,
     active: Option<String>,
     command_start: Option<reading::RowStamp>,
@@ -89,6 +93,8 @@ impl ShellTracker {
         self.snapshot.interaction = ShellInteraction::Unknown;
         self.snapshot.at_prompt = false;
         self.snapshot.history_search_supported = false;
+        self.readline_prompt = None;
+        self.readline_prompt_is_literal = false;
     }
 
     fn accept(&mut self, byte: u8) -> Option<String> {
@@ -211,6 +217,15 @@ impl Terminal {
             }
             "B" => {
                 self.shell.prompt = self.shell_anchor();
+                self.shell.readline_prompt = (self.shell.snapshot.shell == Some("bash"))
+                    .then(|| {
+                        self.readline_line_start(self.term.grid().cursor.point.line)
+                            .and_then(|line| self.readline_row_id(line))
+                    })
+                    .flatten();
+                // A custom PS1 may itself contain the search message syntax.
+                self.shell.readline_prompt_is_literal =
+                    self.shell.snapshot.shell == Some("bash") && self.bash_history_search();
                 self.shell.snapshot.at_prompt = true;
                 if !matches!(
                     self.shell.snapshot.interaction,
@@ -293,6 +308,118 @@ impl Terminal {
         }
     }
 
+    pub(super) fn shell_snapshot(&self) -> ShellSnapshot {
+        let mut snapshot = self.shell.snapshot.clone();
+        snapshot.interaction = self.shell_interaction();
+        // Bash has no ZLE-style search hooks. Its standard Readline search
+        // prompt can still be recognized while shell integration is at a prompt.
+        snapshot.history_search_supported |= snapshot.shell == Some("bash");
+        snapshot
+    }
+
+    fn shell_interaction(&self) -> ShellInteraction {
+        let interaction = self.shell.snapshot.interaction;
+        if self.shell.snapshot.shell == Some("bash")
+            && self.shell.snapshot.at_prompt
+            && interaction == ShellInteraction::Prompt
+            && !self.shell.readline_prompt_is_literal
+            && !self.is_alternate()
+            && self.bash_history_search()
+        {
+            ShellInteraction::HistorySearch
+        } else {
+            interaction
+        }
+    }
+
+    fn bash_history_search(&self) -> bool {
+        // Readline replaces the last logical prompt line with its search
+        // message. Use that line even when the result puts the cursor in a
+        // multiline command. Never search the scrolled viewport or old output.
+        // Bound the work even for enormous wrapped commands.
+        let grid = self.term.grid();
+        let width = self.size.columns as usize;
+        let start = self
+            .shell
+            .readline_prompt
+            .and_then(|id| self.point_for(id, 0))
+            .map_or(grid.cursor.point.line, |point| point.line);
+        let Some(mut line) = self.readline_line_start(start) else {
+            return false;
+        };
+        let mut text = String::new();
+        while line <= grid.bottommost_line() && text.len() < MAX_COMMAND_BYTES {
+            let count = width.min(MAX_COMMAND_BYTES - text.len());
+            text.push_str(&self.row_text(line, 0..count, true));
+            if count < width || !self.readline_row_wrapped(line) {
+                break;
+            }
+            line.0 += 1;
+        }
+        readline_search_prompt(&text)
+    }
+
+    fn readline_row_wrapped(&self, line: Line) -> bool {
+        self.term.grid()[Point::new(line, Column(self.size.columns as usize - 1))]
+            .flags
+            .contains(Flags::WRAPLINE)
+    }
+
+    fn readline_row_id(&self, line: Line) -> Option<u64> {
+        self.main_tracker
+            .id_at((line.0 + self.term.grid().history_size() as i32) as usize)
+    }
+
+    fn readline_line_start(&self, mut line: Line) -> Option<Line> {
+        let mut cells = 0;
+        while line > self.term.grid().topmost_line() && self.readline_row_wrapped(Line(line.0 - 1))
+        {
+            cells += self.size.columns as usize;
+            if cells > MAX_COMMAND_BYTES {
+                return None;
+            }
+            line.0 -= 1;
+        }
+        Some(line)
+    }
+
+    // Width changes replace row identities. Hard line breaks between the
+    // prompt and cursor survive reflow, unlike physical row offsets.
+    pub(super) fn readline_prompt_distance(&self) -> Option<usize> {
+        if self.shell.snapshot.shell != Some("bash") || !self.shell.snapshot.at_prompt {
+            return None;
+        }
+        let start = self.point_for(self.shell.readline_prompt?, 0)?.line.0;
+        let end = self.term.grid().cursor.point.line.0;
+        if start > end || end - start > MAX_COMMAND_BYTES as i32 {
+            return None;
+        }
+        Some(
+            (start..end)
+                .filter(|&row| !self.readline_row_wrapped(Line(row)))
+                .count(),
+        )
+    }
+
+    pub(super) fn restore_readline_prompt(&mut self, distance: Option<usize>) {
+        self.shell.readline_prompt = distance.and_then(|mut distance| {
+            let mut line = self.term.grid().cursor.point.line;
+            let mut rows = 0;
+            while distance > 0 {
+                if line <= self.term.grid().topmost_line() || rows >= MAX_COMMAND_BYTES {
+                    return None;
+                }
+                line.0 -= 1;
+                rows += 1;
+                if !self.readline_row_wrapped(line) {
+                    distance -= 1;
+                }
+            }
+            self.readline_line_start(line)
+                .and_then(|line| self.readline_row_id(line))
+        });
+    }
+
     pub fn last_completed_command(&self) -> Option<&ShellCommand> {
         self.shell.snapshot.commands.last()
     }
@@ -311,8 +438,8 @@ impl Terminal {
         self.parser.is_some()
             && !self.is_alternate()
             && self.shell.snapshot.at_prompt
-            && self.shell.snapshot.interaction != ShellInteraction::HistorySearch
             && self.modes().bracketed_paste
+            && self.shell_interaction() != ShellInteraction::HistorySearch
     }
 
     pub fn command_draft(&mut self, id: u64) -> Vec<u8> {
@@ -547,6 +674,16 @@ impl Terminal {
         }
         Some(text)
     }
+}
+
+fn readline_search_prompt(text: &str) -> bool {
+    let Some(text) = text.strip_prefix('(') else {
+        return false;
+    };
+    let text = text.strip_prefix("failed ").unwrap_or(text);
+    let text = text.strip_prefix("reverse-").unwrap_or(text);
+    text.strip_prefix("i-search)`")
+        .is_some_and(|query| query.contains("': "))
 }
 
 fn charge(command: &ShellCommand) -> usize {

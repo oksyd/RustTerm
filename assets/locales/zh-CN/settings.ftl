@@ -94,3 +94,9 @@ settings-application-theme-help = 选择主题即可立即预览。保存后保�
 settings-theme-dark = 默认深色
 settings-theme-light = 浅色
 settings-theme-midnight = 午夜蓝
+
+settings-connection-list = 连接列表
+
+settings-show-connection-details = 显示连接详情
+
+settings-show-connection-details-help = 在连接名称下方显示类型和地址。关闭后使用紧凑的单行列表。

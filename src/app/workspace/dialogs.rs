@@ -17,11 +17,6 @@ impl Workspace {
     ) -> Option<AnyElement> {
         let modal = self.modal.as_ref()?;
         let (title, body, save_label) = match modal {
-            Modal::Tunnels(panel) => (
-                tr(i18n_key::CONNECTIONS_SSH_PORT_FORWARDING),
-                panel.clone().into_any_element(),
-                None,
-            ),
             Modal::Help => (
                 tr(i18n_key::WORKSPACE_ABOUT_RUSTTERM),
                 div()
@@ -287,13 +282,12 @@ impl Workspace {
             }
         };
         let settings = matches!(modal, Modal::Settings(_));
-        let ports = matches!(modal, Modal::Tunnels(_));
-        let rdp_profile =
-            matches!(modal, Modal::Profile(form) if form.read(cx).kind == ProfileKind::Rdp);
+        let profile = matches!(modal, Modal::Profile(_));
+        let preferences = settings || profile;
         let settings_dirty = matches!(modal, Modal::Settings(form) if form.read(cx).is_dirty(cx));
         let save_enabled =
             !settings || ((settings_dirty || self.save_failed) && !self.modal_saving);
-        let body = if settings || rdp_profile || ports {
+        let body = if preferences {
             div()
                 .size_full()
                 .min_w_0()
@@ -317,19 +311,17 @@ impl Workspace {
                 .into_any_element()
         };
         let mut card = ui::dialog_surface()
-            .w(px(if settings { 900. } else { 700. }))
-            .when(settings, |card| card.h(px(640.)).overflow_hidden())
-            .when(rdp_profile, |card| card.h(px(620.)))
-            .when(ports, |card| card.h(px(620.)))
+            .w(px(if preferences { 900. } else { 700. }))
+            .when(preferences, |card| card.h(px(640.)).overflow_hidden())
             .max_w(relative(0.95))
             .max_h(relative(0.92))
             .flex()
             .flex_col()
-            .when(!settings, |card| card.p_4().gap_4())
+            .when(!preferences, |card| card.p_4().gap_4())
             .child(
                 div()
                     .flex_shrink_0()
-                    .when(settings, |header| {
+                    .when(preferences, |header| {
                         header
                             .flex_shrink_0()
                             .px_4()
@@ -339,7 +331,21 @@ impl Workspace {
                     })
                     .text_size(px(ui::metrics::HEADING))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(title),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .when(profile, |header| {
+                        if let Modal::Profile(form) = modal {
+                            header.child(ui::icon(form.read(cx).kind.icon()).size(px(18.)))
+                        } else {
+                            header
+                        }
+                    })
+                    .child(if profile {
+                        title.trim_end_matches(['.', '…'])
+                    } else {
+                        title
+                    }),
             )
             .child(body);
         if let Some(error) = &self.error {
@@ -347,7 +353,7 @@ impl Workspace {
                 ui::feedback(error.render(), true)
                     .id("modal-error")
                     .max_h(px(96.))
-                    .when(settings, |error| error.mx_4().mb_2())
+                    .when(preferences, |error| error.mx_4().mb_2())
                     .overflow_y_scroll()
                     .map(ui::preserve_scroll_axes)
                     .map(|content| ui::scrollable(content, None)),
@@ -357,6 +363,8 @@ impl Workspace {
             card = card.child(
                 ui::feedback(test.message(), false)
                     .id("profile-test-result")
+                    .mx_4()
+                    .mb_2()
                     .max_h(px(96.))
                     .text_color(rgb(test.color()))
                     .overflow_y_scroll()
@@ -370,7 +378,7 @@ impl Workspace {
                 .flex()
                 .justify_end()
                 .gap_3()
-                .when(settings, |footer| {
+                .when(preferences, |footer| {
                     footer
                         .items_center()
                         .flex_shrink_0()
@@ -378,13 +386,11 @@ impl Workspace {
                         .py_3()
                         .border_t_1()
                         .border_color(rgb(ui::colors().border))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(11.))
+                        .when(settings, |footer| footer.child(
+                            div().flex_1().text_size(px(11.))
                                 .text_color(rgb(ui::colors().muted))
                                 .when(settings_dirty, |status| status.child(tr(i18n_key::CONNECTIONS_UNSAVED_CHANGES))),
-                        )
+                        ))
                 })
                 .when(matches!(modal, Modal::Profile(form) if form.read(cx).kind != ProfileKind::Local), |footer| {
                     footer
@@ -410,7 +416,7 @@ impl Workspace {
                         ui::ButtonStyle::Neutral,
                         !settings || !self.modal_saving,
                     )
-                    .track_focus(&self.modal_cancel_focus)
+                    .track_focus(&self.modal_cancel_focus.clone().tab_stop(!settings || !self.modal_saving))
                     .tab_index(0)
                     .focus(|style| style.bg(rgb(ui::colors().selected)).border_color(rgb(ui::colors().accent)))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -421,7 +427,7 @@ impl Workspace {
                 .when_some(save_label, |d, label| {
                     d.child(
                         ui::text_button_enabled("save-modal", label, ui::ButtonStyle::Primary, save_enabled)
-                            .track_focus(&self.modal_save_focus)
+                            .track_focus(&self.modal_save_focus.clone().tab_stop(save_enabled))
                             .tab_index(0)
                             .focus(|style| style.border_color(rgb(ui::colors().accent)))
                             .on_click(cx.listener(|this, _, window, cx| {

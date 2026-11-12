@@ -152,6 +152,7 @@ impl Workspace {
     }
 
     pub(super) fn open_docker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(SessionTool::Docker, cx);
         let Some((session, client)) = self.docker_target(self.focused, cx) else {
             return;
         };

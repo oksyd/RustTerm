@@ -81,6 +81,8 @@ impl ResourceMonitor {
 }
 impl Render for MetricsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = f32::from(window.viewport_size().width);
+        let compact = width < 700.;
         let monitor = self.monitor.read(cx);
         let summary = monitor.summary();
         let tooltip = self.monitor.clone();
@@ -107,19 +109,33 @@ impl Render for MetricsView {
                 let text = tooltip.read(cx).tooltip();
                 cx.new(|_| ui::Tooltip(text)).into()
             })
-            .child(div().text_color(rgb(ui::colors().muted)).child(scope))
-            .when_some(summary, |bar, summary| {
+            .when(compact, |bar| {
+                bar.child(ui::icon(ui::Icon::Pulse).text_color(rgb(
+                    if matches!(
+                        monitor.state(),
+                        ResourceState::Failed | ResourceState::Stale
+                    ) {
+                        ui::colors().warning
+                    } else {
+                        ui::colors().muted
+                    },
+                )))
+            })
+            .when(width >= 900., |bar| {
+                bar.child(div().text_color(rgb(ui::colors().muted)).child(scope))
+            })
+            .when_some(summary.filter(|_| !compact), |bar, summary| {
                 bar.child(format!("CPU {}", percent(summary.cpu)))
                     .child(format!(
                         "{} {}",
                         tr(key::RESOURCES_MEMORY),
                         percent(summary.memory_percent())
                     ))
-                    .when(f32::from(window.viewport_size().width) >= 850., |bar| {
+                    .when(width >= 1100., |bar| {
                         bar.child(format!("↓ {}  ↑ {}", rate(summary.rx), rate(summary.tx)))
                     })
             })
-            .when(summary.is_none(), |bar| {
+            .when(!compact && summary.is_none(), |bar| {
                 bar.child(
                     div()
                         .text_color(rgb(

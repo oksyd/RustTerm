@@ -211,14 +211,10 @@ impl ProfileForm {
                 ("sqlite-read-write", i18n_key::DATABASE_READ_WRITE, false),
             ]
             .map(|(id, label, read_only)| {
-                ui::text_button_enabled(
+                ui::choice_button(
                     id,
                     label,
-                    if self.sqlite_read_only == read_only {
-                        ButtonStyle::Primary
-                    } else {
-                        ButtonStyle::Neutral
-                    },
+                    self.sqlite_read_only == read_only,
                     !self.native_pending,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -239,7 +235,6 @@ impl ProfileForm {
             ))
             .child(hint(i18n_key::DATABASE_OPENING_A_DATABASE_REQUIRES_AN_EXISTING_FILE_NEW_DATABASE_CREATES))
             .child(row(i18n_key::DATABASE_ACCESS_MODE, access))
-            .child(self.network_options(cx))
             .when(self.native_pending, |body| {
                 body.child(hint(if self.sqlite_creating {
                     i18n_key::DATABASE_CREATING_DATABASE

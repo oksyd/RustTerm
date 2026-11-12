@@ -62,6 +62,11 @@ impl ProfileForm {
         cx.stop_propagation();
         window.prevent_default();
         self.group_scroll.scroll_to_item(self.group_cursor);
+        if self.group_open
+            && let Some(scroll) = self.scroll_handle()
+        {
+            scroll.scroll_to_bottom();
+        }
         cx.notify();
     }
 
@@ -123,6 +128,11 @@ impl ProfileForm {
                         .and_then(|id| this.groups.iter().position(|g| g.0 == id))
                         .map_or(0, |index| index + 1);
                     this.group_scroll.scroll_to_item(this.group_cursor);
+                    if this.group_open
+                        && let Some(scroll) = this.scroll_handle()
+                    {
+                        scroll.scroll_to_bottom();
+                    }
                     this.group_focus.focus(window);
                     cx.notify();
                 })),

@@ -23,6 +23,7 @@ mod text_input;
 mod tunnel_panel;
 mod ui;
 mod updates;
+mod window_controls;
 mod window_frame;
 mod window_visibility;
 mod workspace;

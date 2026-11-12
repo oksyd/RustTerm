@@ -77,6 +77,7 @@ struct SettingsDraft {
     fields: Vec<String>,
     language: Language,
     app_theme: AppTheme,
+    sidebar_connection_details: bool,
     line_numbers: bool,
     line_timestamps: bool,
     cache_command_output: bool,
@@ -173,6 +174,7 @@ impl SettingsForm {
             fields: fields.values(cx),
             language: settings.language,
             app_theme: settings.app_theme,
+            sidebar_connection_details: settings.sidebar_connection_details,
             line_numbers: settings.line_numbers,
             line_timestamps: settings.line_timestamps,
             cache_command_output: settings.cache_command_output,
@@ -243,6 +245,7 @@ impl SettingsForm {
                 fields: self.fields.values(cx),
                 language: self.values.language,
                 app_theme: self.values.app_theme,
+                sidebar_connection_details: self.values.sidebar_connection_details,
                 line_numbers: self.values.line_numbers,
                 line_timestamps: self.values.line_timestamps,
                 cache_command_output: self.values.cache_command_output,
@@ -391,66 +394,29 @@ impl Render for SettingsForm {
             SettingsSection::Security => self.security(cx),
             SettingsSection::Updates => self.updates_page(cx),
         };
-        let navigation = div()
-            .flex()
-            .flex_shrink_0()
-            .gap_1()
-            .p_2()
-            .bg(rgb(ui::colors().bg))
-            .when(compact, |nav| {
-                nav.w_full()
-                    .border_b_1()
-                    .border_color(rgb(ui::colors().border))
-            })
-            .when(!compact, |nav| {
-                nav.w(px(156.))
-                    .flex_col()
-                    .border_r_1()
-                    .border_color(rgb(ui::colors().border))
-            })
-            .children(SettingsSection::ALL.into_iter().map(|section| {
-                let selected = section == self.section;
-                let icon = match section {
-                    SettingsSection::General => Icon::Settings,
-                    SettingsSection::Appearance => Icon::Eye,
-                    SettingsSection::Terminal => Icon::Terminal,
-                    SettingsSection::Security => Icon::Shield,
-                    SettingsSection::Updates => Icon::Refresh,
-                };
-                div()
-                    .id(("settings-section", section as usize))
-                    .track_focus(&self.section_focus[section as usize])
-                    .tab_index(0)
-                    .tab_stop(selected)
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .h(px(38.))
-                    .px_2()
-                    .when(compact, |item| item.flex_1().justify_center())
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(gpui::transparent_black())
-                    .cursor_pointer()
-                    .bg(rgb(if selected {
-                        ui::colors().selected
-                    } else {
-                        ui::colors().bg
-                    }))
-                    .text_color(rgb(if selected {
-                        ui::colors().text
-                    } else {
-                        ui::colors().muted
-                    }))
-                    .hover(|style| style.bg(rgb(ui::colors().hover)))
-                    .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                    .child(ui::icon(icon).text_color(rgb(if selected {
-                        ui::colors().accent
-                    } else {
-                        ui::colors().muted
-                    })))
-                    .child(div().truncate().child(tr(section.label())))
+        let navigation =
+            ui::preferences_navigation(compact).children(SettingsSection::ALL.into_iter().map(
+                |section| {
+                    let selected = section == self.section;
+                    let icon = match section {
+                        SettingsSection::General => Icon::Settings,
+                        SettingsSection::Appearance => Icon::Eye,
+                        SettingsSection::Terminal => Icon::Terminal,
+                        SettingsSection::Security => Icon::Shield,
+                        SettingsSection::Updates => Icon::Refresh,
+                    };
+                    ui::preferences_item(
+                        ("settings-section", section as usize),
+                        tr(section.label()),
+                        icon,
+                        selected,
+                        compact,
+                    )
+                    .track_focus(
+                        &self.section_focus[section as usize]
+                            .clone()
+                            .tab_stop(selected),
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select_section(section, window, cx)
                     }))
@@ -474,47 +440,16 @@ impl Render for SettingsForm {
                             cx.stop_propagation();
                         },
                     ))
-            }));
-        let scroll = self.scroll_handle();
-        let content = div()
-            .id(("settings-content", self.section as usize))
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scroll()
-            .map(ui::preserve_scroll_axes)
-            .track_scroll(&scroll)
-            .px(px(24.))
-            .pb(px(24.))
-            .child(body);
-        div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .when(compact, |layout| layout.flex_col())
-            .text_size(px(12.))
-            .text_color(rgb(ui::colors().text))
-            .child(navigation)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .px(px(24.))
-                            .pt(px(20.))
-                            .pb(px(8.))
-                            .text_size(px(18.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(tr(self.section.label())),
-                    )
-                    .child(ui::scrollable(content, Some(scroll))),
-            )
+                },
+            ));
+        ui::preferences_layout(
+            navigation,
+            ("settings-content", self.section as usize),
+            tr(self.section.label()),
+            body,
+            self.scroll_handle(),
+            compact,
+        )
     }
 }
 
@@ -546,33 +481,7 @@ fn toggle(
     description: Option<&'static str>,
     selected: bool,
 ) -> gpui::Stateful<Div> {
-    setting_row(
-        label,
-        description,
-        div()
-            .w(px(34.))
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .px(px(3.))
-            .rounded(px(10.))
-            .bg(rgb(if selected {
-                ui::colors().accent
-            } else {
-                ui::colors().border
-            }))
-            .when(selected, |rail| rail.justify_end())
-            .child(div().size(px(14.)).rounded(px(7.)).bg(rgb(if selected {
-                ui::colors().on_accent
-            } else {
-                ui::colors().text
-            }))),
-    )
-    .id(id)
-    .cursor_pointer()
-    .tab_index(0)
-    .hover(|style| style.bg(rgb(ui::colors().hover)))
-    .focus(|style| style.border_color(rgb(ui::colors().accent)))
+    ui::toggle_row(id, tr(label), description.map(tr), selected)
 }
 // Valid history budgets fit exactly in f64 (maximum 64 GiB). Dividing by a
 // power of two preserves every byte, unlike the old integer-MiB display.

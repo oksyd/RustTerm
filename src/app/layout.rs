@@ -15,12 +15,13 @@ impl WorkspaceLayout {
         content_minimum: f32,
         utility_open: bool,
     ) -> Self {
+        let width = width.max(0.);
         let content_minimum = content_minimum.max(360.);
-        let sidebar_width = settings.sidebar_width.min((width - 80.).max(0.));
-        let sidebar_fits =
-            width >= sidebar_width + 5. + content_minimum + if utility_open { 365. } else { 0. };
-        let sidebar_inline = sidebar_fits && settings.sidebar_visible;
-        let sidebar_visible = sidebar_inline || (!sidebar_fits && sidebar_overlay);
+        let sidebar_width = settings.sidebar_width.max(240.).min((width - 80.).max(0.));
+        let sidebar_fits = width >= sidebar_width + 5. + content_minimum;
+        let sidebar_inline = sidebar_fits && settings.sidebar_visible && !utility_open;
+        let sidebar_visible =
+            !utility_open && (sidebar_inline || (!sidebar_fits && sidebar_overlay));
         let available = width
             - if sidebar_inline {
                 sidebar_width + 5.
@@ -233,7 +234,7 @@ impl PaneNode {
 mod tests {
     use super::*;
     #[test]
-    fn library_collapses_before_the_session_utility() {
+    fn library_and_tools_share_one_left_panel() {
         let settings = rustterm::config::Settings::default();
         let terminal_only = WorkspaceLayout::new(900., &settings, false, 460., false);
         assert!(terminal_only.sidebar_inline);
@@ -243,7 +244,7 @@ mod tests {
         let narrow = WorkspaceLayout::new(800., &settings, false, 460., true);
         assert!(!narrow.sidebar_inline && !narrow.files_docked);
         let wide = WorkspaceLayout::new(1200., &settings, false, 460., true);
-        assert!(wide.sidebar_inline && wide.files_docked);
+        assert!(!wide.sidebar_inline && wide.files_docked);
     }
     #[test]
     fn narrow_windows_use_overlays_without_changing_panel_preferences() {
@@ -251,13 +252,13 @@ mod tests {
         let narrow = WorkspaceLayout::new(480., &settings, false, 360., true);
         assert!(!narrow.sidebar_visible);
         assert!(!narrow.files_docked);
-        let expanded = WorkspaceLayout::new(480., &settings, true, 360., true);
+        let expanded = WorkspaceLayout::new(480., &settings, true, 360., false);
         assert!(expanded.sidebar_visible);
         assert!(!expanded.sidebar_inline);
         let wide = WorkspaceLayout::new(1100., &settings, false, 360., true);
-        assert!(wide.sidebar_inline && wide.files_docked);
+        assert!(!wide.sidebar_inline && wide.files_docked);
         assert_eq!(wide.sidebar_width, settings.sidebar_width);
-        assert!(1100. - wide.sidebar_width - wide.files_width - 10. >= 360.);
+        assert!(1100. - wide.files_width - 5. >= 360.);
     }
     #[test]
     fn dock_clamps_to_available_space_and_restores_saved_width() {
@@ -288,7 +289,7 @@ mod tests {
         assert!(!mixed.sidebar_inline);
         assert!(!mixed.files_docked);
         let wide = WorkspaceLayout::new(1600., &settings, false, 805., true);
-        assert!(wide.sidebar_inline && wide.files_docked);
+        assert!(!wide.sidebar_inline && wide.files_docked);
     }
     #[test]
     fn render_fit_preserves_mixed_minimums_and_saved_ratios() {

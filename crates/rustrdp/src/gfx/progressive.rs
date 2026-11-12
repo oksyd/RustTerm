@@ -252,8 +252,11 @@ impl Decoder {
         if (surface.width, surface.height) != (width, height) {
             return Err(Error::Invalid("progressive surface dimensions changed"));
         }
-        let mut known_context = surface.contexts.contains(&context);
-        if !known_context {
+        // MS-RDPEGFX 3.3.5.2 creates the bitmap's codec context before decoding
+        // its blocks. Refinement state belongs to shared surface tiles (3.3.1.2),
+        // so a new context can use an existing tile's initialized state. Checking
+        // whether the ID existed on entry would reject that valid association.
+        if !surface.contexts.contains(&context) {
             if surface.contexts.len() >= 4096 {
                 return Err(Error::Limit("progressive codec contexts"));
             }
@@ -288,13 +291,7 @@ impl Decoder {
                     }
                     block.skip(1)?;
                 }
-                0xccc4 if inside => self.region(
-                    surface,
-                    context,
-                    &mut known_context,
-                    &mut block,
-                    &mut changed,
-                )?,
+                0xccc4 if inside => self.region(surface, context, &mut block, &mut changed)?,
                 _ => {
                     block.skip(block.remaining_len())?;
                 }
@@ -321,7 +318,6 @@ impl Decoder {
         &mut self,
         surface: &mut Surface,
         context: u32,
-        known_context: &mut bool,
         input: &mut Reader<'_>,
         changed: &mut BTreeSet<Position>,
     ) -> Result<()> {
@@ -437,11 +433,9 @@ impl Decoder {
                 }
             }
             if kind == 0xccc7 {
-                // MS-RDPEGFX 3.3.5.2 requires a known codec context, not that
-                // this context was the one that originally encoded this tile.
-                if !*known_context {
-                    return Err(Error::Invalid("progressive upgrade without codec context"));
-                }
+                // Registering a bitmap context does not initialize a tile. Both
+                // its coefficients and progressive state must already exist;
+                // never substitute a blank tile or reuse a deleted pass.
                 let tile = surface
                     .tiles
                     .get_mut(&position)
@@ -493,7 +487,6 @@ impl Decoder {
                     });
                 }
                 first(tile, &mut block, positions, difference, extrapolate)?;
-                *known_context = true;
             }
             block.finish()?;
             self.associate_tile(surface, position, context)?;

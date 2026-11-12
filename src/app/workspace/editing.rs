@@ -88,7 +88,6 @@ impl Workspace {
             }) => Vec::new(),
             Some(Modal::Profile(form)) => form.read(cx).inputs(cx),
             Some(Modal::Settings(form)) => form.read(cx).inputs(cx),
-            Some(Modal::Tunnels(panel)) => panel.read(cx).inputs(cx),
             Some(Modal::Group { fields, .. }) => fields.inputs(),
             Some(Modal::Auth {
                 secret,
@@ -244,13 +243,7 @@ impl Workspace {
             return;
         }
         self.remember_popup_focus(window, cx);
-        let default_group = self.selected_profile.and_then(|id| {
-            self.config
-                .profiles
-                .iter()
-                .find(|profile| profile.id == id)
-                .and_then(|profile| profile.group)
-        });
+        let default_group = self.selected_library_group();
         let form = cx.new(|cx| {
             ProfileForm::new(
                 profile,
@@ -693,8 +686,8 @@ impl Workspace {
                     .iter()
                     .position(|profile| profile.id == id)
                     .map(|index| this.config.profiles.remove(index));
-                if this.selected_profile == Some(id) {
-                    this.selected_profile = None;
+                if this.selected_library_profile() == Some(id) {
+                    this.library_selection = None;
                 }
                 this.pending_credential_writes.remove(&id);
                 if answer == 2
@@ -730,6 +723,10 @@ impl Workspace {
                     }
                     this.config.remove_group(id);
                     this.collapsed.remove(&id);
+                    if this.library_selection == Some(super::sidebar::LibraryItem::Group(Some(id)))
+                    {
+                        this.library_selection = None;
+                    }
                     this.save(cx);
                     cx.notify();
                 });

@@ -1,6 +1,6 @@
 use super::super::{column, field_error, hint, parse_value, row};
 use super::ProfileForm;
-use crate::app::ui::{self, ButtonStyle};
+use crate::app::ui;
 use gpui::{AnyElement, App, Context, div, prelude::*};
 use rustterm::config::{Connection, Profile, RedisConfig, RedisTopology, Uuid};
 use rustterm::i18n::Message;
@@ -68,7 +68,7 @@ impl ProfileForm {
         column()
             .child(row(i18n_key::REDIS_DEPLOYMENT, div().flex().flex_wrap().gap_2().children([
                 (RedisTopology::Standalone, i18n_key::REDIS_STANDALONE), (RedisTopology::Cluster, i18n_key::REDIS_CLUSTER), (RedisTopology::Sentinel, i18n_key::REDIS_SENTINEL)
-            ].into_iter().map(|(topology, label)| ui::text_button(label, label, if self.redis_topology == topology { ButtonStyle::Primary } else { ButtonStyle::Neutral })
+            ].into_iter().map(|(topology, label)| ui::choice_button(label, label, self.redis_topology == topology, true)
                 .tab_index(0).on_click(cx.listener(move |this, _, _, cx| { if this.native_pending || this.prompts.is_blocked() {return;} this.redis_topology = topology; if topology == RedisTopology::Cluster { this.fields.field(i18n_key::REDIS_DATABASE_INDEX).update(cx, |input, cx| input.set_value("0", cx)); } cx.notify(); }))))))
             .child(self.host_port())
             .when(self.redis_topology != RedisTopology::Standalone, |body| body.child(self.fields.selected_rows(&[i18n_key::REDIS_ADDITIONAL_REDIS_NODES])).child(hint(i18n_key::REDIS_ADDITIONAL_SEED_NODES_HOST_PORT_SEPARATED_BY_COMMAS)))
@@ -78,7 +78,6 @@ impl ProfileForm {
             .when(self.redis_topology != RedisTopology::Cluster, |body| body.child(self.fields.selected_rows(&[i18n_key::REDIS_DATABASE_INDEX])))
             .child(self.tls_picker(cx))
             .when(self.database_tls, |body| body.child(hint(i18n_key::REDIS_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND_HOSTNAME)))
-            .child(self.network_options(cx))
             .into_any_element()
     }
 }

@@ -1,14 +1,15 @@
-use super::menus::Menu;
+use super::menus::{Menu, MenuAction};
 use super::sidebar::{rdp_target, telnet_target};
 use super::{Tab, Workspace};
 use crate::app::pane::{Pane, PaneEvent};
 use crate::app::ui;
 use crate::app::ui::{Icon, icon, icon_button};
+use crate::app::window_controls;
 use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Decorations, Div, MouseButton, Stateful, Window, WindowControlArea,
-    canvas, div, px, relative, rgb, rgba,
+    AnyElement, App, Context, Decorations, Div, MouseButton, MouseDownEvent, Stateful, Window,
+    WindowControlArea, canvas, div, px, relative, rgb, rgba,
 };
 use rustterm::config::{Connection, Uuid};
 use rustterm::i18n::messages as i18n_key;
@@ -26,14 +27,6 @@ fn pane_icon(pane: Option<&Pane>, cx: &App) -> Icon {
     }
 }
 
-fn toggle_window_size(window: &Window) {
-    if window.is_fullscreen() {
-        window.toggle_fullscreen();
-    } else {
-        window.zoom_window();
-    }
-}
-
 fn native_window_control(button: Stateful<Div>, area: WindowControlArea) -> Stateful<Div> {
     button.when(cfg!(target_os = "windows"), |button| {
         button
@@ -47,7 +40,94 @@ fn native_window_control(button: Stateful<Div>, area: WindowControlArea) -> Stat
     })
 }
 
+const TITLEBAR_BUTTON_WIDTH: f32 = 38.;
+const TITLEBAR_BUTTON_VISUAL_SIZE: f32 = 28.;
+const WINDOW_CONTROL_GAP: f32 = 12.;
+const TITLEBAR_RIGHT_PADDING: f32 = 8.;
+
+fn titlebar_button(
+    id: &'static str,
+    glyph: Icon,
+    label: &'static str,
+    danger: bool,
+) -> Stateful<Div> {
+    let hover_background = if danger {
+        ui::colors().danger_bg
+    } else {
+        ui::colors().hover
+    };
+    let hover_foreground = if danger {
+        ui::colors().danger
+    } else {
+        ui::colors().text
+    };
+    // Keep the full caption hit area, including Windows' native Max hit test.
+    // Only the visual background is circular; corner clicks still work.
+    div()
+        .id(id)
+        .group("titlebar-button")
+        .relative()
+        .occlude()
+        .w(px(TITLEBAR_BUTTON_WIDTH))
+        .h_full()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .tab_index(0)
+        .cursor_pointer()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(rgba(0))
+        .focus(|style| style.border_color(rgb(ui::colors().accent)))
+        .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tr(label).to_owned())).into())
+        .child(
+            div()
+                .size(px(TITLEBAR_BUTTON_VISUAL_SIZE))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(ui::colors().raised))
+                .group_hover("titlebar-button", move |style| {
+                    style.bg(rgb(hover_background))
+                })
+                .child(
+                    icon(glyph)
+                        .text_color(rgb(ui::colors().muted))
+                        .group_hover("titlebar-button", move |style| {
+                            style.text_color(rgb(hover_foreground))
+                        }),
+                ),
+        )
+}
+
 impl Workspace {
+    fn caption_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.lock_screen.locked && self.menu.take().is_some() {
+            self.restore_popup_focus(window, cx);
+            cx.notify();
+        }
+        // Ancestor focus handlers prevent Windows' default caption action.
+        // Own the gesture once, then hand movement to the native move loop.
+        window.prevent_default();
+        cx.stop_propagation();
+        let accepted = if event.click_count == 2 {
+            window_controls::toggle_size(window)
+        } else {
+            window_controls::start_move(window)
+        };
+        if !accepted {
+            self.window_state.record("window-caption-request-failed", 0);
+        }
+    }
+
     pub(super) fn render_titlebar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         // GPUI's Windows backend reports Server even with its caption hidden.
         // Keep its native resize frame/shadow, but draw our own title and controls.
@@ -55,6 +135,21 @@ impl Workspace {
             || matches!(window.window_decorations(), Decorations::Client { .. });
         let corners = WindowFrame::new(window).corners;
         let application_menu = self.application_menu().filter(|_| !self.lock_screen.locked);
+        let controls = window.window_controls();
+        let show_settings = !self.lock_screen.locked;
+        let show_minimize = custom_titlebar && controls.minimize;
+        let show_maximize = custom_titlebar && (controls.maximize || window.is_fullscreen());
+        let actions_width = TITLEBAR_RIGHT_PADDING
+            + TITLEBAR_BUTTON_WIDTH
+                * (usize::from(show_settings)
+                    + usize::from(show_minimize)
+                    + usize::from(show_maximize)
+                    + usize::from(custom_titlebar)) as f32
+            + if show_settings && custom_titlebar {
+                WINDOW_CONTROL_GAP
+            } else {
+                0.
+            };
         let mut bar = div()
             .relative()
             .h(px(ui::TITLE_HEIGHT))
@@ -85,7 +180,7 @@ impl Workspace {
                     .inset_0()
                     .flex()
                     .items_center()
-                    .justify_center()
+                    .pl(px(52.))
                     .gap(px(7.))
                     .overflow_hidden()
                     .when(application_menu.is_none(), |title| {
@@ -111,21 +206,16 @@ impl Workspace {
                                 } else {
                                     8.
                                 }))
-                                .window_control_area(WindowControlArea::Drag),
+                                .window_control_area(WindowControlArea::Drag)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(Self::caption_mouse_down),
+                                ),
                         )
                     })
-                    .on_mouse_down(MouseButton::Left, move |event, window, _| {
-                        // Windows handles caption dragging and double-clicks through
-                        // native hit testing, except in fullscreen mode.
-                        if custom_titlebar
-                            && (!cfg!(target_os = "windows") || window.is_fullscreen())
-                        {
-                            if event.click_count == 2 {
-                                toggle_window_size(window);
-                            } else {
-                                window.start_window_move();
-                            }
-                        }
+                    .when(custom_titlebar && !cfg!(target_os = "windows"), |title| {
+                        title
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::caption_mouse_down))
                     })
                     .on_mouse_down(MouseButton::Right, move |event, window, _| {
                         if custom_titlebar && !cfg!(target_os = "windows") {
@@ -224,20 +314,64 @@ impl Workspace {
                 );
             }
         }
-        bar = bar.child(div().flex_1());
+        if self.lock_screen.locked || application_menu.is_some() {
+            bar = bar.child(div().flex_1());
+        } else {
+            // Reserve a stable brand/drag area aligned with the library at normal widths.
+            let width = f32::from(
+                WindowFrame::new(window)
+                    .content_size(window.viewport_size())
+                    .width,
+            );
+            let brand = if width >= 1100. {
+                self.sidebar_width + 5.
+            } else {
+                172.
+            };
+            bar = bar
+                .child(div().w(px(brand - 36.)).flex_shrink_0())
+                .child(self.render_tabs((width - brand - actions_width - 24.).max(0.), cx))
+                .child(div().w(px(24.)).h_full().flex_shrink_0());
+        }
+        let mut actions = div()
+            .id("titlebar-actions")
+            .relative()
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .pr(px(TITLEBAR_RIGHT_PADDING));
+        if show_settings {
+            actions = actions.child(
+                ui::icon_button_with_size(
+                    "titlebar-settings",
+                    Icon::Settings,
+                    i18n_key::WORKSPACE_SETTINGS_CTRL_COMMA,
+                    18.,
+                )
+                .relative()
+                .occlude()
+                .w(px(TITLEBAR_BUTTON_WIDTH))
+                .h_full()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.menu_action(MenuAction::Settings, window, cx);
+                })),
+            );
+        }
         if custom_titlebar {
-            let controls = window.window_controls();
-            if controls.minimize {
-                bar = bar.child(
-                    icon_button(
+            if show_settings {
+                actions = actions.child(div().w(px(WINDOW_CONTROL_GAP)).h_full().flex_shrink_0());
+            }
+            if show_minimize {
+                actions = actions.child(
+                    titlebar_button(
                         "window-minimize",
                         Icon::Minimize,
                         i18n_key::WORKSPACE_MINIMIZE,
+                        false,
                     )
-                    .relative()
-                    .occlude()
-                    .w(px(38.))
-                    .h_full()
                     .map(|button| native_window_control(button, WindowControlArea::Min))
                     .on_click(|_, window, cx| {
                         cx.stop_propagation();
@@ -245,7 +379,7 @@ impl Workspace {
                     }),
                 );
             }
-            if controls.maximize || window.is_fullscreen() {
+            if show_maximize {
                 let (glyph, label) = if window.is_fullscreen() {
                     (Icon::ExitFullscreen, i18n_key::WORKSPACE_EXIT_FULLSCREEN)
                 } else if window.is_maximized() {
@@ -253,31 +387,24 @@ impl Workspace {
                 } else {
                     (Icon::Maximize, i18n_key::WORKSPACE_MAXIMIZE_WINDOW)
                 };
-                bar = bar.child(
-                    icon_button("window-maximize", glyph, label)
-                        .relative()
-                        .occlude()
-                        .w(px(38.))
-                        .h_full()
+                actions = actions.child(
+                    titlebar_button("window-maximize", glyph, label, false)
                         .map(|button| native_window_control(button, WindowControlArea::Max))
-                        .on_click(|_, window, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             cx.stop_propagation();
-                            toggle_window_size(window);
-                        }),
+                            if !window_controls::toggle_size(window) {
+                                this.window_state.record("window-size-request-failed", 0);
+                            }
+                        })),
                 );
             }
-            bar = bar.child(
-                ui::styled_icon_button(
+            actions = actions.child(
+                titlebar_button(
                     "window-close",
                     Icon::Close,
                     i18n_key::WORKSPACE_CLOSE_WINDOW,
-                    ui::ButtonStyle::Danger,
+                    true,
                 )
-                .relative()
-                .occlude()
-                .w(px(38.))
-                .h_full()
-                .rounded_tr(corners.top_right)
                 .map(|button| native_window_control(button, WindowControlArea::Close))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -285,7 +412,7 @@ impl Workspace {
                 })),
             );
         }
-        bar.into_any_element()
+        bar.child(actions).into_any_element()
     }
     pub(super) fn workspace_tab_title(&self, tab: &Tab) -> String {
         let names: Vec<_> = tab
@@ -366,19 +493,6 @@ impl Workspace {
         label.into_any_element()
     }
 
-    fn scroll_tabs(&self, right: bool, cx: &mut Context<Self>) {
-        let mut offset = self.tab_scroll.offset();
-        let distance = (self.tab_scroll.bounds().size.width * 0.7).max(px(150.));
-        offset.x = if right {
-            offset.x - distance
-        } else {
-            offset.x + distance
-        }
-        .clamp(-self.tab_scroll.max_offset().width, px(0.));
-        self.tab_scroll.set_offset(offset);
-        cx.notify();
-    }
-
     fn render_workspace_tab(
         &self,
         tab: &Tab,
@@ -395,7 +509,11 @@ impl Workspace {
         let glyph = if leaves.len() > 1 {
             Icon::SplitHorizontal
         } else {
-            pane_icon(leaves.first().and_then(|id| self.panes.get(id)), cx)
+            leaves
+                .first()
+                .and_then(|id| self.pane_profiles.get(id))
+                .map(|profile| Icon::for_connection(&profile.connection))
+                .unwrap_or_else(|| pane_icon(leaves.first().and_then(|id| self.panes.get(id)), cx))
         };
         let title = self.workspace_tab_title(tab);
         let full_title = leaves
@@ -417,10 +535,12 @@ impl Workspace {
         };
         div()
             .id(("tab", id))
+            .group("workspace-tab")
             .relative()
+            .occlude()
             .h_full()
-            .min_w(px(150.))
-            .max_w(px(if leaves.len() > 1 { 360. } else { 240. }))
+            .w(px(TAB_WIDTH))
+            .min_w(px(TAB_WIDTH))
             .flex_shrink_0()
             .px(px(12.))
             .flex()
@@ -446,7 +566,7 @@ impl Workspace {
             .hover(|s| s.bg(rgb(ui::colors().hover)))
             .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tooltip.clone())).into())
             .child(icon(glyph).when(
-                active && matches!(glyph, Icon::Terminal | Icon::SplitHorizontal),
+                active && matches!(glyph, Icon::Terminal | Icon::Ssh | Icon::SplitHorizontal),
                 |icon| icon.text_color(rgb(ui::colors().accent)),
             ))
             .child(self.workspace_tab_label(tab))
@@ -489,7 +609,12 @@ impl Workspace {
                     Icon::Close,
                     i18n_key::WORKSPACE_CLOSE_WORKSPACE_TAB_AND_ALL_ITS_PANES,
                 )
-                .size(px(20.))
+                .size(px(24.))
+                .when(!active, |button| {
+                    button
+                        .opacity(0.)
+                        .group_hover("workspace-tab", |style| style.opacity(1.))
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| {
@@ -546,6 +671,15 @@ impl Workspace {
             .find_map(|id| self.pane_profiles.get(&id))
             .map(|profile| profile.name.clone())
             .unwrap_or_default();
+        let short_name = members
+            .iter()
+            .flat_map(|tab| tab.layout.leaves())
+            .find_map(|id| self.pane_profiles.get(&id))
+            .and_then(|profile| match &profile.connection {
+                Connection::Ssh(config) => Some(short_group_name(&config.host)),
+                _ => None,
+            })
+            .unwrap_or_else(|| name.clone());
         let collapsed = self.collapsed_tab_groups.contains(&profile);
         let active = self
             .tabs
@@ -569,10 +703,8 @@ impl Workspace {
             .id(gpui::SharedString::from(format!("ssh-tab-group-{profile}")))
             .relative()
             .h_full()
-            // Member tabs carry the names while expanded; only folded groups
-            // need a name in the header to remain identifiable.
-            .min_w(px(if collapsed { 64. } else { 44. }))
-            .max_w(px(if collapsed { 176. } else { 72. }))
+            .w(px(GROUP_WIDTH))
+            .occlude()
             .flex_shrink_0()
             .px_1()
             .flex()
@@ -612,9 +744,7 @@ impl Workspace {
                         })
                         .text_color(rgb(color)),
                     )
-                    .when(collapsed, |header| {
-                        header.child(div().flex_1().min_w_0().truncate().child(name.clone()))
-                    })
+                    .child(div().flex_1().min_w_0().truncate().child(short_name))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -667,125 +797,100 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
-        let workspace = cx.entity().downgrade();
-        let scroll = self.tab_scroll.clone();
-        let previous_width = scroll.bounds().size.width;
-        let mut tabs = div()
-            .on_children_prepainted(move |_, _, cx| {
-                let edges = (
-                    scroll.offset().x < px(-1.),
-                    scroll.max_offset().width + scroll.offset().x > px(1.),
-                );
-                let resized = (f32::from(scroll.bounds().size.width - previous_width)).abs() > 0.5;
-                let workspace = workspace.clone();
-                cx.defer(move |cx| {
-                    let _ = workspace.update(cx, |this, cx| {
-                        if resized {
-                            this.scroll_active_tab_into_view();
-                        }
-                        if resized || this.tab_scroll_edges != edges {
-                            this.tab_scroll_edges = edges;
-                            cx.notify();
-                        }
-                    });
-                });
+    pub(super) fn render_tabs(&self, available: f32, cx: &mut Context<Self>) -> AnyElement {
+        let groups = self.tab_groups();
+        let entries: Vec<_> = groups
+            .iter()
+            .flat_map(|group| {
+                let folded = group
+                    .profile
+                    .is_some_and(|profile| self.collapsed_tab_groups.contains(&profile));
+                group
+                    .tabs
+                    .iter()
+                    .take(if folded { 1 } else { usize::MAX })
+                    .map(move |id| StripEntry {
+                        id: *id,
+                        profile: group.profile,
+                        folded,
+                    })
             })
-            .id("workspace-tab-list")
-            .track_scroll(&self.tab_scroll)
+            .collect();
+        let active = self.tabs.get(self.active).map(|tab| {
+            groups
+                .iter()
+                .find(|group| {
+                    group.tabs.contains(&tab.id)
+                        && group
+                            .profile
+                            .is_some_and(|id| self.collapsed_tab_groups.contains(&id))
+                })
+                .map_or(tab.id, |group| group.tabs[0])
+        });
+        let visible = visible_strip(&entries, active, (available - 76.).max(0.));
+        let mut strip = div()
+            .id("tab-strip")
+            .relative()
             .h_full()
-            .flex_initial()
+            .flex_1()
             .min_w_0()
             .flex()
-            .items_center()
-            .overflow_x_scroll()
-            // A tab strip uses arrows instead of a scrollbar. Keep GPUI's
-            // single-axis fallback so an ordinary wheel also scrolls the tabs.
-            .scrollbar_width(px(0.));
-        for group in self.tab_groups() {
-            if let Some(profile) = group.profile {
-                tabs = tabs.child(self.render_tab_group(profile, &group, cx));
-                if self.collapsed_tab_groups.contains(&profile) {
-                    continue;
-                }
+            .items_center();
+        let mut previous = None;
+        for entry in &entries[visible.clone()] {
+            if let Some(profile) = entry.profile
+                && previous != Some(profile)
+                && let Some(group) = groups.iter().find(|group| group.profile == Some(profile))
+            {
+                strip = strip.child(self.render_tab_group(profile, group, cx));
             }
-            for id in group.tabs {
-                if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
-                    tabs = tabs.child(self.render_workspace_tab(tab, group.profile, cx));
-                }
+            previous = entry.profile;
+            if !entry.folded
+                && let Some(tab) = self.tabs.iter().find(|tab| tab.id == entry.id)
+            {
+                strip = strip.child(self.render_workspace_tab(tab, entry.profile, cx));
             }
         }
-        div()
-            .id("tab-strip")
-            .h(px(ui::TAB_HEIGHT))
-            .flex_shrink_0()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .bg(rgb(ui::colors().chrome))
-            .border_b_1()
-            .border_color(rgb(ui::colors().border))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if this.menu.take().is_some() {
-                        this.restore_popup_focus(window, cx);
-                        window.prevent_default();
-                        cx.notify();
-                    }
-                }),
-            )
-            .when(!self.sidebar_visible, |d| {
-                d.child(
-                    icon_button(
-                        "show-connection-sidebar",
-                        Icon::Sidebar,
-                        i18n_key::WORKSPACE_SHOW_CONNECTION_LIBRARY_CTRL_SHIFT_B,
-                    )
-                    .mx_1()
-                    .tab_index(0)
-                    .on_click(cx.listener(|this, _, window, cx| this.toggle_sidebar(window, cx))),
-                )
-            })
-            .when(self.tab_scroll_edges.0 || self.tab_scroll_edges.1, |bar| {
-                bar.child(
-                    ui::icon_button_enabled(
-                        "scroll-tabs-left",
-                        Icon::ChevronLeft,
-                        i18n_key::COMMON_SCROLL_TABS_LEFT,
-                        self.tab_scroll_edges.0,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.scroll_tabs(false, cx))),
-                )
-            })
-            .child(tabs)
-            .when(self.tab_scroll_edges.0 || self.tab_scroll_edges.1, |bar| {
-                bar.child(
-                    ui::icon_button_enabled(
-                        "scroll-tabs-right",
-                        Icon::ChevronRight,
-                        i18n_key::COMMON_SCROLL_TABS_RIGHT,
-                        self.tab_scroll_edges.1,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.scroll_tabs(true, cx))),
-                )
-            })
+        strip
             .child(
                 icon_button(
                     "new-workspace-tab",
                     Icon::Plus,
                     i18n_key::WORKSPACE_NEW_LOCAL_WORKSPACE_TAB_CTRL_SHIFT_T,
                 )
-                .mx_2()
+                .relative()
+                .occlude()
+                .size(px(32.))
+                .mx_1()
                 .tab_index(0)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.pane_event(&PaneEvent::NewTab, window, cx);
+                    this.pane_event(&PaneEvent::NewTab, window, cx)
                 })),
+            )
+            .when(
+                visible.len() < entries.len() || entries.iter().any(|entry| entry.folded),
+                |strip| {
+                    strip.child(
+                        icon_button(
+                            "all-workspace-tabs",
+                            Icon::ChevronDown,
+                            i18n_key::WORKSPACE_ALL_TABS,
+                        )
+                        .relative()
+                        .occlude()
+                        .size(px(28.))
+                        .tab_index(0)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_menu(Menu::Tabs, window, cx)
+                        })),
+                    )
+                },
             )
             .into_any_element()
     }
     pub(super) fn render_statusbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let corners = WindowFrame::new(window).corners;
+        let compact = f32::from(window.viewport_size().width) < 760.;
         let pane = self.panes.get(&self.focused);
         let profile = self.pane_profiles.get(&self.focused);
         let state = pane
@@ -862,8 +967,11 @@ impl Workspace {
             .border_color(rgb(ui::colors().border))
             .text_size(px(11.))
             .text_color(rgb(ui::colors().muted))
+            .child(self.render_panel_buttons(cx))
             .child(match pane {
-                Some(Pane::Rdp(view)) => view.update(cx, |view, cx| view.render_status(cx)),
+                Some(Pane::Rdp(view)) => {
+                    view.update(cx, |view, cx| view.render_status(compact, cx))
+                }
                 _ => div()
                     .id("focused-pane-status")
                     .px_3()
@@ -883,37 +991,14 @@ impl Workspace {
                     .child(
                         div()
                             .flex_shrink_0()
-                            .when(matches!(pane, Some(Pane::Terminal(_))), |label| {
-                                label.w(px(260.)).max_w(relative(0.75)).truncate()
-                            })
+                            .max_w(relative(0.75))
+                            .truncate()
                             .child(label),
                     )
                     .child(div().min_w_0().truncate().child(name))
                     .into_any_element(),
             })
             .when_some(self.resource_summary(), |bar, summary| bar.child(summary))
-            .when(!self.ports.registry.connections().is_empty(), |bar| {
-                bar.child(
-                    div()
-                        .id("background-ports")
-                        .px_2()
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .cursor_pointer()
-                        .tab_index(0)
-                        .child(ui::icon(ui::Icon::Link))
-                        .child(format!(
-                            "{} {}",
-                            tr(i18n_key::PORTS_TITLE),
-                            self.background_port_count()
-                        ))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_all_ports(window, cx)),
-                        ),
-                )
-            })
             .when(self.saving || self.pending_credentials > 0, |bar| {
                 bar.child(
                     div()
@@ -983,5 +1068,130 @@ impl gpui::Render for TabDrag {
             .py_2()
             .bg(rgb(ui::colors().selected))
             .child(self.title.clone())
+    }
+}
+
+const TAB_WIDTH: f32 = 180.;
+const GROUP_WIDTH: f32 = 104.;
+#[derive(Clone, Copy)]
+struct StripEntry {
+    id: usize,
+    profile: Option<Uuid>,
+    folded: bool,
+}
+
+fn strip_width(entries: &[StripEntry]) -> f32 {
+    let mut previous = None;
+    entries
+        .iter()
+        .map(|entry| {
+            let group = if entry.profile.is_some() && previous != entry.profile {
+                GROUP_WIDTH
+            } else {
+                0.
+            };
+            previous = entry.profile;
+            group + if entry.folded { 0. } else { TAB_WIDTH }
+        })
+        .sum()
+}
+
+/// Keep whole tabs and their group labels visible; reserve the active tab first.
+fn visible_strip(
+    entries: &[StripEntry],
+    active: Option<usize>,
+    width: f32,
+) -> std::ops::Range<usize> {
+    if entries.is_empty() {
+        return 0..0;
+    }
+    let center = entries
+        .iter()
+        .position(|entry| Some(entry.id) == active)
+        .unwrap_or(0);
+    let mut range = center..center + 1;
+    // Very small windows use the tab menu instead of painting a clipped close target.
+    if strip_width(&entries[range.clone()]) > width {
+        return center..center;
+    }
+    while range.start > 0 && strip_width(&entries[range.start - 1..range.end]) <= width {
+        range.start -= 1;
+    }
+    while range.end < entries.len() && strip_width(&entries[range.start..range.end + 1]) <= width {
+        range.end += 1;
+    }
+    range
+}
+
+fn short_group_name(host: &str) -> String {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        host.to_owned()
+    } else {
+        host.split('.').next().unwrap_or(host).to_owned()
+    }
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::*;
+    #[test]
+    fn overflow_keeps_active_tab_and_its_group_with_whole_close_targets() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let entries = [
+            StripEntry {
+                id: 1,
+                profile: Some(a),
+                folded: false,
+            },
+            StripEntry {
+                id: 2,
+                profile: Some(a),
+                folded: false,
+            },
+            StripEntry {
+                id: 3,
+                profile: Some(b),
+                folded: false,
+            },
+            StripEntry {
+                id: 4,
+                profile: None,
+                folded: false,
+            },
+        ];
+        for active in 1..=4 {
+            for width in [284., 464., 748., 1000.] {
+                let visible = visible_strip(&entries, Some(active), width);
+                assert!(
+                    entries[visible.clone()]
+                        .iter()
+                        .any(|entry| entry.id == active)
+                );
+                assert!(strip_width(&entries[visible]) <= width);
+            }
+        }
+        assert!(visible_strip(&entries, Some(2), 100.).is_empty());
+        assert!(visible_strip(&[], None, 1000.).is_empty());
+    }
+    #[test]
+    fn folded_groups_and_unavailable_active_ids_remain_accessible() {
+        let entries = [
+            StripEntry {
+                id: 1,
+                profile: Some(Uuid::new_v4()),
+                folded: true,
+            },
+            StripEntry {
+                id: 2,
+                profile: None,
+                folded: false,
+            },
+        ];
+        assert_eq!(visible_strip(&entries, Some(99), GROUP_WIDTH), 0..1);
+        assert_eq!(visible_strip(&entries, Some(2), TAB_WIDTH), 1..2);
+        assert_eq!(short_group_name("app-01.example.test"), "app-01");
+        assert_eq!(short_group_name("192.0.2.10"), "192.0.2.10");
+        assert_eq!(short_group_name("2001:db8::1"), "2001:db8::1");
     }
 }

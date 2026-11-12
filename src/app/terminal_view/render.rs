@@ -130,13 +130,14 @@ impl TerminalView {
             .child(
                 ui::connection_address(
                     ("terminal-address", pane_index),
-                    if self.is_container() {
-                        Icon::Container
-                    } else {
-                        Icon::Terminal
+                    match self.kind {
+                        TerminalKind::Container => Icon::Container,
+                        TerminalKind::Local => Icon::Local,
+                        TerminalKind::Ssh => Icon::Ssh,
+                        TerminalKind::Telnet => Icon::Telnet,
                     },
                     match self.kind {
-                        TerminalKind::Local => "Local",
+                        TerminalKind::Local => tr(i18n_key::WORKSPACE_LOCAL),
                         TerminalKind::Ssh => "SSH",
                         TerminalKind::Telnet => "Telnet",
                         TerminalKind::Container => "Docker",
@@ -158,15 +159,12 @@ impl TerminalView {
                                     cx.notify();
                                 }
                             }
-                            let threshold = if this.kind == TerminalKind::Ssh {
-                                560.
-                            } else {
-                                400.
-                            } + if this.viewed_run + 1 < this.runs.len() {
-                                60.
-                            } else {
-                                0.
-                            };
+                            let threshold = 400.
+                                + if this.viewed_run + 1 < this.runs.len() {
+                                    60.
+                                } else {
+                                    0.
+                                };
                             let compact = f32::from(bounds.size.width) < threshold;
                             if this.compact_header != compact {
                                 this.compact_header = compact;

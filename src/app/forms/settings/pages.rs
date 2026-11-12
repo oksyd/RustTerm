@@ -93,6 +93,20 @@ impl SettingsForm {
             .child(section_heading(i18n_key::SETTINGS_APPLICATION_THEME))
             .child(hint(i18n_key::SETTINGS_APPLICATION_THEME_HELP))
             .child(self.theme_picker(cx))
+            .child(section_heading(i18n_key::SETTINGS_CONNECTION_LIST))
+            .child(
+                toggle(
+                    "sidebar-connection-details",
+                    i18n_key::SETTINGS_SHOW_CONNECTION_DETAILS,
+                    Some(i18n_key::SETTINGS_SHOW_CONNECTION_DETAILS_HELP),
+                    self.values.sidebar_connection_details,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.values.sidebar_connection_details =
+                        !this.values.sidebar_connection_details;
+                    cx.notify();
+                })),
+            )
             .child(section_heading(i18n_key::CONNECTIONS_TERMINAL_FONT))
             .child(setting_row(
                 i18n_key::WORKSPACE_MONOSPACE_FONT,

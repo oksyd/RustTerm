@@ -1,7 +1,7 @@
-use super::super::{column, hint, parse_value, row};
+use super::super::{column, hint, parse_value};
 use super::{ProfileForm, ProfileKind};
-use crate::app::ui::{self, Icon};
-use gpui::{AnyElement, App, Context, div, prelude::*, px, rgb};
+use crate::app::ui;
+use gpui::{AnyElement, App, Context, prelude::*};
 use rustterm::i18n::Message;
 use rustterm::i18n::messages as i18n_key;
 use rustterm::{
@@ -78,58 +78,30 @@ impl ProfileForm {
                     i18n_key::REDIS_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND_HOSTNAME,
                 ))
             })
-            .child(self.network_options(cx))
             .into_any_element()
     }
 
     pub(super) fn tls_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        row(
-            i18n_key::REDIS_TLS,
-            div()
-                .id("database-tls")
-                .flex()
-                .items_center()
-                .gap_2()
-                .py_1()
-                .px_2()
-                .cursor_pointer()
-                .tab_index(0)
-                .border_1()
-                .border_color(rgb(ui::colors().border))
-                .focus(|style| style.border_color(rgb(ui::colors().accent)))
-                .child(
-                    div()
-                        .size(px(14.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .border_1()
-                        .rounded(px(2.))
-                        .border_color(rgb(if self.database_tls {
-                            ui::colors().accent
-                        } else {
-                            ui::colors().border
-                        }))
-                        .when(self.database_tls, |checkbox| {
-                            checkbox
-                                .child(ui::icon(Icon::Check).text_color(rgb(ui::colors().accent)))
-                        }),
-                )
-                .child(tr(i18n_key::REDIS_USE_TLS))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.database_tls = !this.database_tls;
-                    if this.kind == ProfileKind::ClickHouse {
-                        let old = if this.database_tls { "8123" } else { "8443" };
-                        if this.fields.get(i18n_key::WORKSPACE_PORT, cx) == old {
-                            let port = if this.database_tls { "8443" } else { "8123" };
-                            this.fields
-                                .field(i18n_key::WORKSPACE_PORT)
-                                .update(cx, |field, cx| field.set_value(port, cx));
-                        }
-                    }
-                    cx.notify();
-                })),
+        ui::toggle_row(
+            "database-tls",
+            tr(i18n_key::REDIS_USE_TLS),
+            Option::<&str>::None,
+            self.database_tls,
         )
+        .border_b_0()
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.database_tls = !this.database_tls;
+            if this.kind == ProfileKind::ClickHouse {
+                let old = if this.database_tls { "8123" } else { "8443" };
+                if this.fields.get(i18n_key::WORKSPACE_PORT, cx) == old {
+                    let port = if this.database_tls { "8443" } else { "8123" };
+                    this.fields
+                        .field(i18n_key::WORKSPACE_PORT)
+                        .update(cx, |field, cx| field.set_value(port, cx));
+                }
+            }
+            cx.notify();
+        }))
         .into_any_element()
     }
 }

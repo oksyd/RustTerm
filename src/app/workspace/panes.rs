@@ -59,6 +59,7 @@ impl Workspace {
             .flatten()
     }
     pub(super) fn open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tool(SessionTool::Files, cx);
         if let Some(files) = self.files.get(&self.focused) {
             self.tools.insert(self.focused, SessionTool::Files);
             files.read(cx).focus(window);
@@ -69,7 +70,6 @@ impl Workspace {
             return;
         };
         let Some(client) = pane.read(cx).sftp_client() else {
-            self.error = Some(i18n_key::WORKSPACE_SFTP_REQUIRES_A_CONNECTED_SSH_SESSION.into());
             cx.notify();
             return;
         };
@@ -95,7 +95,9 @@ impl Workspace {
                 if this.tools.get(&pane_id) == Some(&SessionTool::Files) {
                     this.tools.remove(&pane_id);
                 }
-                if this.focused == pane_id {
+                if this.focused == pane_id && this.left_tool == Some(SessionTool::Files) {
+                    this.close_utility_panel(window, cx);
+                } else if this.focused == pane_id {
                     if !this.utility_is_open() {
                         this.utility_overlay = false;
                     }
@@ -527,7 +529,6 @@ impl Workspace {
         self.pane_profiles.insert(id, profile);
         self.refresh_session_name(id, cx);
         self.regroup_tabs();
-        self.scroll_active_tab_into_view();
         if self.utility_overlay && !self.utility_is_open() {
             self.utility_overlay = false;
         }

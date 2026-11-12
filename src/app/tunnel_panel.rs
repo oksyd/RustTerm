@@ -99,14 +99,36 @@ impl TunnelPanel {
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }
-    pub fn uses(&self, controller: &ForwardController) -> bool {
-        self.controller.same_instance(controller)
-    }
-    pub fn inputs(&self, cx: &App) -> Vec<Entity<super::text_input::TextInput>> {
-        self.editor
-            .as_ref()
-            .map(|editor| editor.read(cx).inputs())
-            .unwrap_or_default()
+    pub fn update_connections(
+        &mut self,
+        connections: Vec<(String, ForwardController)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connections.len() == connections.len()
+            && self
+                .connections
+                .iter()
+                .zip(&connections)
+                .all(|(a, b)| a.0 == b.0 && a.1.same_instance(&b.1))
+        {
+            return;
+        }
+        let selected = connections
+            .iter()
+            .position(|(_, controller)| self.controller.same_instance(controller));
+        self.selected_connection = selected.unwrap_or(0);
+        if selected.is_none() {
+            self.controller = connections[0].1.clone();
+            self.settings = self.controller.settings();
+            self.statuses = self.controller.statuses();
+            self.discovery = self.controller.discovery();
+            self.editor = None;
+            self.editor_subscription = None;
+            self.qr = None;
+            self.error = None;
+        }
+        self.connections = connections;
+        cx.notify();
     }
     pub fn input_composing(&self, cx: &App) -> bool {
         self.editor

@@ -94,3 +94,9 @@ settings-application-theme-help = Select a theme to preview it immediately. Save
 settings-theme-dark = Default dark
 settings-theme-light = Light
 settings-theme-midnight = Midnight blue
+
+settings-connection-list = Connection list
+
+settings-show-connection-details = Show connection details
+
+settings-show-connection-details-help = Show the type and address below each connection name. Turn off for a compact, single-line list.

@@ -721,6 +721,7 @@ connections-group-parent-missing = A group references a parent that does not exi
 connections-group-cycle = A group cannot be placed inside itself or one of its subgroups.
 
 connections-display-name-optional = Display name (optional)
+connections-profile-details = Name and organization
 connections-network-advanced = Network & advanced
 connections-timeout-summary = Timeout: { $seconds } s
 connections-custom-ca = Custom CA certificate
@@ -732,5 +733,4 @@ connections-display-tab = Display
 connections-advanced-tab = Advanced
 connections-launch-options = Optional launch parameters
 connections-configured = Configured
-connections-rdp-resources-summary = Clipboard: { $clipboard } · Audio: { $audio } · Microphone: { $microphone } · Shared folders: { $folders }
 connections-query-timeout-summary = Query timeout: { $seconds } s

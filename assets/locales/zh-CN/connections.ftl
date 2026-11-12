@@ -721,6 +721,7 @@ connections-group-parent-missing = 分组引用的上级分组不存在。
 connections-group-cycle = 不能将分组放入自身或其子组中。
 
 connections-display-name-optional = 显示名称（可选）
+connections-profile-details = 名称与分组
 connections-network-advanced = 网络与高级设置
 connections-timeout-summary = 超时：{ $seconds } 秒
 connections-custom-ca = 自定义 CA 证书
@@ -732,5 +733,4 @@ connections-display-tab = 显示
 connections-advanced-tab = 高级
 connections-launch-options = 可选启动参数
 connections-configured = 已配置
-connections-rdp-resources-summary = 剪贴板：{ $clipboard } · 声音：{ $audio } · 麦克风：{ $microphone } · 共享目录：{ $folders }
 connections-query-timeout-summary = 查询超时：{ $seconds } 秒

@@ -53,6 +53,42 @@ fn signed_upgrades_and_difference_tiles_match_freerdp() {
 }
 
 #[test]
+fn new_bitmap_context_refines_shared_tiles_and_survives_context_deletion() {
+    // A codec context identifies a progressively rendered bitmap, while the
+    // coefficient/sign state belongs to tiles shared by those bitmaps. A new
+    // bitmap can refine a tile initialized by an earlier bitmap.
+    for deleted in [10, 20] {
+        let mut streams = Reader::new(include_bytes!("../fixtures/progressive-upgrades.bin"));
+        let expected = include_bytes!("../fixtures/progressive-upgrades.bgra");
+        let mut decoder = Decoder::new(64 * 64 * 4);
+        for (frame, context) in [10, 20, if deleted == 10 { 20 } else { 10 }]
+            .into_iter()
+            .enumerate()
+        {
+            decoder.begin_frame();
+            let length = streams.u32_le().unwrap() as usize;
+            let tiles = decoder
+                .decode_bitmap(1, context, 64, 64, streams.take(length).unwrap())
+                .unwrap();
+            assert_eq!(tiles.len(), 1);
+            let pixels = &expected[frame * 64 * 64 * 4..(frame + 1) * 64 * 64 * 4];
+            for (actual, expected) in tiles[0].pixels.iter().zip(pixels) {
+                assert!(actual.abs_diff(*expected) <= 1);
+            }
+            decoder.end_frame();
+            if frame == 1 {
+                decoder.delete_context(1, deleted);
+            }
+        }
+        decoder.delete_context(1, if deleted == 10 { 20 } else { 10 });
+        assert!(decoder.surfaces[&1].tiles[&(0, 0)].pass.is_none());
+        assert_eq!(decoder.bytes, TILE_BYTES);
+        decoder.delete_surface(1);
+        assert_eq!(decoder.bytes, 0);
+    }
+}
+
+#[test]
 fn shared_tile_regions_keep_refinement_alive_after_the_original_context_is_deleted() {
     for tile_first in [false, true] {
         let mut decoder = Decoder::new(64 * 64 * 4);
@@ -514,7 +550,7 @@ fn later_progressive_bitmap_does_not_overwrite_an_intervening_repaint() {
 }
 
 #[test]
-fn invalid_upgrade_context_quantization_and_region_bounds_are_rejected() {
+fn invalid_upgrade_state_quantization_and_region_bounds_are_rejected() {
     let first = packet(
         &[initial(0xccc6, false, 0, &[0; 4])],
         [0, 0, 64, 64],
@@ -523,10 +559,22 @@ fn invalid_upgrade_context_quantization_and_region_bounds_are_rejected() {
     );
     let upgrade = packet(&[refinement([&[0; 8]; 3])], [0, 0, 64, 64], 6, None);
     let mut decoder = Decoder::new(64 * 64 * 4);
-    assert!(decoder.decode_bitmap(1, 10, 64, 64, &upgrade).is_err());
-    decoder.decode_bitmap(1, 10, 64, 64, &first).unwrap();
     for _ in 0..2 {
-        assert!(decoder.decode_bitmap(1, 20, 64, 64, &upgrade).is_err());
+        assert!(matches!(
+            decoder.decode_bitmap(1, 20, 64, 64, &upgrade),
+            Err(Error::Invalid("progressive upgrade without tile"))
+        ));
+        assert!(!decoder.surfaces[&1].contexts.contains(&20));
+        assert_eq!(decoder.bytes, 0);
+    }
+    decoder.decode_bitmap(1, 10, 64, 64, &first).unwrap();
+    let larger = packet(&[refinement([&[]; 3])], [0, 0, 64, 64], 8, None);
+    let original_bytes = decoder.bytes;
+    for _ in 0..2 {
+        assert!(matches!(
+            decoder.decode_bitmap(1, 20, 64, 64, &larger),
+            Err(Error::Invalid("progressive bit position"))
+        ));
         assert!(!decoder.surfaces[&1].contexts.contains(&20));
         assert!(
             !decoder.surfaces[&1].tiles[&(0, 0)]
@@ -536,13 +584,24 @@ fn invalid_upgrade_context_quantization_and_region_bounds_are_rejected() {
                 .contexts
                 .contains(&20)
         );
+        assert_eq!(decoder.bytes, original_bytes);
     }
-    let larger = packet(&[refinement([&[]; 3])], [0, 0, 64, 64], 8, None);
     assert!(decoder.decode_bitmap(1, 10, 64, 64, &larger).is_err());
     let bad_rect = packet(&[], [1, 0, 64, 64], 6, None);
     assert!(decoder.decode_bitmap(1, 10, 64, 64, &bad_rect).is_err());
     let bad_quant = packet(&[], [0, 0, 64, 64], 6, Some(9));
     assert!(decoder.decode_bitmap(1, 10, 64, 64, &bad_quant).is_err());
+    decoder.delete_context(1, 10);
+    for context in [10, 20] {
+        assert!(matches!(
+            decoder.decode_bitmap(1, context, 64, 64, &upgrade),
+            Err(Error::Invalid("progressive upgrade without tile state"))
+        ));
+        assert!(decoder.surfaces[&1].contexts.is_empty());
+        assert_eq!(decoder.bytes, TILE_BYTES);
+    }
+    decoder.delete_surface(1);
+    assert_eq!(decoder.bytes, 0);
 }
 
 #[test]

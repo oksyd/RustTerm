@@ -29,6 +29,7 @@ impl RdpView {
     }
 
     pub(super) fn drop_control(&mut self) {
+        self.cursor.suspend_native();
         self.control = KeyboardControl::Released;
         self.capture_task = None;
         self.release_gesture.reset();

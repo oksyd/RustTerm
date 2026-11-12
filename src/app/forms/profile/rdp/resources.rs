@@ -3,7 +3,8 @@ use rustterm::i18n::messages as i18n_key;
 
 impl ProfileForm {
     pub(super) fn rdp_resources(&self, cx: &mut Context<Self>) -> AnyElement {
-        section(i18n_key::RDP_LOCAL_RESOURCES)
+        column()
+            .gap(px(12.))
             .child(self.rdp_choices(
                 "rdp-clipboard",
                 i18n_key::CONNECTIONS_CLIPBOARD,
@@ -162,13 +163,15 @@ impl ProfileForm {
             );
         }
         body.child(
-            ui::text_button_enabled(
-                "rdp-add-share",
-                i18n_key::RDP_SHARE_LOCAL_DIRECTORY,
-                ButtonStyle::Neutral,
-                !self.native_pending && self.rdp.settings.shared_folders.len() < 16,
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.choose_shared_directory(cx))),
+            div().flex().child(
+                ui::text_button_enabled(
+                    "rdp-add-share",
+                    i18n_key::RDP_SHARE_LOCAL_DIRECTORY,
+                    ButtonStyle::Neutral,
+                    !self.native_pending && self.rdp.settings.shared_folders.len() < 16,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.choose_shared_directory(cx))),
+            ),
         )
         .into_any_element()
     }
