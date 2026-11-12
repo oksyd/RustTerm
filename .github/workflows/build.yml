@@ -79,6 +79,11 @@ jobs:
       - name: Test release packaging
         shell: bash
         run: python -m unittest discover -s tools/release -p test_release.py
+      - name: Test shell integration
+        if: runner.os == 'Linux'
+        env:
+          RUSTTERM_TEST_ZSH: zsh
+        run: cargo test --locked --test pty shell_interaction
       - name: Test and package Ubuntu
         if: runner.os == 'Linux'
         run: |
@@ -94,7 +99,6 @@ jobs:
           cargo test --locked --lib session::actor::
           cargo test --locked --bin rustterm app::terminal_view::
           cargo test --locked --bin rustterm app::workspace::palette::shortcut_tests
-          RUSTTERM_TEST_ZSH=zsh cargo test --locked --test pty shell_interaction
           cargo test --locked --lib session::local::
           cargo test --locked --lib session::ssh::
           cargo test --locked --bin rustterm app::workspace::ports::

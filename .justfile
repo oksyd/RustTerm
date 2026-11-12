@@ -7,12 +7,13 @@ publish:
   cargo publish
 
 ci:
+  @if ! "${RUSTTERM_TEST_ZSH:-zsh}" --version >/dev/null 2>&1; then echo "PTY tests require Zsh. Install zsh or set RUSTTERM_TEST_ZSH to its executable." >&2; exit 1; fi
   cargo fmt --all --check
   cargo fmt --manifest-path crates/rustrdp/Cargo.toml --check
   # RustTerm is a binary application with no feature matrix or crates.io release.
   cargo check --locked --all-targets
   cargo clippy --locked --all-targets -- -D warnings
-  cargo nextest run --locked --all-targets
+  RUSTTERM_TEST_ZSH="${RUSTTERM_TEST_ZSH:-zsh}" cargo nextest run --locked --all-targets
   cargo test --locked --doc
   cargo doc --locked --no-deps
   # rustrdp is a library: retain its public API documentation and feature checks.

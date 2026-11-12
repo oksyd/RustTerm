@@ -75,18 +75,22 @@ history -s 'printf rustterm_search_needle'
 fn zsh(remapped: bool, remote: bool) -> Option<(Session, tempfile::TempDir)> {
     let explicit = std::env::var("RUSTTERM_TEST_ZSH").ok();
     let shell = explicit.as_deref().unwrap_or("zsh");
-    if ProcessCommand::new(shell)
+    if !ProcessCommand::new(shell)
         .arg("--version")
         .output()
-        .is_err()
+        .is_ok_and(|output| output.status.success())
     {
         assert!(explicit.is_none(), "configured test Zsh is unavailable");
         eprintln!("skipping Zsh PTY test: install zsh or set RUSTTERM_TEST_ZSH");
         return None;
     }
     let fixture = tempfile::tempdir().unwrap();
+    // Exercise our startup files without loading the host's global rc files.
+    // Ubuntu's global zshrc calls compinit, which can block on a directory trust
+    // prompt on CI runners. Keep RCS enabled so the fixture and integration load.
     // Optional search paths allow testing an extracted shell without installing it.
     fs::write(fixture.path().join(".zshenv"), r#"
+unsetopt GLOBAL_RCS
 [[ -z ${RUSTTERM_TEST_ZSH_FPATH-} ]] || fpath=($RUSTTERM_TEST_ZSH_FPATH $fpath)
 [[ -z ${RUSTTERM_TEST_ZSH_MODULE_PATH-} ]] || module_path=($RUSTTERM_TEST_ZSH_MODULE_PATH $module_path)
 "#).unwrap();
