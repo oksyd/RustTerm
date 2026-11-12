@@ -1,8 +1,17 @@
+## [0.1.11] - 2026-11-12
+
+### 🚀 Features
+
+- Add SSH auto-forwarding
 ## [0.1.10] - 2026-11-09
 
 ### 🐛 Bug Fixes
 
 - *(rdp)* Correct NSCodec orientation and Progressive context lifetime
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.10
 ## [0.1.9] - 2026-11-09
 
 ### 🐛 Bug Fixes
