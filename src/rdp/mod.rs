@@ -8,6 +8,7 @@ mod audio;
 #[path = "unsupported/audio.rs"]
 mod audio;
 mod commands;
+mod connection_error;
 #[cfg(target_os = "linux")]
 mod downloads;
 #[cfg(not(target_os = "linux"))]
@@ -21,6 +22,7 @@ mod files;
 mod files;
 mod frames;
 mod handoff;
+mod input_worker;
 mod keepalive;
 mod protocol;
 #[cfg(target_os = "linux")]
@@ -30,6 +32,8 @@ mod shared_drives;
 mod shared_drives;
 mod tls;
 mod transport;
+
+pub use connection_error::{ConnectionFailure, ConnectionStage};
 
 use crate::config::{RdpConfig, Secret};
 use std::sync::{
@@ -57,6 +61,11 @@ pub enum RdpError {
         crate::i18n::tr(i18n_key::RDP_COULD_NOT_CONNECT_TO_THE_RDP_SERVER)
     )]
     Connection,
+    #[error("{message}: {stage} ({failure})", message = crate::i18n::tr(i18n_key::RDP_CONNECTION_FAILED))]
+    Network {
+        stage: ConnectionStage,
+        failure: ConnectionFailure,
+    },
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::RDP_RDP_TLS_VERIFICATION_OR_HANDSHAKE_FAILED)
@@ -80,6 +89,10 @@ pub enum RdpError {
     Unsupported(&'static str),
     #[error("{message} (0x{0:08x})", message = crate::i18n::tr(i18n_key::RDP_THE_RDP_SERVER_RETURNED_AN_ERROR))]
     Server(u32),
+    #[error("{message} (0x{code:08x})", message = connection_error::negotiation_message(*code))]
+    ServerNegotiation { code: u32 },
+    #[error("{message} (0x{code:08x})", message = connection_error::disconnect_message(*code))]
+    ServerDisconnect { code: u32 },
     #[error("{message}: {0}", message = crate::i18n::tr(i18n_key::RDP_RDP_EXCEEDED_THE_FRAME_MESSAGE_OR_CLIPBOARD_SIZE_LIMIT))]
     Limit(&'static str),
     #[error("{}", crate::i18n::tr(i18n_key::RDP_THE_RDP_OPERATION_TIMED_OUT))]
@@ -153,6 +166,7 @@ impl RdpError {
         match self {
             Self::InvalidConfig => "rdp-error-invalid-config",
             Self::Connection => "rdp-error-connection",
+            Self::Network { failure, .. } => failure.code(),
             Self::Tls => "rdp-error-tls",
             Self::CertificateRejected => "rdp-error-certificate-rejected",
             Self::NlaRequired => "rdp-error-nla-required",
@@ -160,6 +174,8 @@ impl RdpError {
             Self::Protocol(_) => "rdp-error-protocol",
             Self::Unsupported(_) => "rdp-error-unsupported",
             Self::Server(_) => "rdp-error-server",
+            Self::ServerNegotiation { .. } => "rdp-error-server-negotiation",
+            Self::ServerDisconnect { .. } => "rdp-error-server-disconnect",
             Self::Limit(_) => "rdp-error-limit",
             Self::Timeout => "rdp-error-timeout",
             Self::ClipboardUnavailable => "rdp-error-clipboard-unavailable",
@@ -180,9 +196,21 @@ impl RdpError {
 
     pub fn diagnostic_context(&self) -> Option<&'static str> {
         match self {
+            Self::ServerNegotiation { .. } => Some("rdp-neg-failure"),
+            Self::ServerDisconnect { .. } => Some("set-error-info"),
+            Self::Network { stage, .. } => Some(stage.code()),
             Self::Protocol(context) | Self::Unsupported(context) | Self::Limit(context) => {
                 Some(context)
             }
+            _ => None,
+        }
+    }
+
+    pub fn server_code(&self) -> Option<u32> {
+        match self {
+            Self::Server(code)
+            | Self::ServerNegotiation { code }
+            | Self::ServerDisconnect { code } => Some(*code),
             _ => None,
         }
     }
@@ -195,6 +223,8 @@ impl From<rustrdp::Error> for RdpError {
             rustrdp::Error::Backpressure => Self::Busy,
             rustrdp::Error::Unsupported(feature) => Self::Unsupported(feature),
             rustrdp::Error::Server(code) => Self::Server(code),
+            rustrdp::Error::NegotiationFailure(code) => Self::ServerNegotiation { code },
+            rustrdp::Error::Disconnect(code) => Self::ServerDisconnect { code },
             rustrdp::Error::Invalid(context) => Self::Protocol(context),
             rustrdp::Error::Truncated => Self::Protocol("truncated protocol message"),
         }
@@ -215,7 +245,8 @@ pub struct RdpFrame {
     /// Negotiated desktop color depth; tile pixels always use packed BGRA8.
     pub bits_per_pixel: u16,
     pub tiles: Vec<Arc<RdpTile>>,
-    /// Remote software pointer pixels (or a server hide request) replace the local cursor.
+    /// Hide the platform arrow. Full desktops use RdpHandle::pointer for the
+    /// separate cursor; RemoteApp snapshots retain composed pointer pixels.
     pub hide_local_pointer: bool,
 }
 
@@ -250,10 +281,27 @@ pub struct RdpPerformance {
     pub frames: u64,
     pub snapshot_time: std::time::Duration,
     pub max_snapshot_time: std::time::Duration,
+    pub command_latency: RdpLatency,
+    pub writer_latency: RdpLatency,
     /// Optional counts of snapshot tiles checked outside the reported damage.
     pub snapshot_audit: Option<(u64, u64, u64)>,
     /// H.264 decode calls and calls that produced no picture.
     pub avc_decode_audit: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Default)]
+pub struct RdpLatency {
+    pub samples: u64,
+    pub total: std::time::Duration,
+    pub max: std::time::Duration,
+}
+
+impl RdpLatency {
+    fn record(&mut self, elapsed: std::time::Duration) {
+        self.samples += 1;
+        self.total += elapsed;
+        self.max = self.max.max(elapsed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -421,6 +469,21 @@ impl RdpCommand {
 struct QueuedCommand {
     command: RdpCommand,
     paste: Option<CancellationToken>,
+    queued_at: std::time::Instant,
+    completion: Option<input_worker::CommandCompletion>,
+    synchronize: bool,
+}
+
+impl QueuedCommand {
+    fn new(command: RdpCommand, paste: Option<CancellationToken>) -> Self {
+        Self {
+            command,
+            paste,
+            queued_at: std::time::Instant::now(),
+            completion: None,
+            synchronize: false,
+        }
+    }
 }
 
 struct Control {
@@ -445,7 +508,8 @@ pub struct RdpSender {
     control: Arc<Control>,
 }
 impl RdpSender {
-    /// Reports a submitted desktop snapshot without competing with user input.
+    /// Reports a complete desktop snapshot consumed by the renderer, without
+    /// waiting for a monitor refresh or competing with the user input queue.
     /// Later receipts include earlier frames; only the latest feedback is needed.
     pub fn frame_presented(&self, token: rustrdp::FrameToken) {
         let latest = self
@@ -546,6 +610,7 @@ impl RdpSender {
             .pending_paste
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let synchronize = command.invalidates_paste() && pending.is_some();
         if command.invalidates_paste()
             && let Some(previous) = pending.take()
         {
@@ -566,8 +631,10 @@ impl RdpSender {
             *pending = Some(token.clone());
             token
         });
+        let mut queued = QueuedCommand::new(command, paste);
+        queued.synchronize = synchronize;
         self.commands
-            .try_send(QueuedCommand { command, paste }, pending.as_ref())
+            .try_send(queued, pending.as_ref())
             .map_err(|error| {
                 // The mailbox cancels paste before publishing its release barrier.
                 pending.take();
@@ -585,6 +652,8 @@ impl RdpSender {
 pub struct RdpHandle {
     pub events: mpsc::Receiver<RdpEvent>,
     pub frames: watch::Receiver<Option<Arc<RdpFrame>>>,
+    /// Cursor updates independent of complete desktop frames; None for RemoteApp.
+    pub pointer: watch::Receiver<Option<rustrdp::graphics::PointerState>>,
     sender: RdpSender,
 }
 impl RdpHandle {
@@ -618,18 +687,13 @@ impl RdpClient {
         static RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, std::io::Error>> =
             OnceLock::new();
         let runtime = RUNTIME
-            .get_or_init(|| {
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(1)
-                    .thread_name("rustterm-rdp")
-                    .enable_all()
-                    .build()
-            })
+            .get_or_init(create_runtime)
             .as_ref()
             .map_err(|_| RdpError::Runtime)?;
         let (commands_tx, commands) = commands::channel(COMMAND_CAPACITY, COMMAND_BYTE_LIMIT);
         let (events_tx, events) = mpsc::channel(16);
         let (frames_tx, frames) = watch::channel(None);
+        let (pointer_tx, pointer) = watch::channel(None);
         let (presented_tx, presented) = watch::channel(None);
         let stop = CancellationToken::new();
         let audio_muted = Arc::new(AtomicBool::new(false));
@@ -651,6 +715,7 @@ impl RdpClient {
             }),
         };
         let redirection = protocol::RedirectionState {
+            pointer: pointer_tx,
             cache_directory,
             presentation,
             audio_muted,
@@ -675,6 +740,7 @@ impl RdpClient {
         Ok(RdpHandle {
             events,
             frames,
+            pointer,
             sender,
         })
     }
@@ -706,9 +772,67 @@ fn check_dimensions(width: u16, height: u16) -> Result<()> {
     }
 }
 
+fn create_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    // Use a small shared pool for independent sessions and network tasks.
+    // CPU-heavy packet decoding separately hands off its worker before running.
+    let workers = std::thread::available_parallelism().map_or(2, |count| count.get().clamp(2, 4));
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_name("rustterm-rdp")
+        .enable_all()
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_flushes_input_while_all_workers_start_decoding() {
+        use std::sync::mpsc as blocking;
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+
+        let runtime = create_runtime().unwrap();
+        let (busy_tx, busy_rx) = blocking::channel();
+        let mut decoders = Vec::new();
+        let mut releases = Vec::new();
+        for _ in 0..runtime.metrics().num_workers() {
+            let (release_tx, release_rx) = blocking::channel();
+            releases.push(release_tx);
+            let busy_tx = busy_tx.clone();
+            decoders.push(runtime.spawn(async move {
+                protocol::decode_packet(|| {
+                    busy_tx.send(()).unwrap();
+                    // Model synchronous graphics work until transport gets a
+                    // turn. The test thread releases every wait before asserting.
+                    let _ = release_rx.recv_timeout(Duration::from_secs(5));
+                });
+            }));
+        }
+        for _ in 0..decoders.len() {
+            busy_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        let (sent_tx, sent_rx) = blocking::channel();
+        let transport = runtime.spawn(async move {
+            let (client, mut peer) = tokio::io::duplex(64);
+            let writer =
+                transport::Writer::new(transport::Framed::new(client), Duration::from_secs(2));
+            writer.enqueue(vec![4, 4, 0, 0], None, None).await.unwrap();
+            let mut received = [0; 4];
+            peer.read_exact(&mut received).await.unwrap();
+            sent_tx.send(received).unwrap();
+        });
+        let received = sent_rx.recv_timeout(Duration::from_secs(1));
+        for release in releases {
+            let _ = release.send(());
+        }
+        for decoder in decoders {
+            runtime.block_on(decoder).unwrap();
+        }
+        runtime.block_on(transport).unwrap();
+        assert_eq!(received.unwrap(), [4, 4, 0, 0]);
+    }
 
     #[test]
     fn protocol_errors_preserve_static_context_for_display_and_diagnostics() {
@@ -830,7 +954,7 @@ mod tests {
             // Cancellation cannot depend on which ready branch select! chooses.
             let pending = commands.try_recv().unwrap().paste.unwrap();
             assert!(pending.is_cancelled());
-            assert!(!commands.is_empty());
+            assert!(commands.try_recv().unwrap().synchronize);
             assert!(!sender.control.stop.is_cancelled());
         }
     }

@@ -8,7 +8,7 @@ use crate::{
     compression::{BulkCompression, BulkDecoder},
     connection::{self, ActivationFinalizer},
     graphics::{Damage, FrameMarker, Graphics, PointerKind},
-    input::InputState,
+    input::SessionInput,
     wire::{self, FrameKind, Reader},
 };
 
@@ -169,7 +169,7 @@ pub struct Session {
     info: ConnectionInfo,
     state: State,
     graphics: Graphics,
-    input: InputState,
+    input: SessionInput,
     channels: Channels,
     remote_windows: crate::remote_app::Windows,
     bulk: Option<(BulkCompression, BulkDecoder)>,
@@ -201,6 +201,7 @@ impl Session {
             return Err(Error::Invalid("session channel IDs"));
         }
         Ok(Self {
+            input: SessionInput::new(&info),
             frame_acknowledgements: Acknowledgements::new(info.frame_acknowledgements),
             multitransport: crate::multitransport::State::default(),
             message_channel: connection::MessageChannel::default(),
@@ -213,7 +214,6 @@ impl Session {
             config,
             info,
             state: State::Active,
-            input: InputState::default(),
             fragment: None,
             #[cfg(feature = "graphics")]
             gfx: None,
@@ -327,6 +327,7 @@ impl Session {
     ) -> Result<Vec<Event>> {
         let result = self.process_packet(packet, &mut on_frame);
         if result.is_err() {
+            self.input.close();
             self.state = State::Closed;
             self.fragment = None;
             self.graphics.cancel_frame();
@@ -361,6 +362,7 @@ impl Session {
             }
             FrameKind::X224 => {
                 if let Some(reason) = wire::mcs_disconnect(packet)? {
+                    self.input.close();
                     self.state = State::Closed;
                     self.fragment = None;
                     self.graphics.cancel_frame();
@@ -410,8 +412,10 @@ impl Session {
 
     /// Acknowledge consumption of a completed frame and all earlier received frames.
     ///
-    /// Call this after presentation, or after deliberately discarding frames that
-    /// will never be displayed. Retain the token with its pixels when coalescing
+    /// Call this after rendering the frame, or after deliberately discarding
+    /// frames that will never be displayed. For graphics pipeline frames copied
+    /// into the output buffer, use [`Self::acknowledge_graphics_output`] without
+    /// waiting for presentation. Retain the token with its pixels when coalescing
     /// updates; completing the newest token also acknowledges earlier skipped
     /// frames. This operation emits protocol packets but never submits them.
     ///
@@ -422,6 +426,22 @@ impl Session {
     /// servers to interpret it as acknowledgement of all in-flight frames,
     /// including newer frames. This engine never synthesizes that special ID.
     pub fn acknowledge_frame(&mut self, token: &FrameToken) -> Result<Vec<Event>> {
+        self.acknowledge_completed_frame(token, true)
+    }
+
+    /// Acknowledge completed graphics pipeline frames after copying their mapped
+    /// surfaces to the graphics output buffer (MS-RDPEGFX 3.3.5.12). This does not
+    /// require a monitor refresh. Legacy Surface frames remain pending until
+    /// [`Self::acknowledge_frame`] confirms presentation (MS-RDPRFX 2.2.3.1).
+    pub fn acknowledge_graphics_output(&mut self, token: &FrameToken) -> Result<Vec<Event>> {
+        self.acknowledge_completed_frame(token, false)
+    }
+
+    fn acknowledge_completed_frame(
+        &mut self,
+        token: &FrameToken,
+        presented: bool,
+    ) -> Result<Vec<Event>> {
         if !self.is_active() {
             return Ok(Vec::new());
         }
@@ -429,7 +449,7 @@ impl Session {
         #[cfg(feature = "graphics")]
         let channels = &mut self.channels;
         self.frame_acknowledgements
-            .acknowledge_with(token, |id, kind| match kind {
+            .acknowledge_with(token, presented, |id, kind| match kind {
                 frames::Acknowledgement::Legacy => Ok(vec![Event::Send(wire::share_data(
                     info.user_id,
                     info.io_channel_id,
@@ -471,15 +491,48 @@ impl Session {
             input,
             Input::Pointer { .. } | Input::MouseButton { .. } | Input::Wheel { .. }
         );
-        let packets = self.input.encode(input, &self.info)?;
+        let packets = self.input.encode_local(input, &self.info)?;
         let mut events: Vec<_> = packets.into_iter().map(Event::Send).collect();
         if moves_pointer {
-            let (x, y) = self.input.position();
-            if self.graphics.move_pointer(x, y)? {
-                events.push(Event::GraphicsChanged);
-            }
+            events.extend(self.sync_input_pointer()?);
         }
         Ok(events)
+    }
+
+    /// Obtain an input encoder that can run independently of graphics decoding.
+    /// It shares pressed keys/buttons with [`Self::input`] and [`Self::keep_awake`].
+    pub fn input_controller(&self) -> crate::InputController {
+        self.input.controller()
+    }
+
+    /// Select whether cursor pixels are included in the desktop framebuffer.
+    /// Enabled by default. Disable when the renderer uses [`Graphics::pointer`]
+    /// to draw a separate local cursor; existing cursor pixels are restored.
+    pub fn set_pointer_composition(&mut self, enabled: bool) {
+        self.graphics.set_pointer_composition(enabled);
+    }
+
+    /// Enable concurrent input after queuing all returned activation packets.
+    /// Reactivation and terminal errors suspend it automatically. Calling this
+    /// while inactive or after a protocol error does not enable input.
+    pub fn resume_input(&self) {
+        if self.is_active() {
+            self.input.resume(&self.info);
+        }
+    }
+
+    /// Apply the newest independently encoded pointer position to the local
+    /// software cursor. Does not transmit input or change held keys/buttons.
+    pub fn sync_input_pointer(&mut self) -> Result<Vec<Event>> {
+        if self.is_active()
+            && let Some((x, y)) = self.input.take_pointer()
+            && self
+                .graphics
+                .move_pointer(x.min(self.info.width - 1), y.min(self.info.height - 1))?
+        {
+            return Ok(vec![Event::GraphicsChanged]);
+        }
+        Ok(Vec::new())
     }
 
     /// Encode a small remote pointer motion and restore its current position.
@@ -518,6 +571,7 @@ impl Session {
         }
         let actions = self.channels.set_clipboard(text);
         if matches!(&actions, Err(Error::Backpressure)) {
+            self.input.close();
             self.state = State::Closed;
         }
         let actions = actions?;
@@ -598,6 +652,7 @@ impl Session {
         }
         let actions = operation(&mut self.channels);
         if matches!(actions, Err(Error::Backpressure)) {
+            self.input.close();
             self.state = State::Closed;
         }
         let mut events = Vec::new();
@@ -615,6 +670,7 @@ impl Session {
         }
         let actions = self.channels.request_clipboard();
         if matches!(&actions, Err(Error::Backpressure)) {
+            self.input.close();
             self.state = State::Closed;
         }
         let actions = actions?;
@@ -636,6 +692,7 @@ impl Session {
         }
         let actions = self.channels.resize(width, height);
         if matches!(&actions, Err(Error::Backpressure)) {
+            self.input.close();
             self.state = State::Closed;
         }
         let actions = actions?;
@@ -779,6 +836,7 @@ impl Session {
                 let packets = connection::reactivate(&self.config, &mut self.info, packet)?;
                 self.channels.set_chunk_size(self.info.vc_chunk_size)?;
                 self.graphics.resize(self.info.width, self.info.height)?;
+                self.input.resize(self.info.width, self.info.height);
                 self.frame_acknowledgements
                     .reset(self.info.frame_acknowledgements);
                 self.state = State::Activating(ActivationFinalizer::new(&self.info));
@@ -790,12 +848,9 @@ impl Session {
                 let length = usize::from(reader.u16_le()?);
                 reader.skip(length)?;
                 reader.finish()?;
-                events.extend(
-                    self.input
-                        .encode(Input::ReleaseAll, &self.info)?
-                        .into_iter()
-                        .map(Event::Send),
-                );
+                // MS-RDPBCGR 3.2.5.5.1: disable input on Deactivate All.
+                // Reconcile held keys only after the next activation completes.
+                self.input.suspend();
                 #[cfg(feature = "graphics")]
                 if let Some(gfx) = &mut self.gfx {
                     gfx.deactivate();
@@ -870,6 +925,12 @@ impl Session {
         {
             if finalizer.advance_data(share_id, kind, &payload)? {
                 self.state = State::Active;
+                events.extend(
+                    self.input
+                        .release_after_activation(&self.info)?
+                        .into_iter()
+                        .map(Event::Send),
+                );
                 events.push(Event::Resized {
                     width: self.info.width,
                     height: self.info.height,
@@ -924,7 +985,7 @@ impl Session {
                 if code == 0 {
                     Ok(false)
                 } else {
-                    Err(Error::Server(code))
+                    Err(Error::Disconnect(code))
                 }
             }
             // These notifications carry no desktop pixels. Hardware LEDs, local
@@ -1113,6 +1174,292 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_input_encodes_while_graphics_callback_is_blocked() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+                mpsc,
+            },
+            time::Duration,
+        };
+        let mut session = session();
+        session.info.surface_commands = 0x52;
+        session.resume_input();
+        let input = session.input_controller();
+        let mut surface = surface_marker(0, 1);
+        surface.extend(surface_marker(1, 1));
+        let packet = fast(&[(4, &surface)]);
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let finished = Arc::new(AtomicBool::new(false));
+        let decoded = finished.clone();
+        let worker = std::thread::spawn(move || {
+            session
+                .process_with_frames(&packet, |_| {
+                    ready_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(3));
+                    decoded.store(true, Ordering::Release);
+                })
+                .unwrap();
+            session
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let batch = input
+            .encode(Input::Pointer { x: 5, y: 6 })
+            .unwrap()
+            .unwrap();
+        let independent = !finished.load(Ordering::Acquire);
+        let _ = release_tx.send(());
+        let mut session = worker.join().unwrap();
+        assert!(independent, "input waited for the graphics callback");
+        assert!(!batch.packets.is_empty());
+        assert!(batch.generation.is_valid());
+        assert!(batch.pointer_changed);
+        assert_eq!(session.graphics.pointer_position(), (0, 0));
+        session.sync_input_pointer().unwrap();
+        assert_eq!(session.graphics.pointer_position(), (1, 1));
+        assert!(session.sync_input_pointer().unwrap().is_empty());
+    }
+
+    #[test]
+    fn paste_does_not_consume_a_pending_concurrent_pointer_redraw() {
+        let mut session = session();
+        session.resume_input();
+        session
+            .input_controller()
+            .encode(Input::Pointer { x: 1, y: 1 })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            session.input(Input::Paste).unwrap().as_slice(),
+            [Event::Send(_)]
+        ));
+        assert_eq!(session.graphics.pointer_position(), (0, 0));
+        session.sync_input_pointer().unwrap();
+        assert_eq!(session.graphics.pointer_position(), (1, 1));
+    }
+
+    #[test]
+    fn concurrent_input_shares_modifiers_and_releases_in_both_wire_formats() {
+        for fastpath in [false, true] {
+            let mut session = session();
+            session.info.fastpath_input = fastpath;
+            let input = session.input_controller();
+            assert!(
+                input
+                    .encode(Input::Pointer { x: 1, y: 1 })
+                    .unwrap()
+                    .is_none()
+            );
+            session.resume_input();
+            input
+                .encode(Input::Key {
+                    scancode: 0x1d,
+                    pressed: true,
+                })
+                .unwrap()
+                .unwrap();
+            input
+                .encode(Input::MouseButton {
+                    button: crate::MouseButton::Left,
+                    pressed: true,
+                    x: 1,
+                    y: 1,
+                })
+                .unwrap()
+                .unwrap();
+            assert!(session.keep_awake().unwrap().is_empty());
+            let released = session.input(Input::ReleaseAll).unwrap();
+            assert!(released.iter().any(|event| matches!(event, Event::Send(_))));
+            assert!(
+                input
+                    .encode(Input::Key {
+                        scancode: 0x1d,
+                        pressed: false
+                    })
+                    .unwrap()
+                    .unwrap()
+                    .packets
+                    .is_empty()
+            );
+            assert!(!session.keep_awake().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn deactivation_defers_releases_until_reactivation_with_negotiated_input_format() {
+        for fastpath in [false, true] {
+            let mut session = session();
+            session.info.fastpath_input = !fastpath;
+            session.info.width = 4;
+            session.info.height = 3;
+            session.resume_input();
+            let input = session.input_controller();
+            for operation in [
+                Input::Key {
+                    scancode: 0x1d,
+                    pressed: true,
+                },
+                Input::MouseButton {
+                    button: crate::MouseButton::Left,
+                    pressed: true,
+                    x: 3,
+                    y: 2,
+                },
+                Input::MouseButton {
+                    button: crate::MouseButton::Back,
+                    pressed: true,
+                    x: 3,
+                    y: 2,
+                },
+            ] {
+                input.encode(operation).unwrap().unwrap();
+            }
+            // These releases have been encoded but might not reach the server
+            // before Deactivate All invalidates the writer's queued generation.
+            let pending = input.encode(Input::ReleaseAll).unwrap().unwrap();
+            let deactivate = wire::share_control(1002, 6, &[1, 0, 0, 0, 0, 0]).unwrap();
+            assert!(
+                session
+                    .process(&share_packet(&deactivate))
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!pending.generation.is_valid());
+            session.resume_input();
+            assert!(input.encode(Input::ReleaseAll).unwrap().is_none());
+
+            let mut demand = crate::connection::tests::demand_active();
+            let bitmap = demand
+                .windows(4)
+                .position(|bytes| bytes == [2, 0, 28, 0])
+                .unwrap();
+            demand[bitmap + 12..bitmap + 16].copy_from_slice(&[2, 0, 2, 0]);
+            let capability = demand
+                .windows(4)
+                .position(|bytes| bytes == [13, 0, 88, 0])
+                .unwrap();
+            let flags: u16 = if fastpath { 0x39 } else { 0x11 };
+            demand[capability + 4..capability + 6].copy_from_slice(&flags.to_le_bytes());
+            session.process(&share_packet(&demand)).unwrap();
+            for (kind, body) in [
+                (31, vec![1, 0, 0, 0]),
+                (20, vec![4, 0, 0, 0, 0, 0, 0, 0]),
+                (20, vec![2, 0, 0, 0, 0, 0, 0, 0]),
+            ] {
+                assert!(session.process(&slow(kind, &body)).unwrap().is_empty());
+                assert!(input.encode(Input::ReleaseAll).unwrap().is_none());
+            }
+            let events = session.process(&slow(40, &[0; 8])).unwrap();
+            assert!(session.is_active());
+            assert_eq!(session.info.fastpath_input, fastpath);
+            let mut expected = crate::input::InputState::default();
+            expected
+                .encode(
+                    Input::Key {
+                        scancode: 0x1d,
+                        pressed: true,
+                    },
+                    &session.info,
+                )
+                .unwrap();
+            expected
+                .encode(
+                    Input::MouseButton {
+                        button: crate::MouseButton::Left,
+                        pressed: true,
+                        x: 1,
+                        y: 1,
+                    },
+                    &session.info,
+                )
+                .unwrap();
+            let releases: Vec<_> = events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Send(packet) => Some(packet),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                releases,
+                expected.encode(Input::ReleaseAll, &session.info).unwrap()
+            );
+            assert!(input.encode(Input::ReleaseAll).unwrap().is_none());
+            session.resume_input();
+            assert!(
+                input
+                    .encode(Input::ReleaseAll)
+                    .unwrap()
+                    .unwrap()
+                    .packets
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_input_invalidates_queued_packets_on_reactivation_failure_and_drop() {
+        let mut session = session();
+        session.resume_input();
+        let input = session.input_controller();
+        let old = input
+            .encode(Input::Pointer { x: 7, y: 7 })
+            .unwrap()
+            .unwrap();
+        let deactivate = wire::share_control(1002, 6, &[1, 0, 0, 0, 0, 0]).unwrap();
+        session.process(&share_packet(&deactivate)).unwrap();
+        assert!(!old.generation.is_valid());
+        session.resume_input();
+        assert!(
+            input
+                .encode(Input::Pointer { x: 7, y: 7 })
+                .unwrap()
+                .is_none()
+        );
+        session.state = State::Active;
+        session.info.width = 2;
+        session.info.height = 2;
+        session
+            .input
+            .release_after_activation(&session.info)
+            .unwrap();
+        session.resume_input();
+        let fresh = input
+            .encode(Input::Pointer { x: 7, y: 7 })
+            .unwrap()
+            .unwrap();
+        assert!(fresh.generation.is_valid());
+        assert!(!old.generation.is_valid());
+        assert_eq!(session.input.position(), (1, 1));
+        assert!(session.process(&[0]).is_err());
+        assert!(!fresh.generation.is_valid());
+        assert!(
+            input
+                .encode(Input::Pointer { x: 1, y: 1 })
+                .unwrap()
+                .is_none()
+        );
+
+        let session = self::session();
+        session.resume_input();
+        let input = session.input_controller();
+        let batch = input
+            .encode(Input::Pointer { x: 1, y: 1 })
+            .unwrap()
+            .unwrap();
+        drop(session);
+        assert!(!batch.generation.is_valid());
+        assert!(
+            input
+                .encode(Input::Pointer { x: 1, y: 1 })
+                .unwrap()
+                .is_none()
+        );
+    }
     pub(super) fn session() -> Session {
         let config = ClientConfig {
             width: 2,
@@ -1722,6 +2069,20 @@ mod tests {
     }
 
     #[test]
+    fn set_error_info_retains_disconnect_codes_and_ignores_zero() {
+        for code in [0u32, 3, 4, 5, 0x1234_5678] {
+            let mut session = bulk_session(None);
+            let result = session.process(&compressed_slow(47, 0, &code.to_le_bytes()));
+            if code == 0 {
+                assert!(result.is_ok());
+                assert!(session.is_active());
+            } else {
+                assert_eq!(result.unwrap_err(), Error::Disconnect(code));
+            }
+        }
+    }
+
+    #[test]
     fn bulk_history_is_shared_by_slow_fast_and_static_channels() {
         let mut session = bulk_session(Some(BulkCompression::Rdp5));
         // Literal Save Session Info type 0, then a literal pointer position.
@@ -1742,7 +2103,7 @@ mod tests {
             session
                 .process(&compressed_slow(47, 0x21, &[0xf9, 0x10]))
                 .unwrap_err(),
-            Error::Server(1)
+            Error::Disconnect(1)
         );
     }
 

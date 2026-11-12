@@ -1,7 +1,7 @@
 use super::super::{column, field_error, hint, parse_value, row};
 use super::{ProfileForm, preserved_path};
 use crate::app::ui::{self, ButtonStyle, Icon};
-use gpui::{AnyElement, App, Context, PathPromptOptions, div, prelude::*, px, rgb};
+use gpui::{AnyElement, App, Context, PathPromptOptions, Window, div, prelude::*, px, rgb};
 use rustterm::i18n::Message;
 use rustterm::i18n::messages as i18n_key;
 use rustterm::{
@@ -12,7 +12,6 @@ use std::path::PathBuf;
 
 pub(super) const SSH_ADVANCED: &[&str] = &[
     i18n_key::CONNECTIONS_JUMP_HOSTS_COMMA_SEPARATED,
-    i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED,
     i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
     i18n_key::WORKSPACE_KEEPALIVE_INTERVAL_SECONDS_0_DISABLES,
     i18n_key::WORKSPACE_KEEPALIVE_FAILURE_LIMIT,
@@ -75,15 +74,6 @@ pub(super) fn initial_fields(
                 .collect::<Vec<_>>()
                 .join(", "),
         ),
-        (
-            i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED,
-            settings
-                .forwards
-                .iter()
-                .map(|forward| forward.description())
-                .collect::<Vec<_>>()
-                .join("; "),
-        ),
         (i18n_key::WORKSPACE_HOST, settings.host),
         (i18n_key::WORKSPACE_PORT, settings.port.to_string()),
         (i18n_key::WORKSPACE_USERNAME, settings.username),
@@ -105,11 +95,156 @@ pub(super) fn initial_fields(
 }
 
 impl ProfileForm {
+    fn edit_forward(
+        &mut self,
+        rule: Option<rustterm::config::PortForward>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forward_error = None;
+        let editor = cx.new(|cx| crate::app::port_editor::PortEditor::new(rule, cx));
+        self.forward_subscription =
+            Some(
+                cx.subscribe_in(&editor, window, |this, _, event, window, cx| {
+                    if this.prompts.is_blocked() {
+                        return;
+                    }
+                    match event {
+                        crate::app::port_editor::EditorEvent::Save { rule, .. } => {
+                            let mut rules = this.forwards.clone();
+                            if let Some(old) = rules.iter_mut().find(|old| old.id == rule.id) {
+                                *old = rule.as_ref().clone();
+                            } else {
+                                rules.push(rule.as_ref().clone());
+                            }
+                            if let Err(error) = (rustterm::session::ForwardSettings {
+                                rules: rules.clone(),
+                                automatic: this.auto_forward.clone(),
+                            })
+                            .validate()
+                            {
+                                this.forward_error = Some(error.to_string());
+                                cx.notify();
+                                return;
+                            }
+                            this.forwards = rules;
+                            this.forward_editor = None;
+                            this.forward_subscription = None;
+                            this.forward_error = None;
+                            this.fields
+                                .field(i18n_key::WORKSPACE_HOST)
+                                .read(cx)
+                                .focus(window);
+                        }
+                        crate::app::port_editor::EditorEvent::Cancel => {
+                            this.forward_editor = None;
+                            this.forward_subscription = None;
+                            this.forward_error = None;
+                            this.fields
+                                .field(i18n_key::WORKSPACE_HOST)
+                                .read(cx)
+                                .focus(window);
+                        }
+                        crate::app::port_editor::EditorEvent::Changed => {
+                            this.forward_error = None;
+                        }
+                    }
+                    cx.notify();
+                }),
+            );
+        editor.read(cx).focus(window, cx);
+        self.forward_editor = Some(editor);
+        cx.notify();
+    }
+
+    fn forward_rules(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .mt_2()
+            .child(
+                ui::text_button(
+                    "ssh-auto-ports",
+                    i18n_key::PORTS_AUTO,
+                    if self.auto_forward.enabled {
+                        ButtonStyle::Primary
+                    } else {
+                        ButtonStyle::Neutral
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.auto_forward.enabled = !this.auto_forward.enabled;
+                    cx.notify();
+                })),
+            )
+            .child(hint(i18n_key::PORTS_AUTO_HINT));
+        for (index, rule) in self.forwards.iter().enumerate() {
+            let edit = rule.clone();
+            let id = rule.id;
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .child(if rule.name.is_empty() {
+                                rule.description()
+                            } else {
+                                format!("{} · {}", rule.name, rule.description())
+                            }),
+                    )
+                    .child(
+                        ui::icon_button(("ssh-edit-port", index), Icon::Edit, i18n_key::PORTS_EDIT)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_forward(Some(edit.clone()), window, cx)
+                            })),
+                    )
+                    .child(
+                        ui::icon_button(
+                            ("ssh-remove-port", index),
+                            Icon::Trash,
+                            i18n_key::PORTS_REMOVE,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.forwards.retain(|rule| rule.id != id);
+                            cx.notify();
+                        })),
+                    ),
+            );
+        }
+        body = body.child(
+            ui::text_button("ssh-add-port", i18n_key::PORTS_ADD, ButtonStyle::Neutral)
+                .on_click(cx.listener(|this, _, window, cx| this.edit_forward(None, window, cx))),
+        );
+        if let Some(editor) = &self.forward_editor {
+            body = body.child(editor.clone());
+        }
+        if let Some(error) = &self.forward_error {
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(ui::colors().danger))
+                    .child(error.clone()),
+            );
+        }
+        body.into_any_element()
+    }
+
     pub(super) fn ssh_config(
         &self,
         current_profiles: &[Profile],
         cx: &App,
     ) -> anyhow::Result<SshConfig> {
+        anyhow::ensure!(
+            self.forward_editor.is_none(),
+            tr(i18n_key::PORTS_FINISH_EDIT)
+        );
         let get = |key| self.fields.get(key, cx);
         let mut config = SshConfig {
             host: get(i18n_key::WORKSPACE_HOST),
@@ -150,15 +285,8 @@ impl ProfileForm {
                     Message::from_error(error),
                 )
             })?,
-            forwards: rustterm::config::ssh::parse_forwards(&get(
-                i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED,
-            ))
-            .map_err(|error| {
-                field_error(
-                    i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED,
-                    Message::from_error(error),
-                )
-            })?,
+            forwards: self.forwards.clone(),
+            auto_forward: self.auto_forward.clone(),
             timeout_secs: parse_value(
                 i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS,
                 &get(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS),
@@ -178,6 +306,22 @@ impl ProfileForm {
             self.original.as_ref().map(|profile| profile.id),
             current_profiles,
         );
+        if let Some(original) = self.original.as_ref().and_then(|p| match &p.connection {
+            Connection::Ssh(ssh) => Some(ssh),
+            _ => None,
+        }) && let Some(current) = self
+            .original
+            .as_ref()
+            .and_then(|p| current_profiles.iter().find(|c| c.id == p.id))
+            && let Connection::Ssh(current) = &current.connection
+        {
+            if self.forwards == original.forwards {
+                config.forwards = current.forwards.clone();
+            }
+            if self.auto_forward == original.auto_forward {
+                config.auto_forward = current.auto_forward.clone();
+            }
+        }
         config.validate()?;
         Ok(config)
     }
@@ -342,20 +486,13 @@ impl ProfileForm {
                                     .collect::<Vec<_>>()
                                     .join(", "),
                             ),
-                            (
-                                i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED,
-                                config
-                                    .forwards
-                                    .iter()
-                                    .map(|f| f.description())
-                                    .collect::<Vec<_>>()
-                                    .join(i18n_key::COMMON_DETAIL_SEPARATOR),
-                            ),
                         ] {
                             this.fields
                                 .field(label)
                                 .update(cx, |input, cx| input.set_value(value, cx));
                         }
+                        this.forwards = config.forwards.clone();
+                        this.auto_forward = config.auto_forward.clone();
                         this.imported_ssh = Some(config);
                     }
                     Err(error) => this.ssh_import_error = Some(Message::from_error(error)),
@@ -468,7 +605,7 @@ impl ProfileForm {
             .child(self.advanced_toggle(i18n_key::CONNECTIONS_ADVANCED_SSH_SETTINGS,
                 rustterm::trf!(i18n_key::CONNECTIONS_SSH_OPTIONS_SUMMARY,
                     jumps = self.fields.get(i18n_key::CONNECTIONS_JUMP_HOSTS_COMMA_SEPARATED, cx).split(',').filter(|part| !part.trim().is_empty()).count(),
-                    forwards = self.fields.get(i18n_key::CONNECTIONS_PORT_FORWARDS_SEMICOLON_SEPARATED, cx).split(';').filter(|part| !part.trim().is_empty()).count(),
+                    forwards = self.forwards.len(),
                     seconds = self.fields.get(i18n_key::WORKSPACE_CONNECTION_TIMEOUT_SECONDS, cx)), cx))
             .when(self.advanced, |body| {
                 body.child(row(
@@ -511,7 +648,7 @@ impl ProfileForm {
                     .child(hint(i18n_key::CONNECTIONS_AUTOMATICALLY_INTEGRATES_BASH_ZSH_AND_FISH_WITHOUT_CHANGING_YOUR_STARTUP))
                     .child(self.fields.selected_rows(SSH_ADVANCED))
                     .child(hint(i18n_key::CONNECTIONS_JUMP_HOSTS_USE_SSH_AGENT_IDENTITIES_UNLESS_IMPORTED_WITH_A))
-                    .child(hint(i18n_key::CONNECTIONS_L_127_0_0_1_8080_HOST_80_R_127))
+                    .child(self.forward_rules(cx))
             })
             .into_any_element()
     }

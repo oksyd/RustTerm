@@ -1,7 +1,9 @@
 use crate::i18n::messages as i18n_key;
 
 mod openssh;
+mod ports;
 pub use openssh::import_openssh;
+pub use ports::{AutoForwardConfig, AutoForwardRule, ForwardProtocol, ServiceIdentity};
 
 use super::credentials::{CredentialRef, validate_reference};
 use super::{Result, invalid, known_hosts, validate_path, validate_text};
@@ -21,6 +23,7 @@ pub struct SshConfig {
     pub shell_integration: bool,
     pub jump_hosts: Vec<SshJumpHost>,
     pub forwards: Vec<PortForward>,
+    pub auto_forward: AutoForwardConfig,
 }
 
 impl Default for SshConfig {
@@ -36,6 +39,7 @@ impl Default for SshConfig {
             shell_integration: true,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
+            auto_forward: AutoForwardConfig::default(),
         }
     }
 }
@@ -111,7 +115,8 @@ impl SshConfig {
                 error.at_field(i18n_key::CONNECTIONS_JUMP_HOSTS_COMMA_SEPARATED)
             })?;
         }
-        validate_forwards(&self.forwards)
+        validate_forwards(&self.forwards)?;
+        self.auto_forward.validate()
     }
 }
 
@@ -181,6 +186,12 @@ pub enum ForwardKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
+    #[serde(default = "super::Uuid::new_v4")]
+    pub id: super::Uuid,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub protocol: ForwardProtocol,
     pub kind: ForwardKind,
     pub bind_host: String,
     pub bind_port: u16,
@@ -194,6 +205,11 @@ fn enabled() -> bool {
 }
 impl PortForward {
     pub fn validate(&self) -> Result<()> {
+        if self.name.len() > 256 || self.name.chars().any(char::is_control) {
+            return Err(invalid(
+                i18n_key::CONNECTIONS_INVALID_SSH_PORT_FORWARDING_RULE,
+            ));
+        }
         known_hosts::normalize_host(&self.bind_host)?;
         if self.bind_port == 0 {
             return Err(invalid(
@@ -236,6 +252,7 @@ pub(crate) fn validate_forwards(forwards: &[PortForward]) -> Result<()> {
         );
     }
     let mut listeners = HashSet::with_capacity(forwards.len());
+    let mut identities = HashSet::new();
     for forward in forwards {
         forward.validate().map_err(|error| error.at_field(FIELD))?;
         let host = known_hosts::normalize_host(&forward.bind_host)
@@ -245,6 +262,11 @@ pub(crate) fn validate_forwards(forwards: &[PortForward]) -> Result<()> {
             return Err(
                 invalid(i18n_key::CONNECTIONS_DUPLICATE_SSH_FORWARDING_LISTENER).at_field(FIELD),
             );
+        }
+        if forward.id.is_nil() || !identities.insert(forward.id) {
+            return Err(invalid(
+                i18n_key::CONNECTIONS_INVALID_SSH_PORT_FORWARDING_RULE,
+            ));
         }
     }
     Ok(())
@@ -313,6 +335,9 @@ pub fn parse_forwards(text: &str) -> Result<Vec<PortForward>> {
             parse_endpoint(parts[2], None, None)?
         };
         let forward = PortForward {
+            id: uuid::Uuid::new_v4(),
+            name: String::new(),
+            protocol: Default::default(),
             kind,
             bind_host,
             bind_port,

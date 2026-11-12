@@ -58,6 +58,12 @@ pub(super) fn channel(capacity: usize, byte_limit: usize) -> (Sender, Receiver) 
     )
 }
 
+pub(super) fn closed() -> Receiver {
+    let (sender, receiver) = channel(1, 0);
+    drop(sender);
+    receiver
+}
+
 impl Sender {
     pub(super) fn try_send(
         &self,
@@ -86,7 +92,7 @@ impl Sender {
                 Err(SendError::Full)
             };
         }
-        if coalesce_tail(&mut state.queue, &command.command) {
+        if !command.synchronize && coalesce_tail(&mut state.queue, &command.command) {
             return Ok(());
         }
         let bytes = payload_bytes(&command.command);
@@ -102,10 +108,9 @@ impl Sender {
                 state.queue.back().map(|entry| &entry.command),
                 Some(RdpCommand::ReleaseAll)
             ) {
-                state.queue.push_back(QueuedCommand {
-                    command: RdpCommand::ReleaseAll,
-                    paste: None,
-                });
+                state
+                    .queue
+                    .push_back(QueuedCommand::new(RdpCommand::ReleaseAll, None));
             }
             state.recovering = true;
             drop(state);
@@ -255,6 +260,7 @@ fn payload_bytes(command: &RdpCommand) -> usize {
 
 fn coalesce_tail(queue: &mut VecDeque<QueuedCommand>, next: &RdpCommand) -> bool {
     if let Some(previous) = queue.back_mut()
+        && !previous.synchronize
         && coalesce(&mut previous.command, next)
     {
         return true;
@@ -266,6 +272,7 @@ fn coalesce_tail(queue: &mut VecDeque<QueuedCommand>, next: &RdpCommand) -> bool
             command: RdpCommand::Wheel {
                 horizontal, x, y, ..
             },
+            synchronize: false,
             ..
         }),
         RdpCommand::Wheel {
@@ -279,6 +286,7 @@ fn coalesce_tail(queue: &mut VecDeque<QueuedCommand>, next: &RdpCommand) -> bool
         && x == next_x
         && y == next_y
         && let Some(index) = queue.len().checked_sub(2)
+        && !queue[index].synchronize
     {
         return coalesce(&mut queue[index].command, next);
     }
@@ -351,10 +359,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn queued(command: RdpCommand) -> QueuedCommand {
-        QueuedCommand {
-            command,
-            paste: None,
-        }
+        QueuedCommand::new(command, None)
     }
 
     fn key(scancode: u16) -> QueuedCommand {
@@ -822,10 +827,7 @@ mod tests {
         let paste = CancellationToken::new();
         sender
             .try_send(
-                QueuedCommand {
-                    command: RdpCommand::PasteRemote,
-                    paste: Some(paste.clone()),
-                },
+                QueuedCommand::new(RdpCommand::PasteRemote, Some(paste.clone())),
                 None,
             )
             .unwrap();

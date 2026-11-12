@@ -1,6 +1,9 @@
 //! These tests execute real PTYs rather than mocking a byte stream.
 #![cfg(unix)]
 
+#[path = "pty/shell_interaction.rs"]
+mod shell_interaction;
+
 use rustterm::session::{Command, LocalOptions, SendError, Session, SessionState};
 use std::{
     thread,
@@ -21,6 +24,7 @@ fn spawn(script: &str) -> Session {
     .expect("create session")
 }
 
+#[track_caller]
 fn wait_until(mut check: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(8);
     while !check() {

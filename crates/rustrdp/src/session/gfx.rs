@@ -15,6 +15,7 @@ impl Session {
             .as_mut()
             .ok_or(Error::Invalid("graphics channel state"))?;
         let info = &mut self.info;
+        let input = &self.input;
         let acknowledgements = &mut self.frame_acknowledgements;
         gfx.receive(data, &mut self.graphics, |event, graphics| {
             match event {
@@ -40,6 +41,7 @@ impl Session {
                     info.width = width;
                     info.height = height;
                     info.color_depth = 32;
+                    input.resize(width, height);
                     events.push(Event::Resized { width, height });
                 }
             }

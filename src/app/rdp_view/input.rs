@@ -451,6 +451,9 @@ impl RdpView {
             cx,
         ) {
             self.last_pointer = (x, y);
+            if self.cursor.move_to((x, y)) {
+                cx.notify();
+            }
             if pressed {
                 if !self.pressed_buttons.contains(&button) {
                     self.pressed_buttons.push(button);
@@ -472,6 +475,9 @@ impl RdpView {
             && self.send(RdpCommand::Pointer { x, y }, cx)
         {
             self.last_pointer = (x, y);
+            if self.cursor.move_to((x, y)) {
+                cx.notify();
+            }
         }
     }
 

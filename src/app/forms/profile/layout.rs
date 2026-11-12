@@ -74,6 +74,11 @@ impl ProfileForm {
             }
         }
         inputs.push(self.fields.field(key::COMMON_NAME).clone());
+        if self.advanced
+            && let Some(editor) = &self.forward_editor
+        {
+            inputs.extend(editor.read(cx).inputs());
+        }
         inputs
     }
 

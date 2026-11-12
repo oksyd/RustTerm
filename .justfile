@@ -8,13 +8,18 @@ publish:
 
 ci:
   cargo fmt --all --check
-  cargo check --all-targets --all-features
-  cargo rustc --lib --all-features -- -D missing-docs
-  cargo clippy --all-targets --all-features -- -D warnings
-  cargo test --doc --all-features
-  cargo nextest run --all-targets --all-features
-  cargo nextest run --all-targets --no-default-features
-  cargo clippy --all-targets --no-default-features -- -D warnings
-  cargo test --doc --no-default-features
-  cargo doc --no-deps --all-features
-  cargo publish --dry-run --allow-dirty
+  cargo fmt --manifest-path crates/rustrdp/Cargo.toml --check
+  # RustTerm is a binary application with no feature matrix or crates.io release.
+  cargo check --locked --all-targets
+  cargo clippy --locked --all-targets -- -D warnings
+  cargo nextest run --locked --all-targets
+  cargo test --locked --doc
+  cargo doc --locked --no-deps
+  # rustrdp is a library: retain its public API documentation and feature checks.
+  cargo clippy --manifest-path crates/rustrdp/Cargo.toml --target-dir target --all-targets --all-features -- -D warnings
+  cargo clippy --manifest-path crates/rustrdp/Cargo.toml --target-dir target --all-targets --no-default-features -- -D warnings
+  cargo test --manifest-path crates/rustrdp/Cargo.toml --target-dir target --all-features
+  cargo test --manifest-path crates/rustrdp/Cargo.toml --target-dir target --no-default-features
+  cargo doc --manifest-path crates/rustrdp/Cargo.toml --target-dir target --no-deps --all-features
+  python3 -m unittest discover -s tools/release -p test_release.py
+  python3 -m unittest discover -s src/update/installer -p test_install.py

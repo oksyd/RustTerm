@@ -83,7 +83,7 @@ pub use clipboard::{
 pub use compression::BulkCompression;
 pub use connection::{Connector, HandshakeOutput, NegotiationResponse, SecurityProtocol};
 pub use drive::{DriveCompletion, DriveRequest};
-pub use input::{Input, MouseButton};
+pub use input::{EncodedInput, Input, InputController, InputGeneration, MouseButton};
 pub use monitor::Monitor;
 pub use session::{Event, FrameToken, GraphicsFrame, Session};
 
@@ -126,6 +126,10 @@ pub enum Error {
     Limit(&'static str),
     /// A channel's outbound queue is full; the session must be discarded.
     Backpressure,
+    /// The server rejected security negotiation with an RDP_NEG_FAILURE code.
+    NegotiationFailure(u32),
+    /// The server supplied a TS_SET_ERROR_INFO_PDU disconnection reason.
+    Disconnect(u32),
     /// A server supplied a failure status code; its namespace depends on phase.
     Server(u32),
 }
@@ -138,6 +142,8 @@ impl std::fmt::Display for Error {
             Self::Unsupported(feature) => write!(f, "unsupported RDP {feature}"),
             Self::Limit(resource) => write!(f, "RDP {resource} exceeds the configured limit"),
             Self::Backpressure => f.write_str("RDP outbound queue is full"),
+            Self::NegotiationFailure(code) => write!(f, "RDP negotiation failure 0x{code:08x}"),
+            Self::Disconnect(code) => write!(f, "RDP server disconnect 0x{code:08x}"),
             Self::Server(code) => write!(f, "RDP server error 0x{code:08x}"),
         }
     }

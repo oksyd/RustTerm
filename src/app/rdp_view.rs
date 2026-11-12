@@ -27,6 +27,7 @@ use tokio::sync::watch;
 mod clipboard;
 mod connection;
 mod control;
+mod cursor;
 mod file_clipboard;
 mod input;
 mod menu;
@@ -103,10 +104,10 @@ pub struct RdpView {
     images: Vec<render::TileImage>,
     image_size: (u16, u16),
     image_acknowledgement: Option<rustrdp::FrameToken>,
-    scheduled_acknowledgement: Option<rustrdp::FrameToken>,
-    presentation_generation: u64,
+    consumed_acknowledgement: Option<rustrdp::FrameToken>,
     performance: performance::Performance,
     hide_local_pointer: bool,
+    cursor: cursor::CursorOverlay,
     desktop_size: (u16, u16),
     negotiated_color_depth: Option<u16>,
     desktop_scale: u32,
@@ -146,6 +147,7 @@ pub struct RdpView {
     _visibility_task: Task<()>,
     event_task: Option<Task<()>>,
     frame_task: Option<Task<()>>,
+    pointer_task: Option<Task<()>>,
     resize_task: Option<Task<()>>,
 }
 
@@ -291,10 +293,10 @@ impl RdpView {
             images: Vec::new(),
             image_size: (0, 0),
             image_acknowledgement: None,
-            scheduled_acknowledgement: None,
-            presentation_generation: 0,
+            consumed_acknowledgement: None,
             performance: performance::Performance::default(),
             hide_local_pointer: false,
+            cursor: cursor::CursorOverlay::default(),
             bounds: None,
             layout_size: (0., 0.),
             last_resize: None,
@@ -329,6 +331,7 @@ impl RdpView {
             _visibility_task: visibility_task,
             event_task: None,
             frame_task: None,
+            pointer_task: None,
             resize_task: None,
         };
         view.connect(launch.secret, window, cx);
@@ -477,6 +480,7 @@ impl RdpView {
         self.closed = true;
         self.event_task = None;
         self.frame_task = None;
+        self.pointer_task = None;
         self.resize_task = None;
         self.frames = None;
         // on_release_in removes the texture with access to the current window.

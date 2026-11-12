@@ -10,6 +10,7 @@ mod surface;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{Error, Limits, Result, wire::Reader};
+pub use pointer::Shape as PointerShape;
 use pointer::Shape;
 
 pub(crate) use surface::FrameMarker;
@@ -44,10 +45,37 @@ pub(crate) enum PointerKind {
     Large,
 }
 
-enum Pointer {
+/// The current server-selected cursor image.
+#[derive(Clone)]
+pub enum Pointer {
+    /// Use the platform's default arrow.
     Default,
+    /// Hide the cursor.
     Hidden,
+    /// Render this cached shape at the local pointer position.
     Custom(Arc<Shape>),
+}
+
+impl PartialEq for Pointer {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Default, Self::Default) | (Self::Hidden, Self::Hidden) => true,
+            (Self::Custom(a), Self::Custom(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+impl Eq for Pointer {}
+
+/// Cursor metadata that can be rendered independently of desktop frames.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PointerState {
+    /// Server-selected image or visibility.
+    pub image: Pointer,
+    /// Most recently tracked desktop position.
+    pub position: (u16, u16),
+    /// Changes only when the server requests a pointer position or clips it on resize.
+    pub position_revision: u64,
 }
 
 #[derive(Default)]
@@ -58,7 +86,7 @@ struct Underlay {
     pixels: Vec<u8>,
 }
 
-/// A top-down, packed BGRA desktop including the remote software pointer.
+/// A top-down, packed BGRA desktop, with optional software pointer composition.
 ///
 /// Obtain this read-only view from [`crate::Session::graphics`]. Its dimensions
 /// and pixels remain valid until the session processes another update. Copy only
@@ -76,6 +104,8 @@ pub struct Graphics {
     pointer: Pointer,
     pointer_x: u16,
     pointer_y: u16,
+    pointer_composition: bool,
+    pointer_position_revision: u64,
     pointer_cache: BTreeMap<u16, Arc<Shape>>,
     pointer_cache_bytes: usize,
     underlay: Underlay,
@@ -100,6 +130,8 @@ impl Graphics {
             pointer: Pointer::Default,
             pointer_x: 0,
             pointer_y: 0,
+            pointer_composition: true,
+            pointer_position_revision: 0,
             pointer_cache: BTreeMap::new(),
             pointer_cache_bytes: 0,
             underlay: Underlay::default(),
@@ -120,6 +152,9 @@ impl Graphics {
         });
         self.indices = None;
         self.underlay.pixels.clear();
+        if self.pointer_x >= width || self.pointer_y >= height {
+            self.pointer_position_revision = self.pointer_position_revision.wrapping_add(1);
+        }
         self.pointer_x = self.pointer_x.min(width - 1);
         self.pointer_y = self.pointer_y.min(height - 1);
         self.draw_pointer();
@@ -141,11 +176,30 @@ impl Graphics {
     }
     /// Whether the renderer should hide its local pointer over the remote image.
     ///
-    /// A remote software pointer is already composited into [`Self::pixels`].
+    /// When composition is enabled, the pointer is included in [`Self::pixels`].
+    /// Otherwise the renderer must draw [`Self::pointer`] separately.
     /// This also returns `true` when the server explicitly hides the pointer.
     /// A server request for the system default pointer returns `false`.
     pub fn hide_local_pointer(&self) -> bool {
         !matches!(self.pointer, Pointer::Default)
+    }
+
+    /// Current pointer metadata, retaining cached shape storage without copying pixels.
+    pub fn pointer(&self) -> PointerState {
+        PointerState {
+            image: self.pointer.clone(),
+            position: (self.pointer_x, self.pointer_y),
+            position_revision: self.pointer_position_revision,
+        }
+    }
+
+    pub(crate) fn set_pointer_composition(&mut self, enabled: bool) {
+        if self.pointer_composition == enabled {
+            return;
+        }
+        self.restore_pointer();
+        self.pointer_composition = enabled;
+        self.draw_pointer();
     }
 
     pub(crate) fn pointer_position(&self) -> (u16, u16) {
@@ -374,6 +428,7 @@ impl Graphics {
                 if !input.is_empty() {
                     return Err(Error::Invalid("pointer position length"));
                 }
+                self.pointer_position_revision = self.pointer_position_revision.wrapping_add(1);
                 return self.move_pointer(x, y);
             }
             PointerKind::Cached => {
@@ -415,7 +470,7 @@ impl Graphics {
         self.restore_pointer();
         self.pointer = pointer;
         self.draw_pointer();
-        Ok(true)
+        Ok(self.pointer_composition)
     }
 
     pub(crate) fn move_pointer(&mut self, x: u16, y: u16) -> Result<bool> {
@@ -426,7 +481,7 @@ impl Graphics {
         self.pointer_x = x;
         self.pointer_y = y;
         self.draw_pointer();
-        Ok(matches!(self.pointer, Pointer::Custom(_)))
+        Ok(self.pointer_composition && matches!(self.pointer, Pointer::Custom(_)))
     }
 
     fn restore_pointer(&mut self) {
@@ -450,6 +505,9 @@ impl Graphics {
     }
 
     fn draw_pointer(&mut self) {
+        if !self.pointer_composition {
+            return;
+        }
         let Pointer::Custom(shape) = &self.pointer else {
             return;
         };
@@ -480,7 +538,7 @@ impl Graphics {
                 let source =
                     (y as i32 - origin_y) as usize * shape.width + (x as i32 - origin_x) as usize;
                 let destination = (y * usize::from(self.width) + x) * 4;
-                shape.composite(source, &mut self.pixels[destination..destination + 4]);
+                shape.composite_pixel(source, &mut self.pixels[destination..destination + 4]);
             }
         }
         self.mark_damage(left, top, right - left, bottom - top);
@@ -723,6 +781,89 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(graphics.take_damage(), None);
+    }
+
+    #[test]
+    fn separate_pointer_motion_preserves_desktop_pixels_and_damage() {
+        let mut graphics = Graphics::new(3, 1, Limits::default()).unwrap();
+        graphics
+            .bitmap_update(&bitmap(
+                0,
+                0,
+                3,
+                1,
+                24,
+                0,
+                &[10, 20, 30, 40, 50, 60, 70, 80, 90, 0, 0, 0],
+            ))
+            .unwrap();
+        let background = graphics.pixels().to_vec();
+        graphics
+            .pointer_update(PointerKind::Color, &color_pointer(0, 1, &[255; 4], &[0, 0]))
+            .unwrap();
+        assert_ne!(graphics.pixels(), background);
+        graphics.set_pointer_composition(false);
+        assert_eq!(graphics.pixels(), background);
+        graphics.take_damage();
+        for x in [1, 2, 0, 2] {
+            assert!(!graphics.move_pointer(x, 0).unwrap());
+            assert_eq!(graphics.pixels(), background);
+            assert_eq!(graphics.take_damage(), None);
+            assert_eq!(graphics.pointer().position, (x, 0));
+            assert_eq!(graphics.pointer().position_revision, 0);
+        }
+        graphics
+            .pointer_update(PointerKind::Position, &[1, 0, 0, 0])
+            .unwrap();
+        assert_eq!(graphics.pointer().position_revision, 1);
+        assert_eq!(graphics.pointer().position, (1, 0));
+        assert_eq!(graphics.take_damage(), None);
+        graphics.set_pointer_composition(true);
+        assert_eq!(&graphics.pixels()[4..8], &[255; 4]);
+    }
+
+    #[test]
+    fn external_pointer_composition_matches_legacy_alpha_and_xor_pixels() {
+        for (alpha, color, mask) in [
+            (false, [255; 4], 0),
+            (false, [255; 4], 0x80),
+            (false, [0; 4], 0x80),
+            (true, [100, 120, 140, 128], 0),
+            (true, [255; 4], 0x80),
+            (true, [0; 4], 0),
+        ] {
+            let mut graphics = Graphics::new(1, 1, Limits::default()).unwrap();
+            graphics
+                .bitmap_update(&bitmap(0, 0, 1, 1, 24, 0, &[20, 40, 60, 0]))
+                .unwrap();
+            let background = graphics.pixels().to_vec();
+            let mut data = if alpha {
+                32u16.to_le_bytes().to_vec()
+            } else {
+                Vec::new()
+            };
+            data.extend(color_pointer(0, 1, &color, &[mask, 0]));
+            graphics
+                .pointer_update(
+                    if alpha {
+                        PointerKind::New
+                    } else {
+                        PointerKind::Color
+                    },
+                    &data,
+                )
+                .unwrap();
+            let expected = graphics.pixels().to_vec();
+            let Pointer::Custom(shape) = graphics.pointer().image else {
+                panic!("decoded cursor missing");
+            };
+            graphics.set_pointer_composition(false);
+            let mut overlay = background.clone();
+            shape.composite(&mut overlay).unwrap();
+            assert_eq!(overlay, expected);
+            assert_eq!(graphics.pixels(), background);
+            assert!(shape.composite(&mut [0; 3]).is_err());
+        }
     }
 
     #[test]

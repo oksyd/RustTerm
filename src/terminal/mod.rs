@@ -12,10 +12,11 @@ use alacritty_terminal::{
 };
 use std::sync::{Arc, Mutex};
 pub mod integration;
+mod selection_matches;
 pub mod shell;
 mod timestamps;
 pub use alacritty_terminal::vte::ansi::CursorShape;
-pub use shell::{ShellCommand, ShellSnapshot};
+pub use shell::{ShellCommand, ShellInteraction, ShellSnapshot};
 pub use timestamps::LineTimestamp;
 
 /// Scrollback capacity target; upstream caches may retain additional memory.
@@ -39,6 +40,7 @@ pub struct Cell {
     pub default_foreground: bool,
     pub selected: bool,
     pub search_highlight: Option<SearchHighlight>,
+    pub selection_match: bool,
     pub text: String,
     /// 0 for the continuation of a wide cell, 1 or 2 otherwise.
     pub width: u8,
@@ -268,6 +270,8 @@ pub struct Terminal {
     search: Option<reading::SearchState>,
     next_query_id: u64,
     highlight_enabled: bool,
+    selection_highlight_enabled: bool,
+    selection_match_cache: Mutex<selection_matches::MatchCache>,
     cache_command_output: bool,
     highlight_cache: Mutex<highlight::HighlightCache>,
     final_alternate: Option<Arc<Snapshot>>,
@@ -319,6 +323,8 @@ impl Terminal {
             search: None,
             next_query_id: 0,
             highlight_enabled: true,
+            selection_highlight_enabled: true,
+            selection_match_cache: Mutex::new(Default::default()),
             cache_command_output: true,
             highlight_cache: Mutex::new(Default::default()),
             final_alternate: None,
@@ -394,6 +400,7 @@ impl Terminal {
             let new_top = &self.term.grid()[Point::new(self.term.grid().topmost_line(), Column(0))]
                 as *const _ as usize;
             if old_alt != self.is_alternate() {
+                self.shell.suspend_input();
                 self.clear_selection();
                 if self.is_alternate() {
                     self.alt_tracker.clear();
@@ -409,6 +416,7 @@ impl Terminal {
                 }
             }
             if observation.reset {
+                self.shell.reset_interaction();
                 self.line_times.reset();
             }
             if !self.is_alternate() {
@@ -626,6 +634,7 @@ impl Terminal {
         if self.parser.take().is_none() {
             return;
         }
+        self.shell.reset_interaction();
         if self.is_alternate() {
             self.final_alternate = Some(Arc::new(self.snapshot()));
             self.term.swap_alt();
@@ -722,6 +731,7 @@ impl Terminal {
         let mut lines = Vec::with_capacity(self.size.rows as usize);
         let selection = self.selection_points();
         let search_marks = self.search_visible_marks();
+        let selection_marks = self.selection_visible_marks();
         for row in 0..self.size.rows as usize {
             let line = Line(row as i32 - offset as i32);
             let mut cells = Vec::with_capacity(self.size.columns as usize);
@@ -757,6 +767,9 @@ impl Terminal {
                     search_highlight: search_marks
                         .as_ref()
                         .and_then(|marks| marks[row * self.size.columns as usize + col]),
+                    selection_match: selection_marks
+                        .as_ref()
+                        .is_some_and(|marks| marks[row * self.size.columns as usize + col]),
                     text,
                     width: if spacer {
                         0

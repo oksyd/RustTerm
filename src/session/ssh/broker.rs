@@ -81,15 +81,25 @@ pub(super) async fn run_forwarding<H: client::Handler>(
     let mut forward_pending = FuturesUnordered::new();
     let mut remote_pending = FuturesUnordered::new();
     let mut remote_endpoints = HashSet::new();
+    let mut exec_pending = FuturesUnordered::new();
     loop {
         tokio::select! {
             biased;
             _ = closed.cancelled() => break,
+            Some(()) = exec_pending.next(), if !exec_pending.is_empty() => {},
             Some(()) = forward_pending.next(), if !forward_pending.is_empty() => {},
             Some(endpoint) = remote_pending.next(), if !remote_pending.is_empty() => {
                 remote_endpoints.remove(&endpoint);
             },
             Some(request) = forwards.recv() => match request {
+                ForwardRequest::Exec(request) => {
+                    if request.cancel.is_cancelled() || request.reply.is_closed() { continue; }
+                    if exec_pending.len() >= crate::session::exec::MAX_CHANNELS {
+                        let _ = request.reply.send(Err(crate::docker::Error::Busy));
+                    } else {
+                        exec_pending.push(crate::session::exec::open(handle, request));
+                    }
+                }
                 ForwardRequest::Open(request) => {
                     if request.reply.is_closed() {
                         continue;

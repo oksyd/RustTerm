@@ -1,6 +1,6 @@
 use super::{MAX_ARGUMENTS, MAX_REQUEST_BYTES, RedisError, Result};
 
-/// Atomic, non-overwriting collection creation. The command in ARGV[1] is
+/// Atomic, non-overwriting collection creation. The command in `ARGV[1]` is
 /// separately restricted below; arbitrary Lua is deliberately not supported.
 pub const CREATE_SCRIPT: &str = "if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end redis.call(ARGV[1], KEYS[1], unpack(ARGV, 2)) return 1";
 /// Atomic compare-and-set for a complete string value. Never overwrites a

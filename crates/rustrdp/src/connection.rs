@@ -93,7 +93,7 @@ fn negotiation_response(packet: &[u8], redirected: bool) -> Result<NegotiationRe
         (2, 4) if redirected => SecurityProtocol::RdsTls,
         (2, _) if redirected => return Err(Error::Unsupported("server did not select RDSTLS")),
         (2, _) => return Err(Error::Unsupported("server selected a protocol without NLA")),
-        (3, _) => return Err(Error::Server(value)),
+        (3, _) => return Err(Error::NegotiationFailure(value)),
         _ => return Err(Error::Invalid("RDP negotiation response type")),
     };
     Ok(NegotiationResponse {
@@ -783,6 +783,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn negotiation_failure_keeps_its_code_namespace() {
+        let mut failure = hex("03 00 00 13 0e d0 00 00 00 00 00 03 00 08 00 05 00 00 00");
+        for code in [5u32, 0x1234_5678] {
+            failure[15..19].copy_from_slice(&code.to_le_bytes());
+            assert_eq!(
+                parse_negotiation_response(&failure),
+                Err(Error::NegotiationFailure(code))
+            );
+        }
+    }
+
+    #[test]
     fn negotiation_never_downgrades_from_nla() {
         let confirm = hex("03 00 00 13 0e d0 00 00 00 00 00 02 00 08 00 02 00 00 00");
         assert_eq!(
@@ -898,7 +910,7 @@ pub(crate) mod tests {
                 connector
                     .advance(&indication_frame(1002, 1003, &body).unwrap())
                     .err(),
-                Some(Error::Server(0x1193))
+                Some(Error::Disconnect(0x1193))
             );
             assert!(matches!(connector.state, State::Failed));
         }
@@ -1432,7 +1444,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             finalizer.advance(&server_share(47, &[7, 0, 0, 0], 0)),
-            Err(Error::Server(7))
+            Err(Error::Disconnect(7))
         );
         assert!(finalizer.advance(&server_share(40, &[0; 8], 1)).is_err());
         assert!(

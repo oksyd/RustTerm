@@ -6,6 +6,9 @@ use alacritty_terminal::{
 };
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+mod interaction_tests;
+
 const MAX_COMMANDS: usize = 64;
 const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -31,10 +34,25 @@ struct CommandAnchors {
     output: Option<reading::SelectionAnchor>,
 }
 
+/// Confirmed by shell integration, never inferred from keys or rendered text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShellInteraction {
+    #[default]
+    Unknown,
+    /// The prompt is ready; the shell has not reported its editor's submode.
+    Prompt,
+    /// An editor hook explicitly reported normal command editing.
+    Editing,
+    Executing,
+    HistorySearch,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ShellSnapshot {
     pub shell: Option<&'static str>,
     pub at_prompt: bool,
+    pub interaction: ShellInteraction,
+    pub history_search_supported: bool,
     pub focused_command: Option<u64>,
     pub command_unavailable: bool,
     pub command_insert_blocked: bool,
@@ -58,6 +76,21 @@ pub(super) struct ShellTracker {
 }
 
 impl ShellTracker {
+    pub(super) fn suspend_input(&mut self) {
+        // A fullscreen widget can run inside ZLE without a preexec marker.
+        // Require a fresh prompt or ZLE notification before claiming input mode.
+        if self.snapshot.interaction != ShellInteraction::Executing {
+            self.snapshot.interaction = ShellInteraction::Unknown;
+            self.snapshot.at_prompt = false;
+        }
+    }
+
+    pub(super) fn reset_interaction(&mut self) {
+        self.snapshot.interaction = ShellInteraction::Unknown;
+        self.snapshot.at_prompt = false;
+        self.snapshot.history_search_supported = false;
+    }
+
     fn accept(&mut self, byte: u8) -> Option<String> {
         if let Some(data) = &mut self.osc {
             if self.discarded {
@@ -121,6 +154,7 @@ impl Terminal {
             return;
         };
         if let Some(shell) = marker.strip_prefix("P;RustTerm=") {
+            self.shell.reset_interaction();
             self.shell.snapshot.shell = match shell {
                 "bash" => Some("bash"),
                 "zsh" => Some("zsh"),
@@ -129,18 +163,65 @@ impl Terminal {
             };
             return;
         }
+        if let Some(value) = marker.strip_prefix("P;RustTermHistorySearch=") {
+            self.shell.snapshot.history_search_supported =
+                self.shell.snapshot.shell == Some("zsh") && value == "1";
+            if !self.shell.snapshot.history_search_supported
+                && matches!(
+                    self.shell.snapshot.interaction,
+                    ShellInteraction::Editing | ShellInteraction::HistorySearch
+                )
+            {
+                self.shell.suspend_input();
+            }
+            return;
+        }
+        if let Some(value) = marker.strip_prefix("P;RustTermInput=") {
+            if self.shell.snapshot.history_search_supported
+                && self.shell.snapshot.interaction != ShellInteraction::Executing
+            {
+                match value {
+                    "history-search" => {
+                        self.shell.snapshot.interaction = ShellInteraction::HistorySearch;
+                        self.shell.snapshot.at_prompt = true;
+                    }
+                    "editing" => {
+                        self.shell.snapshot.interaction = ShellInteraction::Editing;
+                        self.shell.snapshot.at_prompt = true;
+                    }
+                    "finished" => self.shell.suspend_input(),
+                    _ => {}
+                }
+            }
+            return;
+        }
         self.reconcile_rows();
         match marker.split(';').next().unwrap_or_default() {
             "A" => {
                 self.shell.prompt = None;
                 self.shell.snapshot.at_prompt = false;
+                // Prompt redraws do not override a mode reported by ZLE. A/B
+                // alone only confirm the prompt, never a specific editor mode.
+                if !matches!(
+                    self.shell.snapshot.interaction,
+                    ShellInteraction::Editing | ShellInteraction::HistorySearch
+                ) {
+                    self.shell.snapshot.interaction = ShellInteraction::Unknown;
+                }
             }
             "B" => {
                 self.shell.prompt = self.shell_anchor();
                 self.shell.snapshot.at_prompt = true;
+                if !matches!(
+                    self.shell.snapshot.interaction,
+                    ShellInteraction::Editing | ShellInteraction::HistorySearch
+                ) {
+                    self.shell.snapshot.interaction = ShellInteraction::Prompt;
+                }
             }
             "C" => {
                 self.shell.snapshot.at_prompt = false;
+                self.shell.snapshot.interaction = ShellInteraction::Executing;
                 self.shell.snapshot.command_unavailable = false;
                 self.shell.snapshot.command_insert_blocked = false;
                 self.shell.started_at = Some(Instant::now());
@@ -158,6 +239,9 @@ impl Terminal {
                 self.shell.output_start = self.shell_anchor();
             }
             "D" => {
+                self.shell.snapshot.at_prompt = false;
+                self.shell.snapshot.interaction = ShellInteraction::Unknown;
+                let duration = self.shell.started_at.take().map(|time| time.elapsed());
                 let Some(command) = self
                     .shell
                     .active
@@ -189,12 +273,7 @@ impl Terminal {
                     command,
                     cwd: self.shell.snapshot.cwd.clone(),
                     exit_status,
-                    duration: self
-                        .shell
-                        .started_at
-                        .take()
-                        .map(|time| time.elapsed())
-                        .unwrap_or_default(),
+                    duration: duration.unwrap_or_default(),
                     output,
                     output_cache_disabled: !self.cache_command_output,
                     anchors: Arc::new(CommandAnchors {
@@ -229,7 +308,11 @@ impl Terminal {
     }
 
     pub fn can_insert_command(&self) -> bool {
-        !self.is_alternate() && self.shell.snapshot.at_prompt && self.modes().bracketed_paste
+        self.parser.is_some()
+            && !self.is_alternate()
+            && self.shell.snapshot.at_prompt
+            && self.shell.snapshot.interaction != ShellInteraction::HistorySearch
+            && self.modes().bracketed_paste
     }
 
     pub fn command_draft(&mut self, id: u64) -> Vec<u8> {

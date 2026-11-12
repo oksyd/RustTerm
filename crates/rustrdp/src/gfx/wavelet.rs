@@ -244,9 +244,6 @@ pub(super) fn inverse(values: &mut [i32], extrapolate: bool) {
         [(3840, 8, 8), (3072, 16, 16), (0, 32, 32)]
     };
     let mut intermediate = vec![0; 4096];
-    let mut low_line = [0; 64];
-    let mut high_line = [0; 64];
-    let mut line = [0; 64];
     for (start, low, high) in stages {
         let size = low + high;
         let source = &values[start..start + size * size];
@@ -266,21 +263,58 @@ pub(super) fn inverse(values: &mut [i32], extrapolate: bool) {
                 &mut intermediate[y * size..(y + 1) * size],
             );
         }
-        for x in 0..size {
-            for y in 0..low {
-                low_line[y] = intermediate[y * size + x];
+        synthesize_vertical(
+            &intermediate[..size * size],
+            low,
+            high,
+            extrapolate,
+            &mut values[start..start + size * size],
+        );
+    }
+}
+
+// Apply the vertical lifting steps across contiguous rows. Each lane has the
+// same arithmetic as synthesize(), without gathering and scattering columns.
+fn synthesize_vertical(input: &[i32], low: usize, high: usize, reduced: bool, output: &mut [i32]) {
+    let size = low + high;
+    let row = |y: usize| &input[y * size..(y + 1) * size];
+    let zero = [0; 64];
+    for y in 0..size.div_ceil(2) {
+        let left = row(low + y.saturating_sub(1));
+        let right = if y < high {
+            row(low + y)
+        } else if low > high + 1 {
+            &zero[..size]
+        } else {
+            row(low + high - 1)
+        };
+        let even = &mut output[2 * y * size..(2 * y + 1) * size];
+        for (((target, value), left), right) in even.iter_mut().zip(row(y)).zip(left).zip(right) {
+            let sum = i64::from(*left) + i64::from(*right);
+            let half = if reduced { sum / 2 } else { (sum + 1) >> 1 };
+            *target = narrow(i64::from(*value) - half);
+        }
+    }
+    for y in 0..size / 2 {
+        let (before, rest) = output.split_at_mut((2 * y + 1) * size);
+        let left = &before[before.len() - size..];
+        let (odd, after) = rest.split_at_mut(size);
+        if y == high {
+            for ((target, left), extra) in odd.iter_mut().zip(left).zip(row(y + 1)) {
+                *target = narrow((i64::from(*left) + i64::from(*extra)) / 2);
             }
-            for y in 0..high {
-                high_line[y] = intermediate[(y + low) * size + x];
-            }
-            synthesize(
-                &low_line[..low],
-                &high_line[..high],
-                extrapolate,
-                &mut line[..size],
-            );
-            for y in 0..size {
-                values[start + y * size + x] = line[y];
+        } else {
+            let right = if after.is_empty() {
+                left
+            } else {
+                &after[..size]
+            };
+            for (((target, left), right), detail) in
+                odd.iter_mut().zip(left).zip(right).zip(row(low + y))
+            {
+                let sum = i64::from(*left) + i64::from(*right);
+                let middle = if reduced { sum / 2 } else { sum >> 1 };
+                *target = narrow(middle + 2 * i64::from(*detail));
             }
         }
     }

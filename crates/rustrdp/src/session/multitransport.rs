@@ -109,6 +109,7 @@ impl Session {
             Ok(events)
         })();
         if result.is_err() {
+            self.input.close();
             self.state = State::Closed;
             self.graphics.cancel_frame();
             self.frame_acknowledgements.reset(false);
@@ -144,6 +145,7 @@ impl Session {
     pub fn close_multitransport(&mut self, protocol: TransportProtocol) -> Result<Vec<Event>> {
         self.multitransport.close(protocol);
         if self.channels.tunnel_closed(protocol)? {
+            self.input.close();
             self.state = State::Closed;
             return Err(Error::Invalid(
                 "multitransport closed after channel migration",

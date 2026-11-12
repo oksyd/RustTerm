@@ -13,6 +13,7 @@ pub enum SessionTool {
     Commands,
     Resources,
     Docker,
+    Ports,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,7 @@ pub enum PaneEvent {
     Commands,
     Resources,
     Docker,
+    Ports,
     Zoom,
     Activity,
     CommandFinished {

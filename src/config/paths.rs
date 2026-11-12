@@ -42,11 +42,19 @@ impl AppPaths {
     /// Call while holding ConfigLock. Keep that lock in the configuration directory
     /// so older versions and instances using the same configuration still exclude us.
     pub fn load_config(&self) -> Result<AppConfig> {
-        let mut config = AppConfig::load(self.config.join("config.toml"))?;
+        let config_path = self.config.join("config.toml");
+        let mut config =
+            AppConfig::load(&config_path).map_err(|error| error.in_file(&config_path))?;
         let legacy_workspace = !config.workspace.is_empty();
-        if let Some(source) = storage::read_optional(&self.state.join("workspace.toml"))? {
-            let workspace: WorkspaceSnapshot = toml::from_str(&source)?;
-            workspace.validate()?;
+        let workspace_path = self.state.join("workspace.toml");
+        if let Some(source) = storage::read_optional(&workspace_path)
+            .map_err(|error| error.in_file(&workspace_path))?
+        {
+            let workspace: WorkspaceSnapshot = toml::from_str(&source)
+                .map_err(|error| ConfigError::from(error).in_file(&workspace_path))?;
+            workspace
+                .validate()
+                .map_err(|error| error.in_file(&workspace_path))?;
             // An explicitly empty snapshot also wins over old inline session state.
             config.workspace = workspace;
         }

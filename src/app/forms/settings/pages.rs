@@ -296,6 +296,19 @@ impl SettingsForm {
                     cx.notify();
                 })),
             )
+            .child(
+                toggle(
+                    "selection-matches-toggle",
+                    i18n_key::SETTINGS_HIGHLIGHT_SELECTION_MATCHES,
+                    Some(i18n_key::SETTINGS_HIGHLIGHT_SELECTION_MATCHES_HELP),
+                    self.values.highlight_selection_matches,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.values.highlight_selection_matches =
+                        !this.values.highlight_selection_matches;
+                    cx.notify();
+                })),
+            )
             .child(section_heading(i18n_key::CONNECTIONS_SCROLLBACK_HISTORY))
             .child(
                 toggle(

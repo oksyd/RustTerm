@@ -1704,6 +1704,8 @@ mod tests {
                 shell_integration: false,
                 jump_hosts: Vec::new(),
                 forwards: Vec::new(),
+                auto_forward: Default::default(),
+                forwarding_registry: None,
                 authentication: None,
             },
             80,

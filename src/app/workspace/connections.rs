@@ -125,7 +125,8 @@ impl Workspace {
         match &profile.connection {
             Connection::Ssh(config) => {
                 // Automatic recovery never opens an interactive authentication prompt.
-                let options = ssh_options(config, &secret, self.path.join("known_hosts.toml"));
+                let mut options = ssh_options(config, &secret, self.path.join("known_hosts.toml"));
+                options.forwarding_registry = Some((self.ports.registry.clone(), profile.id));
                 let session =
                     Session::spawn_ssh(options, 80, 24, self.config.settings.history_lines);
                 self.add_session(profile, session, Some(id), None, window, cx);
@@ -228,6 +229,7 @@ impl Workspace {
                 self.path.join("known_hosts.toml"),
             );
             options.authentication = Some(self.window_state.authentication.clone());
+            options.forwarding_registry = Some((self.ports.registry.clone(), profile.id));
             let session = Session::spawn_ssh(options, 80, 24, self.config.settings.history_lines);
             self.add_session(profile, session, reconnect, split, window, cx);
             return;
@@ -452,6 +454,7 @@ impl Workspace {
             Connection::Ssh(config) => {
                 let mut options = ssh_options(config, &value, self.path.join("known_hosts.toml"));
                 options.authentication = Some(self.window_state.authentication.clone());
+                options.forwarding_registry = Some((self.ports.registry.clone(), profile.id));
                 let session =
                     Session::spawn_ssh(options, 80, 24, self.config.settings.history_lines);
                 self.add_session(profile, session, reconnect, split, window, cx);
@@ -741,6 +744,8 @@ pub(super) fn ssh_options(
         shell_integration: config.shell_integration,
         jump_hosts: config.jump_hosts.clone(),
         forwards: config.forwards.clone(),
+        auto_forward: config.auto_forward.clone(),
+        forwarding_registry: None,
         authentication: None,
     }
 }

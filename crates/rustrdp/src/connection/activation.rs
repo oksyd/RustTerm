@@ -121,7 +121,7 @@ pub(super) fn before_demand(packet: &[u8]) -> Result<bool> {
             let code = reader.u32_le()?;
             reader.finish()?;
             if kind == 47 && code != 0 {
-                return Err(Error::Server(code));
+                return Err(Error::Disconnect(code));
             }
             Ok(true)
         }
@@ -460,7 +460,7 @@ impl ActivationFinalizer {
             let code = reader.u32_le()?;
             reader.finish()?;
             if code != 0 {
-                return Err(Error::Server(code));
+                return Err(Error::Disconnect(code));
             }
             return Ok(false);
         }

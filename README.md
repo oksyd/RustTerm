@@ -15,9 +15,10 @@ A native desktop workspace for terminals, remote desktops, and databases, built 
 
 ## Features
 
-- **Terminal sessions** — local shells and SSH, searchable scrollback, output highlighting, optional line numbers and timestamps.
+- **Terminal sessions** — local shells and SSH, searchable scrollback, output and selection-match highlighting, optional line numbers and timestamps.
 - **Organized workspaces** — draggable tabs, automatic SSH tab groups, and split panes.
 - **Docker over SSH** — Compose project grouping, container details, bounded streaming logs, on-demand statistics, lifecycle controls, and container terminals.
+- **Development ports** — visual SSH forwarding, automatic Linux service discovery, Compose published ports, and optional LAN links with QR codes. Forwarding is shared across tabs of the same connection profile.
 - **Resource monitoring** — focused Linux SSH host and container CPU, memory, and network rates in the status bar, with shared detail panels and an optional sampling toggle.
 - **File transfers** — an integrated SFTP browser and ZMODEM (`sz` / `rz`, Linux).
 - **Remote desktops** — embedded RDP with TLS/NLA, clipboard integration, display controls, and RemoteApp windows.
@@ -29,6 +30,8 @@ To launch a published Windows application, select **RemoteApp** in an RDP connec
 ClickHouse connects over HTTP/HTTPS (8123/8443), with SSH tunnels, SQL queries, and CSV export. Its table editor supports browsing; use SQL to modify data.
 
 Open **Docker** from a connected SSH terminal. The remote Linux host needs Docker CLI and permission to access its Unix socket; rootless and custom sockets are supported. No local Docker installation or exposed Docker TCP port is needed. Panel collection pauses when hidden; the active container console can continue sampling for its status bar. Container consoles follow Docker exec semantics: use `exit` to end the shell; closing a console disconnects it and may leave its process running.
+
+Open **Ports** from an SSH terminal to add rules or enable automatic forwarding. Discovery requires Linux and `ss`; Compose discovery also requires Docker CLI access to the system Docker socket. Automatic forwards listen on loopback by default; choose a specific local interface to share a service with your phone. Forwarding continues after closing terminal tabs and stops when RustTerm exits. The status bar opens the background port manager.
 
 ## Installation
 
@@ -62,6 +65,8 @@ Manage update checks and an optional HTTP proxy in **Settings → Updates**. Rep
 Ubuntu respects `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME`. Windows resolves LocalAppData through the system's Known Folder API. Passwords stay in the system credential store. Existing inline session state and diagnostic logs migrate on startup; connections and saved password references remain intact.
 
 Use `rustterm --config-dir <directory>` for an isolated profile: its configuration, `state/`, and `cache/` live under that directory. Credentials still use the system vault. Back up the configuration directory to preserve settings and connections; include the state directory to preserve session restoration. User-selected databases, SSH keys, and downloaded files stay at their chosen locations.
+
+Use a separate `--config-dir` for development builds: newer settings may not be readable by older releases. Startup errors show a desktop dialog; Ubuntu packages include Zenity for this purpose.
 
 ## License
 

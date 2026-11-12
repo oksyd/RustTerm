@@ -189,7 +189,21 @@ impl Workspace {
                 }
                 (MenuAction::Copy, Some(Pane::Elasticsearch(_))) => i18n_key::ES_COPY,
                 (MenuAction::Paste, Some(Pane::Elasticsearch(_))) => i18n_key::ES_PASTE,
+                (MenuAction::Disconnect, Some(Pane::Terminal(view))) => {
+                    if view.read(cx).is_running() {
+                        i18n_key::COMMON_DISCONNECT
+                    } else {
+                        i18n_key::COMMON_RECONNECT
+                    }
+                }
                 _ => item.label,
+            };
+            let shortcut = if action == MenuAction::Disconnect
+                && matches!(self.panes.get(&self.focused), Some(Pane::Terminal(view)) if !view.read(cx).is_running())
+            {
+                "Ctrl+Shift+R"
+            } else {
+                item.shortcut
             };
             let checked = match action {
                 MenuAction::LineNumbers => self.config.settings.line_numbers,
@@ -246,13 +260,13 @@ impl Workspace {
                     )
                     .child(div().flex_1().min_w_0().truncate().child(tr(label)))
                     .when(submenu, |d| d.child(icon(Icon::ChevronRight).size(px(12.))))
-                    .when(!submenu && !item.shortcut.is_empty(), |d| {
+                    .when(!submenu && !shortcut.is_empty(), |d| {
                         d.child(
                             div()
                                 .text_size(px(10.))
                                 .flex_shrink_0()
                                 .text_color(rgb(ui::colors().muted))
-                                .child(item.shortcut),
+                                .child(shortcut),
                         )
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {

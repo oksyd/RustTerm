@@ -5,7 +5,25 @@ use rustterm::rdp::CertificateDecision;
 use std::time::Duration;
 
 impl RdpView {
+    fn record_error(&self, error: &rustterm::rdp::RdpError) {
+        if let Some(code) = error.server_code() {
+            self.window_state.record_values(
+                error.diagnostic_code(),
+                [self.index as u64, u64::from(code), 0],
+            );
+        } else {
+            self.window_state.record_with_context(
+                error.diagnostic_code(),
+                error.diagnostic_context(),
+                self.index,
+            );
+        }
+    }
+
     pub(super) fn connect(&mut self, secret: Secret, window: &mut Window, cx: &mut Context<Self>) {
+        self.cursor.clear(window);
+        self.cursor.update(None);
+        self.pointer_task = None;
         self.close_application_windows(cx);
         self.applications = remote_app::Applications::default();
         self.cancel_file_clipboard_read();
@@ -23,11 +41,7 @@ impl RdpView {
         ) {
             Ok(handle) => handle,
             Err(error) => {
-                self.window_state.record_with_context(
-                    error.diagnostic_code(),
-                    error.diagnostic_context(),
-                    self.index,
-                );
+                self.record_error(&error);
                 self.state = State::Failed;
                 self.error = Some(Message::from_error(error));
                 return;
@@ -41,6 +55,32 @@ impl RdpView {
             self.send(RdpCommand::SetAudioMuted(true), cx);
         }
         self.frames = Some(handle.frames.clone());
+        if self.config.remote_app.is_none() {
+            let mut pointer = handle.pointer;
+            self.pointer_task = Some(cx.spawn(async move |this, cx| {
+                while pointer.changed().await.is_ok() {
+                    let state = pointer.borrow_and_update().clone();
+                    if this
+                        .update(cx, |this, cx| {
+                            if this.closed {
+                                return false;
+                            }
+                            this.cursor.update(state);
+                            this.hide_local_pointer =
+                                this.cursor.hides_platform_cursor().unwrap_or(false);
+                            if this.surface_visible() {
+                                cx.notify();
+                            }
+                            true
+                        })
+                        .ok()
+                        != Some(true)
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
         let mut frames = handle.frames;
         self.frame_task = Some(cx.spawn(async move |this, cx| {
             while frames.changed().await.is_ok() {
@@ -163,15 +203,13 @@ impl RdpView {
                 self.performance.flush(&self.window_state, self.index);
                 self.retry_allowed = matches!(
                     error,
-                    rustterm::rdp::RdpError::Connection | rustterm::rdp::RdpError::Timeout
+                    rustterm::rdp::RdpError::Connection
+                        | rustterm::rdp::RdpError::Network { .. }
+                        | rustterm::rdp::RdpError::Timeout
                 );
                 self.incoming_files = None;
                 self.file_export_snapshot = None;
-                self.window_state.record_with_context(
-                    error.diagnostic_code(),
-                    error.diagnostic_context(),
-                    self.index,
-                );
+                self.record_error(&error);
                 self.release_control(cx);
                 self.state = State::Failed;
                 self.error = Some(Message::from_error(error));
@@ -181,11 +219,7 @@ impl RdpView {
             }
             RdpEvent::RequestRejected(error) => {
                 self.window_state.record("rdp-request-rejected", self.index);
-                self.window_state.record_with_context(
-                    error.diagnostic_code(),
-                    error.diagnostic_context(),
-                    self.index,
-                );
+                self.record_error(&error);
                 self.error = Some(Message::from_error(error));
                 self.notice = None;
                 self.clipboard.feedback = None;

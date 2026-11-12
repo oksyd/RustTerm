@@ -131,7 +131,10 @@ fn telnet_profiles_round_trip_without_credentials() {
 
 #[test]
 fn application_lock_defaults_off_for_existing_configuration() {
-    let config: AppConfig = toml::from_str("schema_version = 1").unwrap();
+    let directory = private_directory();
+    let path = directory.path().join("config.toml");
+    write_private(&path, "schema_version = 1");
+    let config = AppConfig::load(&path).unwrap();
     config.validate().unwrap();
     assert!(config.app_lock.password_hash.is_none());
     assert_eq!(config.app_lock.idle_minutes, 0);
@@ -332,6 +335,46 @@ fn parse_errors_never_retain_sensitive_source() {
 }
 
 #[test]
+fn unknown_settings_are_distinct_from_syntax_errors_without_retaining_keys() {
+    let directory = private_directory();
+    let path = directory.path().join("config.toml");
+    for source in [
+        "schema_version = 1\n'do-not-echo-secret' = true\n",
+        "schema_version = 1\n[settings]\napp_theme = 'do-not-echo-secret'\n",
+    ] {
+        write_private(&path, source);
+        let error = AppConfig::load(&path).unwrap_err();
+        assert!(matches!(error, ConfigError::UnsupportedData { .. }));
+        assert!(!format!("{error} {error:?}").contains("do-not-echo-secret"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+    write_private(&path, "not valid toml = [");
+    assert!(matches!(
+        AppConfig::load(&path),
+        Err(ConfigError::Decode { .. })
+    ));
+}
+
+#[test]
+fn previous_schema_loads_without_rewriting_and_next_save_advertises_new_format() {
+    let directory = private_directory();
+    let path = directory.path().join("config.toml");
+    let source = "schema_version = 1\n[settings]\nfont_size = 17.0\n";
+    write_private(&path, source);
+    let config = AppConfig::load(&path).unwrap();
+    assert_eq!(config.schema_version, SCHEMA_VERSION);
+    assert_eq!(config.settings.font_size, 17.0);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    config.save(&path).unwrap();
+    let written: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        written["schema_version"].as_integer(),
+        Some(i64::from(SCHEMA_VERSION))
+    );
+    assert!(written["schema_version"].as_integer().unwrap() > 1);
+}
+
+#[test]
 fn stale_host_management_confirmation_cannot_remove_new_trust() {
     let directory = private_directory();
     let path = directory.path().join("known-hosts.toml");
@@ -368,7 +411,7 @@ fn migration_backs_up_valid_legacy_config() {
     assert!(
         std::fs::read_to_string(path)
             .unwrap()
-            .contains("schema_version = 1")
+            .contains(&format!("schema_version = {SCHEMA_VERSION}"))
     );
 }
 
@@ -684,7 +727,10 @@ type = "local"
 shell = "/bin/sh"
 args = ["-l"]
 "#;
-    let loaded: AppConfig = toml::from_str(legacy).unwrap();
+    let directory = private_directory();
+    let path = directory.path().join("config.toml");
+    write_private(&path, legacy);
+    let loaded = AppConfig::load(&path).unwrap();
     loaded.validate().unwrap();
     assert_eq!(loaded.profiles.len(), 1);
     assert_eq!(loaded.profiles[0].name, "Existing shell");

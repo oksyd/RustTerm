@@ -204,7 +204,7 @@ impl Render for RdpView {
                                         cx,
                                     );
                                 }
-                                this.paint_desktop(bounds, window, cx);
+                                this.paint_desktop(bounds, window);
                             });
                         },
                     )
@@ -432,12 +432,7 @@ impl RdpView {
             .into_any_element()
     }
 
-    fn paint_desktop(
-        &mut self,
-        viewport: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn paint_desktop(&mut self, viewport: Bounds<Pixels>, window: &mut Window) {
         if self.images.is_empty() || !self.surface_visible() {
             self.invalidate_frame_acknowledgements();
             return;
@@ -483,78 +478,41 @@ impl RdpView {
             }
         });
         if self.state == State::Connected {
+            let cursor = self.cursor.paint(desktop, visible, window);
+            self.performance.cursor_painted(cursor);
             self.performance
                 .painted(started.elapsed(), uploads, upload_bytes, errors);
             if painted_tiles > 0 && errors == 0 {
-                self.schedule_frame_acknowledgement(window, cx);
+                self.acknowledge_consumed_frame();
             } else {
-                // A synchronous draw can replace a scene before its submission.
-                // Earlier callbacks must not confirm this incomplete desktop.
+                // Do not release server capacity for an incomplete desktop.
                 self.invalidate_frame_acknowledgements();
             }
         }
     }
 
-    fn schedule_frame_acknowledgement(&mut self, window: &Window, cx: &Context<Self>) {
+    fn acknowledge_consumed_frame(&mut self) {
         let Some(token) = &self.image_acknowledgement else {
             return;
         };
-        if self.scheduled_acknowledgement.as_ref() == Some(token) {
+        if !token.requires_presentation() {
+            return;
+        }
+        if self.consumed_acknowledgement.as_ref() == Some(token) {
             return;
         }
         let Some(sender) = self.sender.clone() else {
             return;
         };
-        let token = token.clone();
-        self.scheduled_acknowledgement = Some(token.clone());
-        let generation = self.presentation_generation;
-        let view = cx.weak_entity();
-        // GPUI may draw synchronously for keyboard dispatch without presenting.
-        // Two platform callbacks guarantee an intervening scene submit/commit;
-        // this is a submission barrier, not a GPU completion notification.
-        window.on_next_frame(move |window, cx| {
-            if !view
-                .update(cx, |this, _| {
-                    this.frame_acknowledgement_ready(generation, &token)
-                })
-                .unwrap_or(false)
-            {
-                return;
-            }
-            window.on_next_frame(move |_, cx| {
-                let _ = view.update(cx, |this, _| {
-                    if !this.frame_acknowledgement_ready(generation, &token) {
-                        return;
-                    }
-                    // A newer desktop may already be scheduled. Confirming this
-                    // submitted one still frees capacity in the server's window.
-                    sender.frame_presented(token);
-                });
-            });
-        });
-    }
-
-    fn frame_acknowledgement_ready(
-        &mut self,
-        generation: u64,
-        token: &rustrdp::FrameToken,
-    ) -> bool {
-        if generation != self.presentation_generation {
-            return false;
-        }
-        if !self.closed && self.state == State::Connected && self.surface_visible() {
-            return true;
-        }
-        if self.scheduled_acknowledgement.as_ref() == Some(token) {
-            self.invalidate_frame_acknowledgements();
-        }
-        false
+        // Legacy Surface frames require presentation (MS-RDPRFX 2.2.3.1).
+        // Graphics pipeline frames were already acknowledged when their output
+        // bitmap was copied. GPU image retirement has its own frame callbacks.
+        sender.frame_presented(token.clone());
+        self.consumed_acknowledgement = Some(token.clone());
     }
 
     pub(super) fn invalidate_frame_acknowledgements(&mut self) {
-        if self.scheduled_acknowledgement.take().is_some() {
-            self.presentation_generation = self.presentation_generation.wrapping_add(1);
-        }
+        self.consumed_acknowledgement = None;
     }
 
     fn refresh_images(&mut self, window: &mut Window) {
@@ -604,13 +562,18 @@ impl RdpView {
         }
         self.image_size = (frame.width, frame.height);
         self.image_acknowledgement = frame.acknowledgement.clone();
-        self.hide_local_pointer = frame.hide_local_pointer;
+        self.hide_local_pointer = self
+            .cursor
+            .hides_platform_cursor()
+            .unwrap_or(frame.hide_local_pointer);
+        self.cursor.frame(frame.clone());
         retire_images(window, retired);
         self.performance
             .prepared(&frame, prepared_tiles, prepared_bytes, started.elapsed());
     }
 
     pub(super) fn clear_images(&mut self, window: &mut Window) {
+        self.cursor.clear(window);
         let retired = self.images.drain(..).map(|tile| tile.image).collect();
         retire_images(window, retired);
         self.image_size = (0, 0);

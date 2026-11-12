@@ -57,6 +57,7 @@ impl Workspace {
                             (tr(i18n_key::COMMON_SETTINGS_DIALOG), "Ctrl+,"),
                             (tr(i18n_key::SETTINGS_LOCK_RUSTTERM), "Ctrl+Shift+L"),
                             (tr(i18n_key::WORKSPACE_CLOSE_CURRENT_PANE), "Ctrl+Shift+W"),
+                            (tr(i18n_key::TERMINAL_RECONNECT_ENDED_SESSION), "Ctrl+Shift+R"),
                             (tr(i18n_key::WORKSPACE_COPY_PASTE), "Ctrl+Shift+C / V"),
                             (tr(i18n_key::WORKSPACE_SEARCH_OUTPUT), "Ctrl+Shift+F"),
                             (tr(i18n_key::WORKSPACE_SFTP_FILE_MANAGER), "Ctrl+Shift+S"),
@@ -79,6 +80,29 @@ impl Workspace {
                                 .child(label)
                                 .child(div().text_color(rgb(ui::colors().muted)).child(key))
                         }),
+                    )
+                    .child(
+                        div()
+                            .pt_3()
+                            .border_t_1()
+                            .border_color(rgb(ui::colors().border))
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(tr(i18n_key::TERMINAL_SHELL_SHORTCUTS))
+                            .children([
+                                (i18n_key::TERMINAL_SHELL_SEARCH_HISTORY, "Ctrl+R"),
+                                (i18n_key::TERMINAL_SHELL_KILL_TO_START, "Ctrl+U"),
+                                (i18n_key::TERMINAL_SHELL_KILL_TO_END, "Ctrl+K"),
+                                (i18n_key::TERMINAL_SHELL_YANK, "Ctrl+Y"),
+                                (i18n_key::TERMINAL_SHELL_LINE_START_END, "Ctrl+A / E"),
+                            ].into_iter().map(|(label, key)| {
+                                div().flex().justify_between().gap_3()
+                                    .child(tr(label))
+                                    .child(div().flex_shrink_0().text_color(rgb(ui::colors().muted)).child(key))
+                            }))
+                            .child(div().text_color(rgb(ui::colors().muted)).child(tr(i18n_key::TERMINAL_SHELL_SHORTCUTS_NOTE)))
+                            .child(div().text_color(rgb(ui::colors().muted)).child(tr(i18n_key::TERMINAL_SHELL_STATUS_SUPPORT))),
                     )
                     .into_any_element(),
                 None,
@@ -263,12 +287,13 @@ impl Workspace {
             }
         };
         let settings = matches!(modal, Modal::Settings(_));
+        let ports = matches!(modal, Modal::Tunnels(_));
         let rdp_profile =
             matches!(modal, Modal::Profile(form) if form.read(cx).kind == ProfileKind::Rdp);
         let settings_dirty = matches!(modal, Modal::Settings(form) if form.read(cx).is_dirty(cx));
         let save_enabled =
             !settings || ((settings_dirty || self.save_failed) && !self.modal_saving);
-        let body = if settings || rdp_profile {
+        let body = if settings || rdp_profile || ports {
             div()
                 .size_full()
                 .min_w_0()
@@ -295,6 +320,7 @@ impl Workspace {
             .w(px(if settings { 900. } else { 700. }))
             .when(settings, |card| card.h(px(640.)).overflow_hidden())
             .when(rdp_profile, |card| card.h(px(620.)))
+            .when(ports, |card| card.h(px(620.)))
             .max_w(relative(0.95))
             .max_h(relative(0.92))
             .flex()

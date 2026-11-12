@@ -2,12 +2,13 @@ use crate::{Error, Limits, Result, wire::Reader};
 
 use super::{PointerKind, bitmap};
 
-pub(super) struct Shape {
-    pub hotspot_x: u16,
-    pub hotspot_y: u16,
-    pub width: usize,
-    pub height: usize,
-    pub pixels: Vec<Pixel>,
+/// A validated, cached RDP cursor with its original alpha and AND/XOR semantics.
+pub struct Shape {
+    pub(super) hotspot_x: u16,
+    pub(super) hotspot_y: u16,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) pixels: Vec<Pixel>,
     alpha: bool,
 }
 
@@ -17,7 +18,7 @@ pub(super) struct Pixel {
 }
 
 impl Shape {
-    pub fn decode(
+    pub(super) fn decode(
         kind: PointerKind,
         data: &[u8],
         limits: Limits,
@@ -134,11 +135,33 @@ impl Shape {
         ))
     }
 
-    pub fn bytes(&self) -> usize {
+    pub(super) fn bytes(&self) -> usize {
         self.pixels.len() * size_of::<Pixel>()
     }
 
-    pub fn composite(&self, index: usize, destination: &mut [u8]) {
+    /// Cursor dimensions in remote desktop pixels.
+    pub fn size(&self) -> (u16, u16) {
+        (self.width as u16, self.height as u16)
+    }
+
+    /// Hotspot relative to the top-left corner of the cursor image.
+    pub fn hotspot(&self) -> (u16, u16) {
+        (self.hotspot_x, self.hotspot_y)
+    }
+
+    /// Composite onto a cursor-sized, top-down BGRA background, in place.
+    /// The exact background is required for legacy AND/XOR and inversion pixels.
+    pub fn composite(&self, background: &mut [u8]) -> Result<()> {
+        if background.len() != self.width * self.height * 4 {
+            return Err(Error::Invalid("cursor background dimensions"));
+        }
+        for (index, pixel) in background.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            self.composite_pixel(index, pixel);
+        }
+        Ok(())
+    }
+
+    pub(super) fn composite_pixel(&self, index: usize, destination: &mut [u8]) {
         let pixel = &self.pixels[index];
         if !self.alpha || pixel.and && pixel.color[3] == 255 {
             for (dest, &source) in destination[..3].iter_mut().zip(&pixel.color[..3]) {

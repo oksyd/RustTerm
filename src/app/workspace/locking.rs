@@ -169,6 +169,7 @@ impl Workspace {
             return false;
         }
         self.closing = true;
+        self.ports.registry.stop_all();
         self.files.clear();
         self.files_subscriptions.clear();
         for pane in self.panes.values() {

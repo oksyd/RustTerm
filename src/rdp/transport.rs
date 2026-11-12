@@ -1,4 +1,4 @@
-use super::{RdpError, Result};
+use super::{ConnectionFailure, ConnectionStage, RdpError, RdpLatency, Result};
 pub(super) mod sidebands;
 pub(super) mod udp;
 use rustrdp::wire;
@@ -29,6 +29,7 @@ const MAX_QUEUED_PACKETS: usize = 32768;
 pub(super) struct Framed<S> {
     stream: S,
     buffered: BytesMut,
+    stage: ConnectionStage,
 }
 
 impl<S> Framed<S> {
@@ -36,7 +37,16 @@ impl<S> Framed<S> {
         Self {
             stream,
             buffered: BytesMut::new(),
+            stage: ConnectionStage::Session,
         }
+    }
+
+    pub fn stage(&self) -> ConnectionStage {
+        self.stage
+    }
+
+    pub fn set_stage(&mut self, stage: ConnectionStage) {
+        self.stage = stage;
     }
 
     pub fn get_ref(&self) -> &S {
@@ -64,8 +74,13 @@ impl<S: AsyncRead + AsyncWrite> Framed<S> {
             Framed {
                 stream: read,
                 buffered: self.buffered,
+                stage: self.stage,
             },
-            Framed::new(write),
+            Framed {
+                stream: write,
+                buffered: BytesMut::new(),
+                stage: self.stage,
+            },
         )
     }
 }
@@ -134,9 +149,9 @@ impl<S: AsyncRead + Unpin> Framed<S> {
                 .stream
                 .read_buf(&mut buffer)
                 .await
-                .map_err(|_| RdpError::Connection)?;
+                .map_err(|error| RdpError::io(self.stage, error))?;
             if count == 0 {
-                return Err(RdpError::Connection);
+                return Err(RdpError::network(self.stage, ConnectionFailure::Closed));
             }
         }
     }
@@ -150,9 +165,12 @@ impl<S: AsyncWrite + Unpin> Framed<S> {
         self.stream
             .write_all(data)
             .await
-            .map_err(|_| RdpError::Connection)?;
+            .map_err(|error| RdpError::io(self.stage, error))?;
         // TLS may accept plaintext while encrypted records remain buffered.
-        self.stream.flush().await.map_err(|_| RdpError::Connection)
+        self.stream
+            .flush()
+            .await
+            .map_err(|error| RdpError::io(self.stage, error))
     }
 }
 
@@ -162,7 +180,15 @@ pub(super) struct Writer {
     shared: Arc<Shared>,
     task: JoinHandle<()>,
     duration: Duration,
+    stage: ConnectionStage,
     pub errors: mpsc::Receiver<RdpError>,
+}
+
+#[derive(Clone)]
+pub(super) struct WriterSender {
+    shared: Arc<Shared>,
+    duration: Duration,
+    stage: ConnectionStage,
 }
 
 struct Shared {
@@ -180,12 +206,15 @@ struct Queue {
     byte_limit: usize,
     packet_limit: usize,
     failure: Option<RdpError>,
+    latency: RdpLatency,
 }
 
 struct Queued {
     packet: Vec<u8>,
     cancel: Option<CancellationToken>,
     receipt: Option<oneshot::Sender<Result<()>>>,
+    queued_at: std::time::Instant,
+    input_generation: Option<rustrdp::InputGeneration>,
 }
 
 impl Writer {
@@ -202,6 +231,7 @@ impl Writer {
         byte_limit: usize,
         packet_limit: usize,
     ) -> Self {
+        let stage = write.stage();
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
                 channels: BTreeMap::new(),
@@ -211,6 +241,7 @@ impl Writer {
                 byte_limit,
                 packet_limit,
                 failure: None,
+                latency: RdpLatency::default(),
             }),
             ready: Notify::new(),
             available: Notify::new(),
@@ -233,12 +264,16 @@ impl Writer {
                     .cancel
                     .as_ref()
                     .is_some_and(CancellationToken::is_cancelled)
+                    || queued
+                        .input_generation
+                        .as_ref()
+                        .is_some_and(|generation| !generation.is_valid())
                 {
                     worker
                         .queue
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .finished(length);
+                        .finished(length, None);
                     worker.available.notify_waiters();
                     if let Some(receipt) = queued.receipt {
                         let _ = receipt.send(Err(RdpError::ClipboardUnavailable));
@@ -249,7 +284,7 @@ impl Writer {
                 // bytes have been written, finish it or close the transport.
                 let result = timeout(duration, write.write(&queued.packet))
                     .await
-                    .map_err(|_| RdpError::Timeout)
+                    .map_err(|_| RdpError::network(write.stage(), ConnectionFailure::TimedOut))
                     .and_then(|result| result);
                 match result {
                     Ok(()) => {
@@ -257,7 +292,7 @@ impl Writer {
                             .queue
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())
-                            .finished(length);
+                            .finished(length, Some(queued.queued_at.elapsed()));
                         worker.available.notify_waiters();
                         if let Some(receipt) = queued.receipt {
                             let _ = receipt.send(Ok(()));
@@ -284,17 +319,60 @@ impl Writer {
             shared,
             task,
             duration,
+            stage,
             errors,
         }
     }
 
-    /// `cancel` applies to a complete packet or a complete bundled channel message.
-    /// Never attach it to individual fragments: a partially sent message must drain.
+    pub fn sender(&self) -> WriterSender {
+        WriterSender {
+            shared: self.shared.clone(),
+            duration: self.duration,
+            stage: self.stage,
+        }
+    }
+
     pub async fn enqueue(
         &self,
         packet: Vec<u8>,
         cancel: Option<CancellationToken>,
         receipt: Option<oneshot::Sender<Result<()>>>,
+    ) -> Result<()> {
+        self.sender()
+            .enqueue_inner(packet, cancel, receipt, None)
+            .await
+    }
+
+    pub fn take_latency(&self) -> RdpLatency {
+        std::mem::take(
+            &mut self
+                .shared
+                .queue
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .latency,
+        )
+    }
+}
+
+impl WriterSender {
+    pub async fn enqueue_input(
+        &self,
+        packet: Vec<u8>,
+        generation: rustrdp::InputGeneration,
+    ) -> Result<()> {
+        self.enqueue_inner(packet, None, None, Some(generation))
+            .await
+    }
+
+    /// `cancel` applies to a complete packet or a complete bundled channel message.
+    /// Never attach it to individual fragments: a partially sent message must drain.
+    async fn enqueue_inner(
+        &self,
+        packet: Vec<u8>,
+        cancel: Option<CancellationToken>,
+        receipt: Option<oneshot::Sender<Result<()>>>,
+        input_generation: Option<rustrdp::InputGeneration>,
     ) -> Result<()> {
         if packet.is_empty() || packet.len() > MAX_PDU {
             return Err(RdpError::Limit("outgoing transport packet"));
@@ -302,6 +380,12 @@ impl Writer {
         let channel = outgoing_channel(&packet);
         timeout(self.duration, async {
             loop {
+                if input_generation
+                    .as_ref()
+                    .is_some_and(|generation| !generation.is_valid())
+                {
+                    return Ok(());
+                }
                 // Register before checking capacity so a concurrent completion
                 // cannot be missed between releasing the lock and waiting.
                 let available = self.shared.available.notified();
@@ -336,6 +420,8 @@ impl Writer {
                                 packet,
                                 cancel,
                                 receipt,
+                                queued_at: std::time::Instant::now(),
+                                input_generation,
                             });
                         queue.bytes = bytes;
                         queue.packets += 1;
@@ -348,7 +434,7 @@ impl Writer {
             }
         })
         .await
-        .map_err(|_| RdpError::Timeout)?
+        .map_err(|_| RdpError::network(self.stage, ConnectionFailure::TimedOut))?
     }
 }
 
@@ -382,11 +468,14 @@ impl Queue {
         Some(packet)
     }
 
-    fn finished(&mut self, bytes: usize) {
+    fn finished(&mut self, bytes: usize, latency: Option<std::time::Duration>) {
         // Drop can abort the task while its write completes on another thread.
         if self.failure.is_none() {
             self.bytes -= bytes;
             self.packets -= 1;
+            if let Some(elapsed) = latency {
+                self.latency.record(elapsed);
+            }
         }
     }
 
@@ -509,6 +598,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn obsolete_input_is_discarded_before_the_writer_starts_it() {
+        let session = super::super::input_worker::test_session();
+        session.resume_input();
+        let input = session.input_controller();
+        let batch = input
+            .encode(rustrdp::Input::Pointer { x: 10, y: 20 })
+            .unwrap()
+            .unwrap();
+        let (client, mut peer) = tokio::io::duplex(1);
+        let writer = Writer::new(Framed::new(client), Duration::from_secs(1));
+        let first = channel_packet(1004, 1);
+        writer.enqueue(first.clone(), None, None).await.unwrap();
+        // The first packet is in flight and cannot be cancelled halfway through.
+        tokio::task::yield_now().await;
+        for packet in batch.packets {
+            writer
+                .sender()
+                .enqueue_input(packet, batch.generation.clone())
+                .await
+                .unwrap();
+        }
+        drop(session);
+        assert!(!batch.generation.is_valid());
+        let last = channel_packet(1004, 2);
+        writer.enqueue(last.clone(), None, None).await.unwrap();
+        let expected: Vec<_> = first.into_iter().chain(last).collect();
+        let mut received = vec![0; expected.len()];
+        timeout(Duration::from_secs(1), peer.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, expected);
+    }
+
+    #[tokio::test]
     async fn writer_waits_for_in_flight_byte_and_packet_capacity() {
         for (byte_limit, packet_limit) in [(15, 8), (1024, 1)] {
             let (client, mut server) = tokio::io::duplex(1);
@@ -558,7 +682,10 @@ mod tests {
             )
             .await
             .unwrap(),
-            Err(RdpError::Timeout)
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::TimedOut
+            ))
         );
     }
 
@@ -594,9 +721,18 @@ mod tests {
         drop(server);
         assert_eq!(
             timeout(Duration::from_secs(1), pending).await.unwrap(),
-            Err(RdpError::Connection)
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
         );
-        assert_eq!(received.await.unwrap(), Err(RdpError::Connection));
+        assert_eq!(
+            received.await.unwrap(),
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
+        );
     }
 
     #[tokio::test]
@@ -618,13 +754,31 @@ mod tests {
             timeout(Duration::from_secs(1), writer.errors.recv())
                 .await
                 .unwrap(),
-            Some(RdpError::Connection)
+            Some(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
         );
-        assert_eq!(first_rx.await.unwrap(), Err(RdpError::Connection));
-        assert_eq!(second_rx.await.unwrap(), Err(RdpError::Connection));
+        assert_eq!(
+            first_rx.await.unwrap(),
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
+        );
+        assert_eq!(
+            second_rx.await.unwrap(),
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
+        );
         assert_eq!(
             writer.enqueue(channel_packet(1003, 1), None, None).await,
-            Err(RdpError::Connection)
+            Err(RdpError::network(
+                ConnectionStage::Session,
+                ConnectionFailure::Closed
+            ))
         );
     }
 
@@ -647,6 +801,24 @@ mod tests {
         let mut sent = [0; 5];
         server.read_exact(&mut sent).await.unwrap();
         assert_eq!(sent, [0, 5, 6, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn split_transport_retains_authentication_and_session_failure_phases() {
+        for stage in [
+            ConnectionStage::Authentication,
+            ConnectionStage::SessionSetup,
+            ConnectionStage::Session,
+        ] {
+            let (client, server) = tokio::io::duplex(64);
+            let mut framed = Framed::new(client);
+            framed.set_stage(stage);
+            let (mut read, mut write) = framed.split();
+            drop(server);
+            let expected = RdpError::network(stage, ConnectionFailure::Closed);
+            assert_eq!(read.read_pdu().await, Err(expected.clone()));
+            assert_eq!(write.write(&[0]).await, Err(expected));
+        }
     }
 
     #[tokio::test]

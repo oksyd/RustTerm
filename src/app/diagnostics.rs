@@ -42,6 +42,17 @@ pub fn record(directory: &Path, event: &'static str, id: usize) {
     record_values(directory, event, [id as u64, 0, 0]);
 }
 
+/// Startup may exit immediately: do not enqueue an error that the worker never
+/// gets a chance to write. Categories are static and contain no configuration data.
+pub fn startup_failure(directory: &Path, reason: &'static str) {
+    append(Entry {
+        directory: directory.to_owned(),
+        event: "startup-failed",
+        context: Some(reason),
+        values: vec![u64::from(cfg!(debug_assertions))],
+    });
+}
+
 pub fn record_with_context(
     directory: &Path,
     event: &'static str,

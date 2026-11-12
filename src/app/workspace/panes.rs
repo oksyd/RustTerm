@@ -495,10 +495,11 @@ impl Workspace {
 
     fn replacement_has_focus(&self, id: usize, window: &Window, cx: &App) -> bool {
         self.focused == id
-            && (self
-                .command_views
-                .get(&id)
-                .is_some_and(|commands| commands.read(cx).owns_focus(window, cx))
+            && (self.ports_own_focus(window, cx)
+                || self
+                    .command_views
+                    .get(&id)
+                    .is_some_and(|commands| commands.read(cx).owns_focus(window, cx))
                 || self
                     .panes
                     .get(&id)
@@ -709,8 +710,14 @@ impl Workspace {
             PaneEvent::Files => self.toggle_tool(SessionTool::Files, window, cx),
             PaneEvent::Commands => self.toggle_tool(SessionTool::Commands, window, cx),
             PaneEvent::Docker => self.toggle_tool(SessionTool::Docker, window, cx),
+            PaneEvent::Ports => self.toggle_tool(SessionTool::Ports, window, cx),
             PaneEvent::Resources => self.toggle_tool(SessionTool::Resources, window, cx),
             PaneEvent::Reconnect(id) => {
+                // Ignore a queued terminal retry if another attempt already started.
+                if matches!(self.panes.get(id), Some(Pane::Terminal(view)) if view.read(cx).is_running())
+                {
+                    return;
+                }
                 if self.reconnect_container(*id, cx) {
                     return;
                 }

@@ -342,6 +342,8 @@ impl Fixture {
                 shell_integration: false,
                 jump_hosts: vec![],
                 forwards: vec![],
+                auto_forward: Default::default(),
+                forwarding_registry: None,
                 authentication: None,
             },
             80,

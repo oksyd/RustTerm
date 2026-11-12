@@ -62,6 +62,38 @@ rdp-copy-from-remote = Copy from remote
 
 rdp-could-not-connect-to-the-rdp-server = Could not connect to the RDP server
 
+rdp-connection-failed = RDP connection failed
+rdp-stage-resolve = Resolving the server address
+rdp-stage-connect = Connecting to the server port
+rdp-stage-socket-setup = Configuring the network connection
+rdp-stage-negotiation = Negotiating the RDP connection
+rdp-stage-tls = Establishing the secure connection
+rdp-stage-authentication = Authenticating
+rdp-stage-session-setup = Initializing the remote desktop
+rdp-stage-session = Transferring session data
+rdp-stage-multitransport = Transferring auxiliary channel data
+rdp-failure-name-resolution = The server address could not be resolved
+rdp-failure-refused = The connection was refused
+rdp-failure-reset = The connection was reset
+rdp-failure-closed = The remote endpoint closed the connection
+rdp-failure-timed-out = The operation timed out
+rdp-failure-unreachable = The network or destination address is unreachable
+rdp-failure-permission-denied = The system denied network access
+rdp-failure-other = A network I/O error occurred
+rdp-server-security-incompatible = The server's RDP security requirements are incompatible with this connection
+rdp-server-certificate-unavailable = The server has no valid authentication certificate
+rdp-server-client-certificate-required = The server requires client certificate authentication
+rdp-server-entra-required = The server requires Microsoft Entra ID authentication
+rdp-server-negotiation-rejected = The server rejected RDP security negotiation
+rdp-server-admin-disconnected = An administrator disconnected the remote session
+rdp-server-admin-logged-off = An administrator logged off the remote session
+rdp-server-idle-timeout = The server disconnected the session because its idle time limit was reached
+rdp-server-session-time-limit = The server disconnected the session because its active time limit was reached
+rdp-server-session-replaced = This remote desktop session was replaced by another connection
+rdp-server-out-of-memory = The server ran out of available memory
+rdp-server-connection-denied = The server denied the connection
+rdp-server-session-ended = The server ended the remote desktop session
+
 rdp-could-not-offer-the-remote-files-to-the-local-clipboard = Could not offer the remote files to the local clipboard
 
 rdp-could-not-read-a-file-for-the-remote-desktop = Could not read a file for the remote desktop

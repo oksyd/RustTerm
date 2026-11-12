@@ -88,6 +88,7 @@ impl Workspace {
             }) => Vec::new(),
             Some(Modal::Profile(form)) => form.read(cx).inputs(cx),
             Some(Modal::Settings(form)) => form.read(cx).inputs(cx),
+            Some(Modal::Tunnels(panel)) => panel.read(cx).inputs(cx),
             Some(Modal::Group { fields, .. }) => fields.inputs(),
             Some(Modal::Auth {
                 secret,

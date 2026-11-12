@@ -70,7 +70,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y build-essential dpkg-dev xz-utils cmake ninja-build nasm pkg-config libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-dpms0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xinput-dev libxcb-xkb-dev libasound2-dev libssl-dev
+          sudo apt-get install --no-install-recommends -y build-essential dpkg-dev xz-utils cmake ninja-build nasm pkg-config zsh libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libxcb-composite0-dev libxcb-damage0-dev libxcb-dpms0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev libxcb-shm0-dev libxcb-sync-dev libxcb-xinput-dev libxcb-xkb-dev libasound2-dev libssl-dev
       - name: Check Rust formatting
         shell: bash
         run: |
@@ -89,7 +89,17 @@ jobs:
           cargo test --locked --bin rustterm app::rdp_view::
           cargo test --locked --lib update::
           cargo test --locked --lib config::
+          cargo test --locked --test startup
+          cargo test --locked --lib terminal::
+          cargo test --locked --lib session::actor::
+          cargo test --locked --bin rustterm app::terminal_view::
+          cargo test --locked --bin rustterm app::workspace::palette::shortcut_tests
+          RUSTTERM_TEST_ZSH=zsh cargo test --locked --test pty shell_interaction
           cargo test --locked --lib session::local::
+          cargo test --locked --lib session::ssh::
+          cargo test --locked --bin rustterm app::workspace::ports::
+          cargo test --locked --test ssh
+          cargo test --locked --test ssh_tunnel
           cargo test --locked --lib docker::
           cargo test --locked --test docker
           python3 -m unittest discover -s src/update/installer -p test_install.py

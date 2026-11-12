@@ -3,6 +3,10 @@ use std::collections::BTreeSet;
 
 use crate::{ConnectionInfo, Error, Result, wire};
 
+mod concurrent;
+pub(crate) use concurrent::SessionInput;
+pub use concurrent::{EncodedInput, InputController, InputGeneration};
+
 /// Logical button independent of the client's native window system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MouseButton {

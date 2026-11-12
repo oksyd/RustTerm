@@ -94,9 +94,47 @@ fn shared_tile_regions_keep_refinement_alive_after_the_original_context_is_delet
 }
 
 #[test]
-fn shared_context_upgrade_survives_graphics_messages_and_frame_boundaries() {
+fn pending_tile_associations_survive_frame_boundaries() {
+    let mut streams = Reader::new(include_bytes!("../fixtures/progressive-upgrades.bin"));
+    let first_length = streams.u32_le().unwrap() as usize;
+    let first = streams.take(first_length).unwrap();
+    let upgrade_length = streams.u32_le().unwrap() as usize;
+    let upgrade = streams.take(upgrade_length).unwrap();
+    let mut decoder = Decoder::new(64 * 64 * 4);
+    decoder.begin_frame();
+    decoder
+        .decode_bitmap(1, 10, 64, 64, &packet(&[], [32, 0, 32, 64], 6, Some(1)))
+        .unwrap();
+    decoder.end_frame();
+    decoder.begin_frame();
+    decoder.decode_bitmap(1, 20, 64, 64, first).unwrap();
+    decoder.end_frame();
+    decoder.delete_context(1, 20);
+    decoder.begin_frame();
+    let tiles = decoder.decode_bitmap(1, 10, 64, 64, upgrade).unwrap();
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].pixels.len(), 64 * 64 * 4);
+    let expected =
+        &include_bytes!("../fixtures/progressive-upgrades.bgra")[64 * 64 * 4..2 * 64 * 64 * 4];
+    for (actual, expected) in tiles[0].pixels.iter().zip(expected) {
+        assert!(actual.abs_diff(*expected) <= 1);
+    }
+    decoder.end_frame();
+    decoder.delete_context(1, 10);
+    decoder.delete_surface(1);
+    assert_eq!(decoder.bytes, 0);
+}
+
+#[test]
+fn pending_context_upgrade_survives_graphics_messages_and_frame_boundaries() {
     use super::super::{CAPABILITIES, Gfx, pdu};
     use crate::{Limits, graphics::Graphics};
+    let mut streams = Reader::new(include_bytes!("../fixtures/progressive-upgrades.bin"));
+    let first_length = streams.u32_le().unwrap() as usize;
+    let first = streams.take(first_length).unwrap().to_vec();
+    let upgrade_length = streams.u32_le().unwrap() as usize;
+    let upgrade = streams.take(upgrade_length).unwrap().to_vec();
+    let expected = include_bytes!("../fixtures/progressive-upgrades.bgra");
     let limits = Limits::default();
     let mut gfx = Gfx::new(limits, true);
     let mut graphics = Graphics::new(64, 64, limits).unwrap();
@@ -130,58 +168,38 @@ fn shared_context_upgrade_survives_graphics_messages_and_frame_boundaries() {
             pdu(14, &reset),
             pdu(9, &[1, 0, 64, 0, 64, 0, 0x20]),
             pdu(15, &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-            pdu(11, &[0, 0, 0, 0, 1, 0, 0, 0]),
-            wire(
-                10,
-                packet(
-                    &[initial(0xccc6, false, 0, &[0; 4])],
-                    [0, 0, 32, 64],
-                    6,
-                    Some(1),
-                ),
-            ),
+            pdu(11, &[0; 8]),
             wire(20, packet(&[], [32, 0, 32, 64], 6, Some(1))),
+            pdu(12, &0u32.to_le_bytes()),
+            pdu(11, &[0, 0, 0, 0, 1, 0, 0, 0]),
+            wire(10, first),
             pdu(12, &1u32.to_le_bytes()),
         ],
     );
-    assert!(
-        graphics
-            .pixels()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| *p == [128, 128, 128, 255])
-    );
+    for (actual, expected) in graphics.pixels().iter().zip(&expected[..64 * 64 * 4]) {
+        assert!(actual.abs_diff(*expected) <= 1);
+    }
     receive(
         &mut gfx,
         &mut graphics,
         vec![
             pdu(3, &[1, 0, 10, 0, 0, 0]),
             pdu(11, &[0, 0, 0, 0, 2, 0, 0, 0]),
-            wire(
-                20,
-                packet(
-                    &[refinement([&[255; 8], &[0; 8], &[0; 8]])],
-                    [0, 0, 64, 64],
-                    6,
-                    None,
-                ),
-            ),
+            wire(20, upgrade),
             pdu(12, &2u32.to_le_bytes()),
         ],
     );
-    assert!(
-        graphics
-            .pixels()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|p| *p == [129, 129, 129, 255])
-    );
+    for (actual, expected) in graphics
+        .pixels()
+        .iter()
+        .zip(&expected[64 * 64 * 4..2 * 64 * 64 * 4])
+    {
+        assert!(actual.abs_diff(*expected) <= 1);
+    }
 }
 
 #[test]
-fn deleted_pending_contexts_are_not_resurrected_and_frame_links_are_bounded() {
+fn deleted_contexts_are_not_resurrected_and_tile_links_are_bounded() {
     let mut decoder = Decoder::new(64 * 64 * 4);
     for _ in 0..8 {
         decoder.begin_frame();
@@ -212,8 +230,12 @@ fn deleted_pending_contexts_are_not_resurrected_and_frame_links_are_bounded() {
             BTreeSet::from([20])
         );
         decoder.end_frame();
-        assert!(decoder.surfaces[&1].frame_contexts.is_empty());
+        assert_eq!(
+            decoder.surfaces[&1].tile_contexts[&(0, 0)],
+            BTreeSet::from([20])
+        );
         decoder.delete_context(1, 20);
+        assert!(decoder.surfaces[&1].tile_contexts.is_empty());
         assert_eq!(decoder.bytes, TILE_BYTES);
     }
     decoder.begin_frame();

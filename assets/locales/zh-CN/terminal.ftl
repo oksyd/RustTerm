@@ -361,3 +361,20 @@ terminal-zmodem-direction-status = ZMODEM { $direction } · { $status }
 terminal-zmodem-select-a-download-folder = ZMODEM：选择下载保存目录
 
 terminal-zmodem-select-files-to-upload = ZMODEM：选择上传文件
+
+terminal-status-editing = { " " }· 编辑命令
+terminal-status-awaiting-input = { " " }· 等待输入
+terminal-reconnect-in-this-tab = 重新连接（Ctrl+Shift+R）：复用当前标签，之前的输出可在早期连接记录中查看。
+terminal-reconnect-ended-session = 重新连接当前已断开的终端会话
+terminal-status-executing = { " " }· 执行命令中
+terminal-status-history-search = { " " }· 历史搜索中
+terminal-interaction-history-supported = Shell 集成可报告命令编辑、执行和 Zsh 增量历史搜索状态。常用 Shell 快捷键见帮助。
+terminal-interaction-history-unavailable = 此 Shell 集成只能确认提示符就绪和命令执行，无法区分普通编辑与历史搜索，因此统一显示“等待输入”。常用 Shell 快捷键见帮助。
+terminal-shell-shortcuts = Shell 快捷键
+terminal-shell-search-history = 向后搜索命令历史
+terminal-shell-kill-to-start = 剪切至行首或整行（依 Shell 而定）
+terminal-shell-kill-to-end = 剪切光标到行尾的内容
+terminal-shell-yank = 粘贴之前剪切的内容
+terminal-shell-line-start-end = 移动到行首 / 行尾
+terminal-shell-shortcuts-note = 以上为常用 Emacs 编辑快捷键，Shell、编辑模式或插件可能修改它们。RustTerm 直接传递按键，不弹出操作提示。
+terminal-shell-status-support = 状态栏跟随当前终端。Bash、Fish 显示“等待输入”或“执行命令中”；Zsh 钩子可用时，还能区分“编辑命令”与内置的“历史搜索中”。全屏程序使用备用屏幕状态。

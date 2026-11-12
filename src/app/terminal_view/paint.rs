@@ -256,15 +256,12 @@ pub(super) fn paint_terminal(
         };
         let cell_background = |column: usize| {
             let cell = &cells[column];
-            if cursor_columns.contains(&column) {
-                view.settings.theme.cursor
-            } else if cell.selected {
-                view.settings.theme.selection
-            } else if let Some(highlight) = cell.search_highlight {
-                search_background(highlight)
-            } else {
-                cell.background
-            }
+            background_for_cell(
+                cell,
+                cursor_columns.contains(&column),
+                &view.settings.theme,
+                view.settings.highlight_selection_matches,
+            )
         };
         let mut column = 0;
         while column < cells.len() {
@@ -463,10 +460,101 @@ fn search_background(highlight: SearchHighlight) -> u32 {
 fn same_style(a: &Cell, b: &Cell) -> bool {
     a.selected == b.selected
         && a.search_highlight == b.search_highlight
+        && a.selection_match == b.selection_match
         && a.foreground == b.foreground
         && a.bold == b.bold
         && a.italic == b.italic
         && a.underline == b.underline
         && a.hidden == b.hidden
         && a.strikeout == b.strikeout
+}
+
+fn selection_match_background(background: u32, selection: u32) -> u32 {
+    [0, 8, 16].into_iter().fold(0, |color, shift| {
+        let channel = (((background >> shift) & 255) * 3 + ((selection >> shift) & 255) * 2) / 5;
+        color | (channel << shift)
+    })
+}
+
+fn background_for_cell(
+    cell: &Cell,
+    cursor: bool,
+    theme: &rustterm::config::Theme,
+    selection_matches: bool,
+) -> u32 {
+    if cursor {
+        theme.cursor
+    } else if cell.selected {
+        theme.selection
+    } else if let Some(highlight) = cell.search_highlight {
+        search_background(highlight)
+    } else if selection_matches && cell.selection_match {
+        selection_match_background(cell.background, theme.selection)
+    } else {
+        cell.background
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::{
+        config::Theme,
+        terminal::{SelectionKind, Terminal},
+    };
+
+    #[test]
+    fn occurrence_background_adapts_to_theme_and_yields_to_selection_search_and_cursor() {
+        let mut terminal = Terminal::new(20, 2, 0);
+        terminal.feed(b"word word");
+        terminal.begin_selection(1, 0, SelectionKind::Word);
+        let snapshot = terminal.snapshot();
+        for theme in [
+            Theme::default(),
+            Theme {
+                background: 0xffffff,
+                foreground: 0x202124,
+                selection: 0x9dbcf0,
+                cursor: 0x111111,
+                ..Theme::default()
+            },
+        ] {
+            let mut cell = snapshot.lines[0].cells[5].clone();
+            cell.background = theme.background;
+            assert_eq!(
+                background_for_cell(&cell, false, &theme, false),
+                cell.background
+            );
+            let occurrence = background_for_cell(&cell, false, &theme, true);
+            assert_ne!(occurrence, theme.background);
+            assert_ne!(occurrence, theme.selection);
+            assert_ne!(occurrence, SEARCH_MATCH_BACKGROUND);
+            for shift in [0, 8, 16] {
+                let background = (theme.background >> shift) & 255;
+                let selected = (theme.selection >> shift) & 255;
+                let matched = (occurrence >> shift) & 255;
+                assert!((background.min(selected)..=background.max(selected)).contains(&matched));
+                assert!(
+                    (matched as i32 - background as i32).abs()
+                        <= (selected as i32 - matched as i32).abs()
+                );
+            }
+            cell.search_highlight = Some(SearchHighlight::Match);
+            assert_eq!(
+                background_for_cell(&cell, false, &theme, true),
+                SEARCH_MATCH_BACKGROUND
+            );
+            cell.search_highlight = Some(SearchHighlight::Current);
+            assert_eq!(
+                background_for_cell(&cell, false, &theme, true),
+                CURRENT_MATCH_BACKGROUND
+            );
+            cell.selected = true;
+            assert_eq!(
+                background_for_cell(&cell, false, &theme, true),
+                theme.selection
+            );
+            assert_eq!(background_for_cell(&cell, true, &theme, true), theme.cursor);
+        }
+    }
 }

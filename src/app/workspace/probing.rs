@@ -83,44 +83,6 @@ fn success_message(outcome: &ProbeOutcome, elapsed: Duration) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rustterm::connection_probe::ServerVersion;
-
-    #[test]
-    fn test_feedback_preserves_success_version_and_elapsed_time() {
-        let mut outcome = ProbeOutcome {
-            kind: ProbeKind::ElasticsearchReady,
-            server: Some(ServerVersion {
-                product: "Elasticsearch",
-                version: Some("7.4.2".into()),
-            }),
-        };
-        let text = success_message(&outcome, Duration::from_millis(42));
-        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
-        assert!(text.contains("Elasticsearch 7.4.2"));
-        assert!(text.contains("42"));
-        outcome.server.as_mut().unwrap().version = None;
-        let text = success_message(&outcome, Duration::from_millis(42));
-        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
-        assert!(text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
-        assert!(!text.contains("7.4.2"));
-    }
-
-    #[test]
-    fn telnet_and_rdp_keep_their_actual_test_scope() {
-        for (kind, message) in [
-            (ProbeKind::TelnetReachable, i18n_key::CONNECTIONS_TELNET_PORT_IS_REACHABLE_LOGIN_WAS_NOT_TESTED),
-            (ProbeKind::RdpAuthenticated, i18n_key::CONNECTIONS_RDP_TLS_AND_NLA_AUTHENTICATION_SUCCEEDED_DESKTOP_ACTIVATION_WAS_NOT),
-        ] {
-            let text = success_message(&ProbeOutcome { kind, server: None }, Duration::from_millis(42));
-            assert!(text.contains(tr(message)));
-            assert!(!text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
-        }
-    }
-}
-
 impl Drop for ProfileTest {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -387,6 +349,44 @@ impl TrustReply {
                     CertificateDecision::Reject
                 });
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::connection_probe::ServerVersion;
+
+    #[test]
+    fn test_feedback_preserves_success_version_and_elapsed_time() {
+        let mut outcome = ProbeOutcome {
+            kind: ProbeKind::ElasticsearchReady,
+            server: Some(ServerVersion {
+                product: "Elasticsearch",
+                version: Some("7.4.2".into()),
+            }),
+        };
+        let text = success_message(&outcome, Duration::from_millis(42));
+        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
+        assert!(text.contains("Elasticsearch 7.4.2"));
+        assert!(text.contains("42"));
+        outcome.server.as_mut().unwrap().version = None;
+        let text = success_message(&outcome, Duration::from_millis(42));
+        assert!(text.contains(tr(i18n_key::ES_CONNECT_OK)));
+        assert!(text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
+        assert!(!text.contains("7.4.2"));
+    }
+
+    #[test]
+    fn telnet_and_rdp_keep_their_actual_test_scope() {
+        for (kind, message) in [
+            (ProbeKind::TelnetReachable, i18n_key::CONNECTIONS_TELNET_PORT_IS_REACHABLE_LOGIN_WAS_NOT_TESTED),
+            (ProbeKind::RdpAuthenticated, i18n_key::CONNECTIONS_RDP_TLS_AND_NLA_AUTHENTICATION_SUCCEEDED_DESKTOP_ACTIVATION_WAS_NOT),
+        ] {
+            let text = success_message(&ProbeOutcome { kind, server: None }, Duration::from_millis(42));
+            assert!(text.contains(tr(message)));
+            assert!(!text.contains(tr(i18n_key::CONNECTIONS_VERSION_UNAVAILABLE)));
         }
     }
 }

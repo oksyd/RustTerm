@@ -48,7 +48,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SCHEMA_VERSION: u32 = 1;
+// Version 2 adds automatic SSH forwarding and selection highlighting. Readers
+// reject unknown fields, so new writers must advertise the incompatible format.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -58,6 +60,14 @@ pub enum ConfigError {
     // Keep only a byte location: malformed files may contain accidentally pasted passwords.
     #[error("{}", crate::trf!(i18n_key::CONNECTIONS_INVALID_CONFIGURATION_FORMAT_AT_BYTE_OFFSET_OFFSET, offset = .offset))]
     Decode { offset: usize },
+    #[error("{}", crate::trf!(i18n_key::CONNECTIONS_UNRECOGNIZED_CONFIGURATION_DATA, offset = .offset))]
+    UnsupportedData { offset: usize },
+    #[error("{}: {source}", path.display())]
+    File {
+        path: PathBuf,
+        #[source]
+        source: Box<ConfigError>,
+    },
     #[error("{}", crate::trf!(i18n_key::CONNECTIONS_CONFIGURATION_ENCODING_FAILED_ERROR, error = .0.to_string()))]
     Encode(#[from] toml::ser::Error),
     #[error("{}", crate::trf!(i18n_key::CONNECTIONS_UNSUPPORTED_CONFIGURATION_VERSION_FOUND_LATEST_SUPPORTED_SUPPORTED_THE, found = .found, supported = .supported))]
@@ -101,6 +111,7 @@ impl ConfigError {
     pub fn field(&self) -> Option<&'static str> {
         match self {
             Self::FieldValidation { field, .. } => Some(field),
+            Self::File { source, .. } => source.field(),
             _ => None,
         }
     }
@@ -117,14 +128,32 @@ impl ConfigError {
     /// The destination was replaced, but crash durability could not be confirmed.
     /// Callers must retain the new state and its credential references in this case.
     pub fn was_committed(&self) -> bool {
-        matches!(self, Self::CommitUncertain(_))
+        match self {
+            Self::File { source, .. } => source.was_committed(),
+            Self::CommitUncertain(_) => true,
+            _ => false,
+        }
+    }
+
+    fn in_file(self, path: impl Into<PathBuf>) -> Self {
+        Self::File {
+            path: path.into(),
+            source: Box::new(self),
+        }
     }
 }
 
 impl From<toml::de::Error> for ConfigError {
     fn from(error: toml::de::Error) -> Self {
-        Self::Decode {
-            offset: error.span().map_or(0, |span| span.start),
+        let offset = error.span().map_or(0, |span| span.start);
+        // Keep a category, never serde's field/variant text or source document:
+        // an unknown key or enum value can itself contain a pasted secret.
+        if error.message().starts_with("unknown field")
+            || error.message().starts_with("unknown variant")
+        {
+            Self::UnsupportedData { offset }
+        } else {
+            Self::Decode { offset }
         }
     }
 }

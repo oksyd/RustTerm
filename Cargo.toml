@@ -21,6 +21,8 @@ dirs = { version = "5.0.1", default-features = false }
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 gpui = { version = "0.2.2", default-features = false, features = ["x11", "wayland", "windows-manifest"] }
 image = { version = "0.25.9", default-features = false, features = ["png", "bmp"] }
+if-addrs = { version = "0.15.0", default-features = false }
+qrcodegen = { version = "1.8.0", default-features = false }
 unicode-segmentation = { version = "1.13.3", default-features = false }
 
 alacritty_terminal = { version = "0.26.0", default-features = false }

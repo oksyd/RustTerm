@@ -22,7 +22,7 @@ impl Fields {
         result.1 = result.values(cx);
         result
     }
-    fn field(&self, key: &str) -> &Entity<TextInput> {
+    pub(crate) fn field(&self, key: &str) -> &Entity<TextInput> {
         &self
             .0
             .iter()

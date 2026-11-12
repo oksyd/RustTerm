@@ -24,6 +24,54 @@ fn inverse_lifting_handles_symmetric_and_extrapolated_edges() {
 }
 
 #[test]
+fn row_wise_vertical_lifting_matches_column_reference_at_every_codec_stage() {
+    let mut seed = 0x76e8_19a4u32;
+    for (low, high, reduced) in [
+        (8, 8, false),
+        (16, 16, false),
+        (32, 32, false),
+        (9, 8, true),
+        (17, 16, true),
+        (33, 31, true),
+    ] {
+        let size = low + high;
+        for full_range in [false, true] {
+            for _ in 0..16 {
+                let input: Vec<i32> = (0..size * size)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        if full_range {
+                            seed as i32
+                        } else {
+                            (seed as i32) >> 16
+                        }
+                    })
+                    .collect();
+                let mut expected = vec![0; size * size];
+                for x in 0..size {
+                    let low_line: Vec<_> = (0..low).map(|y| input[y * size + x]).collect();
+                    let high_line: Vec<_> =
+                        (0..high).map(|y| input[(y + low) * size + x]).collect();
+                    let mut line = vec![0; size];
+                    synthesize(&low_line, &high_line, reduced, &mut line);
+                    for (y, value) in line.into_iter().enumerate() {
+                        expected[y * size + x] = value;
+                    }
+                }
+                let mut actual = vec![0; size * size];
+                synthesize_vertical(&input, low, high, reduced, &mut actual);
+                assert_eq!(
+                    actual, expected,
+                    "stage {low}/{high}, full_range={full_range}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn inverse_constant_tiles_and_full_range_color() {
     for reduced in [false, true] {
         let mut coefficients = vec![0; 4096];

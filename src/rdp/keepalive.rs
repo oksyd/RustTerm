@@ -1,6 +1,6 @@
 //! Independent TCP probes and opt-in remote desktop idle prevention.
 //! RDP's Server Heartbeat PDU is server-to-client, so it is not a client ping.
-use super::{RdpCommand, RdpError, Result};
+use super::{ConnectionStage, RdpCommand, RdpError, Result};
 use socket2::{SockRef, TcpKeepalive};
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -13,6 +13,11 @@ pub(super) struct DesktopActivity {
 }
 
 impl DesktopActivity {
+    pub fn input_at(&mut self, now: Instant) {
+        if let Some(deadline) = self.deadline {
+            self.deadline = Some(deadline.max(now + DESKTOP_IDLE_INTERVAL));
+        }
+    }
     pub fn new(enabled: bool, now: Instant) -> Self {
         Self {
             deadline: enabled.then_some(now + DESKTOP_IDLE_INTERVAL),
@@ -60,7 +65,7 @@ pub(super) fn configure(stream: &TcpStream, seconds: u64) -> Result<()> {
     if seconds == 0 {
         return socket
             .set_keepalive(false)
-            .map_err(|_| RdpError::Connection);
+            .map_err(|error| RdpError::io(ConnectionStage::SocketSetup, error));
     }
     let interval = Duration::from_secs(seconds);
     socket
@@ -70,7 +75,7 @@ pub(super) fn configure(stream: &TcpStream, seconds: u64) -> Result<()> {
                 .with_interval(interval)
                 .with_retries(5),
         )
-        .map_err(|_| RdpError::Connection)
+        .map_err(|error| RdpError::io(ConnectionStage::SocketSetup, error))
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ mod menus;
 mod palette;
 mod panes;
 mod persistence;
+mod ports;
 mod probing;
 mod recovery;
 mod render;
@@ -155,6 +156,7 @@ pub struct Workspace {
     command_subscriptions: HashMap<usize, Subscription>,
     resources: resources::Resources,
     docker: docker::Dockers,
+    ports: ports::Ports,
     selected_profile: Option<Uuid>,
     sidebar_focus: FocusHandle,
     sidebar_scroll: gpui::ScrollHandle,
@@ -318,6 +320,7 @@ impl Workspace {
             command_subscriptions: HashMap::new(),
             resources: resources::Resources::default(),
             docker: docker::Dockers::default(),
+            ports: ports::Ports::default(),
             selected_profile: None,
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: gpui::ScrollHandle::new(),
@@ -338,6 +341,7 @@ impl Workspace {
             palette: palette::Palette::new(window, cx),
         };
         this.initialize_lock(startup, window, cx);
+        this.start_port_sync(cx);
         let weak = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             weak.update(cx, |this, cx| this.request_exit(window, cx))
@@ -411,8 +415,10 @@ impl Workspace {
                         cx.notify();
                         return false;
                     }
+                    this.capture_port_settings();
                     this.persist_workspace(cx);
                     this.closing = true;
+                    this.ports.registry.stop_all();
                     this.files.clear();
                     this.files_subscriptions.clear();
                     this.dismiss_modal(cx);

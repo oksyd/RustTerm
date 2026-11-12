@@ -190,7 +190,7 @@ fn checksum_filename_and_download_integrity_are_enforced() {
     );
     for text in [
         format!("{hex}  wrong.tar.gz"),
-        format!("{hex}"),
+        hex.clone(),
         format!("{hex}  release.tar.gz\n{hex} release.tar.gz"),
         format!("{}  release.tar.gz", "é".repeat(32)),
     ] {

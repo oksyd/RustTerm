@@ -280,6 +280,33 @@ impl DockerClient {
             Ok(LogStream::start(response.into_body(), connection, tty, client.0.exec.stop.clone()))
         }).await
     }
+    /// A bounded raw JSON event stream, on its own SSH channel so idle event
+    /// waits never hold the management request connection or block the shell.
+    pub(crate) async fn container_events(&self) -> Result<LogStream> {
+        let client = self.clone();
+        self.run(async move {
+            let filters = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair(
+                    "filters",
+                    r#"{"type":["container"],"event":["start","die","destroy","rename"]}"#,
+                )
+                .finish();
+            let path = client.path(&format!("/events?{filters}")).await?;
+            let mut connection = http::Connection::open(&client.0.exec, &client.0.endpoint).await?;
+            let response = connection.send("GET", &path, None, false).await?;
+            if !response.status().is_success() {
+                http::collect(response, 64 * 1024).await?;
+                return Err(Error::InvalidResponse);
+            }
+            Ok(LogStream::start(
+                response.into_body(),
+                connection,
+                true,
+                client.0.exec.stop.clone(),
+            ))
+        })
+        .await
+    }
     pub(crate) async fn console(
         &self,
         id: String,

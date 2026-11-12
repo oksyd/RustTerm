@@ -46,6 +46,7 @@ pub struct Settings {
     pub line_timestamps: bool,
     pub cache_command_output: bool,
     pub highlight: bool,
+    pub highlight_selection_matches: bool,
     pub history_lines: usize,
     pub history_bytes: usize,
     pub global_history_bytes: usize,
@@ -78,6 +79,7 @@ impl Default for Settings {
             line_timestamps: true,
             cache_command_output: true,
             highlight: true,
+            highlight_selection_matches: true,
             history_lines: 50_000,
             history_bytes: 64 * 1024 * 1024,
             global_history_bytes: 512 * 1024 * 1024,
@@ -181,6 +183,17 @@ mod tests {
         let restored: Settings = toml::from_str(&toml::to_string(&saved).unwrap()).unwrap();
         assert!(!restored.line_timestamps);
         assert!(restored.line_numbers);
+    }
+
+    #[test]
+    fn selection_highlighting_defaults_on_and_is_independent_of_syntax_highlighting() {
+        let mut settings: Settings = toml::from_str("highlight = false").unwrap();
+        assert!(settings.highlight_selection_matches);
+        settings.highlight_selection_matches = false;
+        settings.highlight = true;
+        let restored: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert!(restored.highlight);
+        assert!(!restored.highlight_selection_matches);
     }
 
     #[test]

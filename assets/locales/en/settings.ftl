@@ -2,6 +2,9 @@ settings-ask-before-pasting-multiple-lines-into-a-terminal = Ask before pasting 
 
 settings-background = Background
 
+settings-highlight-selection-matches = Highlight other occurrences of selected text
+settings-highlight-selection-matches-help = Double-click a word or select a short phrase to highlight exact matches in the visible output. Clearing the selection removes the highlights.
+
 settings-background-output-does-not-reset-the-idle-timer = Background output does not reset the idle timer.
 
 settings-cancel-password-change = Cancel password change

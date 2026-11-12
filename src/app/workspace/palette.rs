@@ -1,4 +1,4 @@
-use super::{Modal, Workspace};
+use super::Workspace;
 use crate::app::forms::SettingsSection;
 use crate::app::pane::{Pane, PaneEvent};
 use crate::app::text_input::{InputEvent, TextInput};
@@ -14,6 +14,14 @@ use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::{Message, tr};
 
 use rustterm::config::QuickCommand;
+
+fn is_reconnect_shortcut(key: &gpui::Keystroke) -> bool {
+    key.key.eq_ignore_ascii_case("r")
+        && key.modifiers.control
+        && key.modifiers.shift
+        && !key.modifiers.alt
+        && !key.modifiers.platform
+}
 
 pub(super) struct Palette {
     pub open: bool,
@@ -174,6 +182,28 @@ impl Workspace {
             && !modifiers.platform
         {
             self.toggle_palette(window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+        } else if is_reconnect_shortcut(&event.keystroke)
+            && !self.palette.open
+            && self.modal.is_none()
+            && !self.utility_overlay
+            && let Some(Pane::Terminal(view)) = self.panes.get(&self.focused)
+        {
+            // Capture before terminal input so the application shortcut never
+            // degrades into Ctrl+R in the remote shell, even while connected.
+            if !event.is_held
+                && window.is_window_active()
+                && !self.closing
+                && !self.modal_saving
+                && !self.input_composing(window, cx)
+                && !self.window_state.prompts.is_busy()
+                && !self.window_state.prompts.is_blocked()
+                && view.update(cx, |view, cx| view.reconnect_ended(window, cx))
+            {
+                self.menu = None;
+                cx.notify();
+            }
             window.prevent_default();
             cx.stop_propagation();
         } else if self.palette.open && !self.palette.focus.contains_focused(window, cx) {
@@ -534,20 +564,17 @@ impl Workspace {
         if self.lock_screen.locked || self.modal.is_some() {
             return;
         }
-        let controller = match self.panes.get(&self.focused) {
-            Some(Pane::Terminal(terminal)) => terminal.read(cx).forwarding(),
-            _ => None,
-        };
-        let Some(controller) = controller else {
-            self.error = Some(i18n_key::WORKSPACE_PORT_FORWARDING_REQUIRES_AN_SSH_SESSION.into());
-            cx.notify();
-            return;
-        };
-        self.modal = Some(Modal::Tunnels(cx.new(|cx| {
-            crate::app::tunnel_panel::TunnelPanel::new(controller, self.window_state.clone(), cx)
-        })));
-        self.modal_focus.focus(window);
-        cx.notify();
+        if self
+            .pane_profiles
+            .get(&self.focused)
+            .is_some_and(|profile| {
+                matches!(profile.connection, rustterm::config::Connection::Ssh(_))
+            })
+        {
+            self.open_ports(window, cx);
+        } else {
+            self.open_all_ports(window, cx);
+        }
     }
     pub(super) fn follow_terminal_directory(
         &mut self,
@@ -749,5 +776,38 @@ impl Workspace {
             }))
             .child(card)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+    use gpui::{Keystroke, Modifiers};
+
+    #[test]
+    fn reconnect_does_not_capture_shell_history_search_or_altgr() {
+        let mut key = Keystroke {
+            modifiers: Modifiers {
+                control: true,
+                ..Default::default()
+            },
+            key: "r".into(),
+            key_char: Some("r".into()),
+        };
+        assert!(!is_reconnect_shortcut(&key), "Ctrl+R belongs to the shell");
+        key.modifiers.shift = true;
+        assert!(is_reconnect_shortcut(&key));
+        key.key = "R".into();
+        key.key_char = Some("R".into());
+        assert!(is_reconnect_shortcut(&key));
+        key.modifiers.alt = true;
+        key.key_char = Some("®".into());
+        assert!(!is_reconnect_shortcut(&key), "AltGr text must remain input");
+        key.modifiers.alt = false;
+        key.modifiers.platform = true;
+        assert!(!is_reconnect_shortcut(&key));
+        key.modifiers.platform = false;
+        key.modifiers.control = false;
+        assert!(!is_reconnect_shortcut(&key), "typing R must remain input");
     }
 }

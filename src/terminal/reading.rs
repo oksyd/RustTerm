@@ -552,7 +552,7 @@ impl Terminal {
             self.version = self.version.wrapping_add(1);
         }
     }
-    fn selection_valid(&self, unchanged_prefix: usize) -> bool {
+    pub(super) fn selection_valid(&self, unchanged_prefix: usize) -> bool {
         self.selection_anchor.as_ref().is_some_and(|a| {
             let positions = &self.tracker().positions;
             let history = self.term.grid().history_size();

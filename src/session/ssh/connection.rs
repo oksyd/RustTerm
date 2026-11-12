@@ -331,6 +331,10 @@ pub(super) async fn connect_authenticated(
     }
     crate::config::ssh::validate_forwards(&options.forwards)
         .map_err(|error| (FailureKind::Protocol, error.to_string()))?;
+    options
+        .auto_forward
+        .validate()
+        .map_err(|error| (FailureKind::Protocol, error.to_string()))?;
     let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
     let mut parents: Vec<client::Handle<HostVerifier>> = Vec::new();
     for hop in &options.jump_hosts {
@@ -367,6 +371,8 @@ pub(super) async fn connect_authenticated(
             shell_integration: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
+            auto_forward: Default::default(),
+            forwarding_registry: None,
             authentication: options.authentication.clone(),
         };
         let mut hop_ui = ui.clone();
@@ -1079,6 +1085,8 @@ mod tests {
             shell_integration: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
+            auto_forward: Default::default(),
+            forwarding_registry: None,
             authentication: None,
         }
     }

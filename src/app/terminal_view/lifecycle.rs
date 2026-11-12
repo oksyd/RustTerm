@@ -12,9 +12,28 @@ use rustterm::config::Settings;
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 use rustterm::session::{Command, FailureKind, ResizeReceipt, Session, SessionState};
+use rustterm::terminal::{ShellInteraction, Snapshot};
 use std::time::{Duration, Instant};
 
 type SessionChanges = Option<(rustterm::config::Uuid, tokio::sync::watch::Receiver<u64>)>;
+
+fn visible_shell_interaction(
+    state: Option<SessionState>,
+    blocked: bool,
+    snapshot: Option<&Snapshot>,
+) -> ShellInteraction {
+    snapshot
+        .filter(|snapshot| {
+            state == Some(SessionState::Connected)
+                && !blocked
+                && !snapshot.is_read_only
+                && !snapshot.alternate_screen
+                && snapshot.shell.shell.is_some()
+        })
+        .map_or(ShellInteraction::Unknown, |snapshot| {
+            snapshot.shell.interaction
+        })
+}
 
 fn observe_session(changes: &mut SessionChanges, session: Option<&Session>) {
     if changes.as_ref().map(|(id, _)| *id) != session.map(Session::id) {
@@ -76,6 +95,9 @@ impl TerminalView {
         let font_size = settings.font_size;
         if let Some(session) = &session {
             let _ = session.send(Command::SetHighlight(settings.highlight));
+            let _ = session.send(Command::SetSelectionHighlight(
+                settings.highlight_selection_matches,
+            ));
             let _ = session.send(Command::SetCommandOutputCache(
                 settings.cache_command_output,
             ));
@@ -295,8 +317,25 @@ impl TerminalView {
             .is_some_and(Session::is_read_only)
         {
             label.push_str(tr(i18n_key::TERMINAL_STATUS_READ_ONLY_HISTORY));
-        } else if self.snapshot.as_ref().is_some_and(|s| s.alternate_screen) {
+        } else if self.error.is_none()
+            && self
+                .runs
+                .get(self.viewed_run)
+                .is_some_and(|run| run.state() == SessionState::Connected)
+            && self.snapshot.as_ref().is_some_and(|s| s.alternate_screen)
+        {
             label.push_str(tr(i18n_key::TERMINAL_STATUS_ALTERNATE_SCREEN));
+        } else {
+            let key = match self.shell_interaction() {
+                ShellInteraction::Prompt => Some(i18n_key::TERMINAL_STATUS_AWAITING_INPUT),
+                ShellInteraction::Editing => Some(i18n_key::TERMINAL_STATUS_EDITING),
+                ShellInteraction::Executing => Some(i18n_key::TERMINAL_STATUS_EXECUTING),
+                ShellInteraction::HistorySearch => Some(i18n_key::TERMINAL_STATUS_HISTORY_SEARCH),
+                ShellInteraction::Unknown => None,
+            };
+            if let Some(key) = key {
+                label.push_str(tr(key));
+            }
         }
         if let Some(snapshot) = &self.snapshot {
             if snapshot.viewport_evicted {
@@ -309,6 +348,17 @@ impl TerminalView {
             }
         }
         label
+    }
+
+    fn shell_interaction(&self) -> ShellInteraction {
+        let run = self.runs.get(self.viewed_run);
+        visible_shell_interaction(
+            run.map(Session::state),
+            self.error.is_some()
+                || self.show_final_alternate
+                || run.is_some_and(Session::is_read_only),
+            self.snapshot.as_deref(),
+        )
     }
 
     pub fn status_color(&self) -> u32 {
@@ -331,6 +381,7 @@ impl TerminalView {
                 .get(self.viewed_run)
                 .is_some_and(Session::is_read_only)
             || self.snapshot.as_ref().is_some_and(|s| s.alternate_screen)
+            || self.shell_interaction() == ShellInteraction::HistorySearch
         {
             ui::colors().accent
         } else {
@@ -352,7 +403,7 @@ impl TerminalView {
             .snapshot
             .as_ref()
             .map_or(self.resize.requested_size(), |s| (s.columns, s.rows));
-        let details = rustterm::trf!(
+        let mut details = rustterm::trf!(
             i18n_key::TERMINAL_COLUMNS_ROWS_UTF_8_LINE_NUMBERS_LINE_NUMBERS_TIMESTAMPS_TIMESTAMPS_HIGHLIGHT_HIGHLIGHT,
             columns = columns,
             rows = rows,
@@ -372,6 +423,19 @@ impl TerminalView {
                 tr(i18n_key::COMMON_OFF)
             },
         );
+        if self.shell_interaction() != ShellInteraction::Unknown {
+            let key = if self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.shell.history_search_supported)
+            {
+                i18n_key::TERMINAL_INTERACTION_HISTORY_SUPPORTED
+            } else {
+                i18n_key::TERMINAL_INTERACTION_HISTORY_UNAVAILABLE
+            };
+            details.push('\n');
+            details.push_str(tr(key));
+        }
         if let Some(command) = self.command_status() {
             format!("{command}  ·  {details}")
         } else {
@@ -415,6 +479,17 @@ impl TerminalView {
             cx.emit(PaneEvent::Reconnect(self.index));
         }
         cx.notify();
+    }
+
+    /// A retry action must never toggle an active connection into disconnecting.
+    pub fn reconnect_ended(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.visible || self.chrome_blocked(cx) || self.is_running() {
+            return false;
+        }
+        self.close_menu(window, cx);
+        cx.emit(PaneEvent::Focused(self.index));
+        cx.emit(PaneEvent::Reconnect(self.index));
+        true
     }
 
     pub fn diagnostic_state(&self) -> &'static str {
@@ -561,6 +636,9 @@ impl TerminalView {
         self.initial_font_size = settings.font_size;
         for run in &self.runs {
             let _ = run.send(Command::SetHighlight(settings.highlight));
+            let _ = run.send(Command::SetSelectionHighlight(
+                settings.highlight_selection_matches,
+            ));
             let _ = run.send(Command::SetCommandOutputCache(
                 settings.cache_command_output,
             ));
@@ -594,6 +672,9 @@ impl TerminalView {
                 && !self.window_state.is_locked(),
         );
         let _ = session.send(Command::SetHighlight(self.settings.highlight));
+        let _ = session.send(Command::SetSelectionHighlight(
+            self.settings.highlight_selection_matches,
+        ));
         let _ = session.send(Command::SetCommandOutputCache(
             self.settings.cache_command_output,
         ));
@@ -974,6 +1055,45 @@ pub(super) fn state_label(state: SessionState) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_mode_is_hidden_by_disconnect_errors_archives_and_fullscreen_programs() {
+        let mut terminal = rustterm::terminal::Terminal::new(80, 24, 100);
+        terminal.feed(b"\x1b]133;P;RustTerm=zsh\x07\x1b]133;P;RustTermHistorySearch=1\x07\x1b]133;B\x07\x1b]133;P;RustTermInput=history-search\x07");
+        let snapshot = terminal.snapshot();
+        assert_eq!(
+            visible_shell_interaction(Some(SessionState::Connected), false, Some(&snapshot)),
+            ShellInteraction::HistorySearch
+        );
+        for state in [
+            None,
+            Some(SessionState::Connecting),
+            Some(SessionState::Closing),
+            Some(SessionState::Disconnected { exit_code: None }),
+            Some(SessionState::Failed {
+                kind: FailureKind::Protocol,
+                message: "test".into(),
+            }),
+        ] {
+            assert_eq!(
+                visible_shell_interaction(state, false, Some(&snapshot)),
+                ShellInteraction::Unknown
+            );
+        }
+        assert_eq!(
+            visible_shell_interaction(Some(SessionState::Connected), true, Some(&snapshot)),
+            ShellInteraction::Unknown
+        );
+        terminal.feed(b"\x1b[?1049h");
+        assert_eq!(
+            visible_shell_interaction(
+                Some(SessionState::Connected),
+                false,
+                Some(&terminal.snapshot())
+            ),
+            ShellInteraction::Unknown
+        );
+    }
 
     #[test]
     fn idle_panes_keep_only_the_maintenance_timer() {

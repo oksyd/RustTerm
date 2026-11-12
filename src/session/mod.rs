@@ -31,7 +31,8 @@ pub use sftp::{
     SftpTransferProgress, SftpTransferState,
 };
 pub use ssh::{
-    AuthenticationChallenge, AuthenticationPrompt, ForwardController, ForwardState, ForwardStatus,
+    AuthenticationChallenge, AuthenticationPrompt, DiscoveredService, DiscoveryStatus,
+    ForwardController, ForwardRegistry, ForwardSettings, ForwardState, ForwardStatus,
     HostKeyChallenge, SshAuth, SshOptions,
 };
 pub(crate) use ssh::{TunnelConnector, connect_tunnel};
@@ -174,6 +175,7 @@ pub enum Command {
         backwards: bool,
     },
     SetHighlight(bool),
+    SetSelectionHighlight(bool),
     SetCommandOutputCache(bool),
     SetTheme(crate::config::Theme),
     SetHistoryBudget {

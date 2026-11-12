@@ -9,6 +9,8 @@ use super::{RDP_TILE_SIZE, RdpFrame, RdpTile};
 pub(super) struct FrameClock {
     interval: Duration,
     next_allowed: Option<Instant>,
+    next_graphics: Option<Instant>,
+    graphics_pending: bool,
     deadline: Option<Instant>,
 }
 
@@ -17,6 +19,8 @@ impl FrameClock {
         Self {
             interval,
             next_allowed: None,
+            next_graphics: None,
+            graphics_pending: false,
             deadline: Some(now),
         }
     }
@@ -34,20 +38,34 @@ impl FrameClock {
             .get_or_insert_with(|| self.next_allowed.map_or(now, |next| now.max(next)));
     }
 
+    pub fn graphics_dirty(&mut self, now: Instant) {
+        // A local software-pointer redraw must not consume the server frame's
+        // rate allowance. GPUI still coalesces publications at display refresh.
+        if !self.graphics_pending {
+            self.deadline = Some(self.next_graphics.map_or(now, |next| now.max(next)));
+            self.graphics_pending = true;
+        }
+    }
+
     pub fn published(&mut self, started: Instant) {
         // Timers can wake a little late. Keep their intended cadence instead
         // of adding that lateness to every subsequent frame. After a long
         // stall, start a new interval rather than publishing catch-up bursts.
         let next = self.deadline.take().unwrap_or(started) + self.interval;
-        self.next_allowed = Some(if next > started {
+        let next = if next > started {
             next
         } else {
             started + self.interval
-        });
+        };
+        self.next_allowed = Some(next);
+        if std::mem::take(&mut self.graphics_pending) {
+            self.next_graphics = Some(next);
+        }
     }
 
     pub fn suspend(&mut self) {
         self.deadline = None;
+        self.graphics_pending = false;
     }
 }
 
@@ -199,6 +217,42 @@ impl RdpTile {
 mod tests {
     use super::*;
 
+    #[test]
+    fn separate_cursor_keeps_desktop_tiles_shared_through_repeated_motion() {
+        for composed in [true, false] {
+            let mut session = super::super::input_worker::test_session();
+            session.set_pointer_composition(composed);
+            // Synthetic 1x1 white color pointer, using a real fast-path update.
+            let mut shape = Vec::new();
+            for value in [0u16, 0, 0, 1, 1, 2, 4] {
+                shape.extend(value.to_le_bytes());
+            }
+            shape.extend([255, 255, 255, 0, 0, 0]);
+            let mut packet = vec![0, (shape.len() + 5) as u8, 9];
+            packet.extend((shape.len() as u16).to_le_bytes());
+            packet.extend(shape);
+            session.process(&packet).unwrap();
+            let mut snapshot = FrameSnapshot::default();
+            let mut previous = snapshot.capture(&mut session);
+            let mut copied_bytes = 0;
+            for x in 1..=300 {
+                session.input(rustrdp::Input::Pointer { x, y: 20 }).unwrap();
+                let next = snapshot.capture(&mut session);
+                for (old, new) in previous.tiles.iter().zip(&next.tiles) {
+                    if !Arc::ptr_eq(old, new) {
+                        copied_bytes += new.pixels.len();
+                    }
+                }
+                previous = next;
+            }
+            if composed {
+                assert_eq!(copied_bytes, 300 * 320 * 200 * 4);
+            } else {
+                assert_eq!(copied_bytes, 0);
+            }
+        }
+    }
+
     const INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
     #[test]
@@ -226,6 +280,40 @@ mod tests {
         assert_eq!(clock.deadline(), Some(now + INTERVAL));
         assert!(!clock.is_due(now + Duration::from_millis(12)));
         assert!(clock.is_due(now + INTERVAL));
+    }
+
+    #[test]
+    fn pointer_redraw_does_not_delay_a_completed_server_frame() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new(INTERVAL, now);
+        clock.published(now); // Local pointer only.
+        let received = now + Duration::from_millis(1);
+        clock.graphics_dirty(received);
+        assert!(clock.is_due(received));
+        clock.published(received);
+        clock.dirty(received + Duration::from_millis(1));
+        assert_eq!(clock.deadline(), Some(received + INTERVAL));
+        clock.published(received + INTERVAL); // Another local pointer only.
+        clock.graphics_dirty(received + INTERVAL + Duration::from_millis(1));
+        assert!(clock.is_due(received + INTERVAL + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn server_frames_keep_the_configured_rate_despite_pointer_updates() {
+        let now = Instant::now();
+        let mut clock = FrameClock::new(INTERVAL, now);
+        clock.graphics_dirty(now);
+        clock.published(now);
+        for millis in 1..16 {
+            clock.dirty(now + Duration::from_millis(millis));
+            clock.graphics_dirty(now + Duration::from_millis(millis));
+            assert_eq!(clock.deadline(), Some(now + INTERVAL));
+            assert!(!clock.is_due(now + Duration::from_millis(millis)));
+        }
+        clock.published(now + INTERVAL);
+        clock.suspend();
+        clock.graphics_dirty(now + INTERVAL + Duration::from_millis(1));
+        assert_eq!(clock.deadline(), Some(now + INTERVAL * 2));
     }
 
     #[test]

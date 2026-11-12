@@ -1,4 +1,11 @@
 use crate::i18n::messages as i18n_key;
+mod discovery;
+mod managed;
+mod registry;
+use crate::config::Uuid;
+use crate::config::ssh::{AutoForwardConfig, ServiceIdentity};
+pub use discovery::{DiscoveredService, DiscoveryStatus};
+pub use registry::ForwardRegistry;
 
 use super::{
     SshOptions,
@@ -31,12 +38,45 @@ pub enum ForwardState {
     Running,
     Stopping,
     Stopped,
+    Waiting,
     Failed(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardStatus {
     pub rule: PortForward,
     pub state: ForwardState,
+    pub service: Option<ServiceIdentity>,
+    pub local_address: Option<std::net::SocketAddr>,
+    pub enabled: bool,
+    pub available: bool,
+    pub target_error: Option<String>,
+    port_fallback: bool,
+}
+impl ForwardStatus {
+    fn new(rule: PortForward) -> Self {
+        Self {
+            enabled: rule.enabled,
+            rule,
+            state: ForwardState::Stopped,
+            service: None,
+            local_address: None,
+            available: true,
+            target_error: None,
+            port_fallback: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForwardSettings {
+    pub rules: Vec<PortForward>,
+    pub automatic: AutoForwardConfig,
+}
+impl ForwardSettings {
+    pub fn validate(&self) -> crate::config::Result<()> {
+        crate::config::ssh::validate_forwards(&self.rules)?;
+        self.automatic.validate()
+    }
 }
 #[derive(Clone)]
 pub struct ForwardController {
@@ -44,10 +84,38 @@ pub struct ForwardController {
     states: Arc<Mutex<Vec<ForwardStatus>>>,
     remote: Arc<Mutex<BTreeMap<(String, u16), RemoteRoute>>>,
     slots: Arc<Semaphore>,
+    settings: Arc<Mutex<SettingsStore>>,
+    discovery: Arc<Mutex<DiscoveryStatus>>,
+    hints: Arc<Mutex<discovery::OutputHints>>,
 }
 enum Control {
     SetEnabled(usize, bool),
     Retry(usize),
+    Configure(ForwardSettings, u64),
+    RuleEnabled(Uuid, bool),
+    RuleRetry(Uuid),
+    Refresh,
+    Credentials(Box<SshOptions>),
+    Hint(u16, crate::config::ssh::ForwardProtocol),
+}
+struct SettingsStore {
+    current: ForwardSettings,
+    pending: Option<(u64, ForwardSettings)>,
+    revision: u64,
+}
+impl SettingsStore {
+    fn new(current: ForwardSettings) -> Self {
+        Self {
+            current,
+            pending: None,
+            revision: 0,
+        }
+    }
+    fn value(&self) -> &ForwardSettings {
+        self.pending
+            .as_ref()
+            .map_or(&self.current, |(_, settings)| settings)
+    }
 }
 #[derive(Clone)]
 struct RemoteRoute {
@@ -56,6 +124,7 @@ struct RemoteRoute {
 }
 pub(super) enum ForwardRequest {
     Open(TcpRequest),
+    Exec(crate::session::exec::Request),
     Remote {
         rule: PortForward,
         enabled: bool,
@@ -63,11 +132,77 @@ pub(super) enum ForwardRequest {
     },
 }
 impl ForwardController {
+    pub fn same_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.states, &other.states)
+    }
+
+    pub(in crate::session) fn observe_output(&self, bytes: &[u8]) {
+        if !self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .value()
+            .automatic
+            .enabled
+        {
+            return;
+        }
+        for (port, protocol) in self
+            .hints
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(bytes)
+        {
+            let _ = self.control.try_send(Control::Hint(port, protocol));
+        }
+    }
+    pub fn settings(&self) -> ForwardSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .value()
+            .clone()
+    }
+    pub fn discovery(&self) -> DiscoveryStatus {
+        self.discovery
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    pub fn configure(&self, settings: ForwardSettings) -> anyhow::Result<()> {
+        settings.validate()?;
+        let mut store = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        let revision = store.revision.wrapping_add(1);
+        self.control
+            .try_send(Control::Configure(settings.clone(), revision))
+            .map_err(|_| anyhow::anyhow!(crate::i18n::tr(i18n_key::PORTS_BUSY)))?;
+        store.pending = Some((revision, settings));
+        store.revision = revision;
+        Ok(())
+    }
+    pub fn refresh(&self) -> Result<(), SendError> {
+        self.send_control(Control::Refresh)
+    }
+    pub fn enable_rule(&self, id: Uuid, enabled: bool) -> Result<(), SendError> {
+        self.send_control(Control::RuleEnabled(id, enabled))
+    }
+    pub fn retry_rule(&self, id: Uuid) -> Result<(), SendError> {
+        self.send_control(Control::RuleRetry(id))
+    }
+    fn send_control(&self, control: Control) -> Result<(), SendError> {
+        self.control.try_send(control).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => SendError::Busy,
+            mpsc::error::TrySendError::Closed(_) => SendError::Closed,
+        })
+    }
     pub fn statuses(&self) -> Vec<ForwardStatus> {
         self.states
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .iter()
+            .filter(|s| !s.rule.id.is_nil())
+            .cloned()
+            .collect()
     }
     pub fn set_enabled(&self, index: usize, enabled: bool) -> std::result::Result<(), SendError> {
         self.send(index, Control::SetEnabled(index, enabled))
@@ -194,8 +329,11 @@ impl ForwardRuntime {
         self.rules.iter().any(|rule| rule.desired)
     }
 
+    #[cfg(test)]
     fn control(&mut self, control: Control) -> Option<(usize, bool)> {
-        let (Control::SetEnabled(index, _) | Control::Retry(index)) = control;
+        let (Control::SetEnabled(index, _) | Control::Retry(index)) = control else {
+            return None;
+        };
         let rule = self.rules.get_mut(index)?;
         if let Control::SetEnabled(_, enabled) = control {
             rule.desired = enabled;
@@ -241,6 +379,8 @@ impl ForwardRuntime {
                         set_state(controller, index, ForwardState::Running);
                     }
                     Ok(Activation::Local(listener)) => {
+                        controller.states.lock().unwrap_or_else(|e| e.into_inner())[index]
+                            .local_address = listener.local_addr().ok();
                         self.rules[index].phase = RulePhase::Running(token);
                         listen(
                             index, generation, listener, rule, controller, connection, self,
@@ -335,6 +475,7 @@ struct ForwardConnection {
     closed: CancellationToken,
     requests: mpsc::Sender<ForwardRequest>,
     task: JoinHandle<()>,
+    exec: crate::session::exec::ExecClient,
 }
 
 impl ForwardConnection {
@@ -345,12 +486,26 @@ impl ForwardConnection {
         timeout: Duration,
     ) -> Self {
         let (requests, receiver) = mpsc::channel(64);
+        let (exec, mut exec_requests) = crate::session::exec::ExecClient::new(stop.clone());
+        let exec_forward = requests.clone();
         let task_stop = stop.clone();
         let task_closed = closed.clone();
         let task = tokio::spawn(async move {
+            let dispatch = async {
+                while let Some(request) = exec_requests.recv().await {
+                    if exec_forward
+                        .send(ForwardRequest::Exec(request))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            };
             tokio::select! {
                 _ = task_stop.cancelled() => {},
                 _ = broker::run_forwarding(&handle, receiver, &task_closed, timeout) => {},
+                _ = dispatch => {},
             }
             task_stop.cancel();
             task_closed.cancel();
@@ -361,6 +516,7 @@ impl ForwardConnection {
             closed,
             requests,
             task,
+            exec,
         }
     }
 
@@ -380,189 +536,10 @@ impl Drop for ForwardConnection {
 }
 
 pub(super) fn start(
-    mut options: SshOptions,
+    options: SshOptions,
     stop: CancellationToken,
 ) -> (ForwardController, JoinHandle<()>) {
-    let rules = std::mem::take(&mut options.forwards);
-    let (control, mut controls) = mpsc::channel(32);
-    let controller = ForwardController {
-        control,
-        states: Arc::new(Mutex::new(
-            rules
-                .iter()
-                .cloned()
-                .map(|rule| ForwardStatus {
-                    rule,
-                    state: ForwardState::Stopped,
-                })
-                .collect(),
-        )),
-        remote: Arc::new(Mutex::new(BTreeMap::new())),
-        slots: Arc::new(Semaphore::new(64)),
-    };
-    let active = controller.clone();
-    let task = tokio::spawn(async move {
-        if rules.is_empty() {
-            return;
-        }
-        let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
-        let mut runtime = ForwardRuntime::new(&rules);
-        // Retry only at startup or on an explicit Start, never because desired
-        // remains true after an authentication/transport failure.
-        let mut connect_requested = runtime.enabled();
-        loop {
-            if stop.is_cancelled() {
-                break;
-            }
-            if !connect_requested || !runtime.enabled() {
-                let event = tokio::select! {
-                    biased;
-                    _ = stop.cancelled() => break,
-                    event = controls.recv() => event,
-                };
-                let Some(event) = event else { break };
-                let Some((index, enabled)) = runtime.control(event) else {
-                    continue;
-                };
-                if enabled {
-                    connect_requested = true;
-                } else {
-                    set_state(&active, index, ForwardState::Stopped);
-                }
-                continue;
-            }
-            connect_requested = false;
-            let connection_stop = stop.child_token();
-            let closed = CancellationToken::new();
-            for (index, state) in runtime.rules.iter().enumerate() {
-                if state.desired {
-                    set_state(&active, index, ForwardState::Starting);
-                }
-            }
-            let handle = {
-                let connecting = connect_authenticated(
-                    options.clone(),
-                    Ui::Forwarding {
-                        controller: active.clone(),
-                        closed: closed.clone(),
-                    },
-                    connection_stop.clone(),
-                );
-                tokio::pin!(connecting);
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = stop.cancelled() => break None,
-                        event = controls.recv() => {
-                            let Some(event) = event else { break None };
-                            let Some((index, enabled)) = runtime.control(event) else { continue };
-                            set_state(&active, index, if enabled {
-                                ForwardState::Starting
-                            } else {
-                                ForwardState::Stopped
-                            });
-                            if !runtime.enabled() {
-                                break None;
-                            }
-                        }
-                        result = &mut connecting => match result {
-                            Ok(handle) => break Some(handle),
-                            Err((_, error)) => {
-                                for (index, state) in runtime.rules.iter().enumerate() {
-                                    if state.desired {
-                                        set_state(&active, index, ForwardState::Failed(error.clone()));
-                                    }
-                                }
-                                break None;
-                            }
-                        },
-                    }
-                }
-            };
-            let Some(handle) = handle else {
-                connection_stop.cancel();
-                continue;
-            };
-            let connection = ForwardConnection::new(handle, connection_stop, closed, timeout);
-            for (index, rule) in rules.iter().enumerate() {
-                if runtime.rules[index].desired {
-                    activate(index, rule, &active, &connection, &mut runtime);
-                }
-            }
-            let failure = loop {
-                tokio::select! {
-                    biased;
-                    _ = stop.cancelled() => break None,
-                    _ = connection.closed.cancelled() => {
-                        break Some(crate::i18n::tr(i18n_key::CONNECTIONS_THE_SSH_FORWARDING_CONNECTION_CLOSED).to_owned());
-                    }
-                    event = controls.recv() => {
-                        let Some(event) = event else { break None };
-                        let Some((index, enabled)) = runtime.control(event) else { continue };
-                        let rule = &rules[index];
-                        if !runtime.enabled() {
-                            set_state(&active, index, ForwardState::Stopping);
-                            break None;
-                        }
-                        if enabled {
-                            if matches!(runtime.rules[index].phase, RulePhase::Stopped | RulePhase::Failed) {
-                                activate(index, rule, &active, &connection, &mut runtime);
-                            } else if matches!(runtime.rules[index].phase, RulePhase::Stopping(_)) {
-                                set_state(&active, index, ForwardState::Starting);
-                            }
-                        } else {
-                            disable(index, rule, &active, &connection, &mut runtime);
-                        }
-                    }
-                    result = runtime.activations.join_next(), if !runtime.activations.is_empty() => {
-                        match result {
-                            Some(Ok((index, generation, result))) => {
-                                runtime.finish_start(index, generation, result, &rules[index], &active, &connection);
-                            }
-                            Some(Err(error)) => break Some(error.to_string()),
-                            None => {},
-                        }
-                    }
-                    result = runtime.deactivations.join_next(), if !runtime.deactivations.is_empty() => {
-                        match result {
-                            Some(Ok((index, generation, result))) => {
-                                runtime.finish_stop(index, generation, result, &rules[index], &active, &connection);
-                            }
-                            Some(Err(error)) => break Some(error.to_string()),
-                            None => {},
-                        }
-                    }
-                    result = runtime.listeners.join_next(), if !runtime.listeners.is_empty() => {
-                        match result {
-                            Some(Ok((index, generation, error))) => {
-                                runtime.finish_listener(index, generation, error, &rules[index], &active, &connection);
-                            }
-                            Some(Err(error)) => break Some(error.to_string()),
-                            None => {},
-                        }
-                    }
-                }
-            };
-            connection.stop.cancel();
-            runtime.stop_all(&active).await;
-            connection.close().await;
-            for (index, state) in runtime.rules.iter().enumerate() {
-                set_state(
-                    &active,
-                    index,
-                    match (&failure, state.desired) {
-                        (Some(error), true) => ForwardState::Failed(error.clone()),
-                        _ => ForwardState::Stopped,
-                    },
-                );
-            }
-        }
-        runtime.stop_all(&active).await;
-        for index in 0..rules.len() {
-            set_state(&active, index, ForwardState::Stopped);
-        }
-    });
-    (controller, task)
+    managed::start(options, stop)
 }
 
 fn set_state(controller: &ForwardController, index: usize, state: ForwardState) {
@@ -572,6 +549,9 @@ fn set_state(controller: &ForwardController, index: usize, state: ForwardState) 
         .unwrap_or_else(|e| e.into_inner())
         .get_mut(index)
     {
+        if matches!(state, ForwardState::Stopped | ForwardState::Failed(_)) {
+            status.local_address = None;
+        }
         status.state = state;
     }
 }
@@ -602,6 +582,7 @@ fn activate(
             );
     }
     let rule = rule.clone();
+    let fallback = controller.states.lock().unwrap_or_else(|e| e.into_inner())[index].port_fallback;
     let requests = connection.requests.clone();
     let connection_stop = connection.stop.clone();
     runtime.activations.spawn(async move {
@@ -611,7 +592,12 @@ fn activate(
             tokio::select! {
                 biased;
                 _ = token.cancelled() => Err(crate::i18n::tr(i18n_key::CONNECTIONS_CONNECTION_CANCELLED).into()),
-                result = tokio::time::timeout(Duration::from_secs(10), TcpListener::bind((rule.bind_host.as_str(), rule.bind_port))) => match result {
+                result = tokio::time::timeout(Duration::from_secs(10), async {
+                    match TcpListener::bind((rule.bind_host.as_str(), rule.bind_port)).await {
+                        Err(error) if fallback && error.kind() == std::io::ErrorKind::AddrInUse => TcpListener::bind((rule.bind_host.as_str(), 0)).await,
+                        result => result,
+                    }
+                }) => match result {
                     Ok(Ok(listener)) => Ok(Activation::Local(listener)),
                     Ok(Err(error)) => Err(error.to_string()),
                     Err(error) => Err(error.to_string()),
@@ -704,6 +690,7 @@ fn listen(
     let rule = rule.clone();
     let requests = connection.requests.clone();
     let slots = controller.slots.clone();
+    let states = controller.states.clone();
     runtime.listeners.spawn(async move {
         let mut clients = JoinSet::new();
         let error = loop {
@@ -713,13 +700,19 @@ fn listen(
                 _ = clients.join_next(), if !clients.is_empty() => {},
                 incoming = listener.accept() => match incoming {
                     Ok((stream, _)) => {
+                        if !states.lock().unwrap_or_else(|e| e.into_inner()).get(index).is_some_and(|s| s.available && s.rule.id == rule.id) { continue; }
                         let Ok(slot) = slots.clone().try_acquire_owned() else { continue };
                         let request = requests.clone();
                         let rule = rule.clone();
                         let stop = token.clone();
+                        let states = states.clone();
                         clients.spawn(async move {
                             let _slot = slot;
-                            let _ = forward_client(stream, rule, request, stop).await;
+                            let id = rule.id;
+                            let result = forward_client(stream, rule, request, stop).await;
+                            if let Some(state) = states.lock().unwrap_or_else(|e| e.into_inner()).get_mut(index)
+                                && state.rule.id == id
+                            { state.target_error = result.err(); }
                         });
                     }
                     Err(error) => break Some(error.to_string()),
@@ -882,6 +875,9 @@ mod tests {
 
     fn rule(kind: ForwardKind) -> PortForward {
         PortForward {
+            id: uuid::Uuid::new_v4(),
+            name: String::new(),
+            protocol: Default::default(),
             kind,
             bind_host: "127.0.0.1".into(),
             bind_port: 2222,
@@ -891,7 +887,7 @@ mod tests {
         }
     }
 
-    fn options(port: u16, rules: Vec<PortForward>) -> SshOptions {
+    pub(super) fn options(port: u16, rules: Vec<PortForward>) -> SshOptions {
         SshOptions {
             host: "127.0.0.1".into(),
             port,
@@ -904,11 +900,13 @@ mod tests {
             shell_integration: false,
             jump_hosts: Vec::new(),
             forwards: rules,
+            auto_forward: Default::default(),
+            forwarding_registry: None,
             authentication: None,
         }
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         rules: &[PortForward],
     ) -> (
         ForwardController,
@@ -920,22 +918,22 @@ mod tests {
         let controller = ForwardController {
             control,
             states: Arc::new(Mutex::new(
-                rules
-                    .iter()
-                    .cloned()
-                    .map(|rule| ForwardStatus {
-                        rule,
-                        state: ForwardState::Stopped,
-                    })
-                    .collect(),
+                rules.iter().cloned().map(ForwardStatus::new).collect(),
             )),
             remote: Arc::new(Mutex::new(BTreeMap::new())),
             slots: Arc::new(Semaphore::new(64)),
+            settings: Arc::new(Mutex::new(SettingsStore::new(ForwardSettings {
+                rules: rules.to_vec(),
+                automatic: Default::default(),
+            }))),
+            discovery: Arc::new(Mutex::new(DiscoveryStatus::default())),
+            hints: Arc::new(Mutex::new(discovery::OutputHints::default())),
         };
         let (requests, receiver) = mpsc::channel(8);
         let stop = CancellationToken::new();
         let waiting = stop.clone();
         let connection = ForwardConnection {
+            exec: crate::session::exec::ExecClient::new(stop.clone()).0,
             stop,
             closed: CancellationToken::new(),
             requests,
@@ -1120,9 +1118,12 @@ mod tests {
     #[tokio::test]
     async fn forwarding_connects_only_on_start_and_can_cancel_or_retry_authentication() {
         tokio::time::timeout(Duration::from_secs(3), async {
-            let (empty, worker) = start(options(22, Vec::new()), CancellationToken::new());
-            worker.await.unwrap();
+            let empty_stop = CancellationToken::new();
+            let (empty, worker) = start(options(22, Vec::new()), empty_stop.clone());
             assert!(empty.statuses().is_empty());
+            assert!(!worker.is_finished());
+            empty_stop.cancel();
+            worker.await.unwrap();
 
             let server = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
             let port = server.local_addr().unwrap().port();

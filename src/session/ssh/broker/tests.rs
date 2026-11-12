@@ -264,6 +264,9 @@ impl Fixture {
         self.forwards
             .send(ForwardRequest::Remote {
                 rule: PortForward {
+                    id: uuid::Uuid::new_v4(),
+                    name: String::new(),
+                    protocol: Default::default(),
                     kind: ForwardKind::Remote,
                     bind_host: "127.0.0.1".into(),
                     bind_port: 2222,

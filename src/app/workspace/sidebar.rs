@@ -848,6 +848,23 @@ impl Workspace {
     }
 }
 
+pub(super) fn rdp_target(settings: &rustterm::config::RdpConfig) -> String {
+    let identity = settings.domain.as_ref().map_or_else(
+        || settings.username.clone(),
+        |domain| format!("{domain}\\{}", settings.username),
+    );
+    format!("RDP  {identity}@{}:{}", settings.host, settings.port)
+}
+
+pub(super) fn telnet_target(settings: &rustterm::config::TelnetConfig) -> String {
+    let host = if settings.host.contains(':') && !settings.host.starts_with('[') {
+        format!("[{}]", settings.host)
+    } else {
+        settings.host.clone()
+    };
+    format!("Telnet  {host}:{}", settings.port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,21 +919,4 @@ mod tests {
         assert_eq!(collapsed.len(), 2); // Searching never changes saved collapse choices.
         assert!(library_sections(&config, &collapsed, "missing").is_empty());
     }
-}
-
-pub(super) fn rdp_target(settings: &rustterm::config::RdpConfig) -> String {
-    let identity = settings.domain.as_ref().map_or_else(
-        || settings.username.clone(),
-        |domain| format!("{domain}\\{}", settings.username),
-    );
-    format!("RDP  {identity}@{}:{}", settings.host, settings.port)
-}
-
-pub(super) fn telnet_target(settings: &rustterm::config::TelnetConfig) -> String {
-    let host = if settings.host.contains(':') && !settings.host.starts_with('[') {
-        format!("[{}]", settings.host)
-    } else {
-        settings.host.clone()
-    };
-    format!("Telnet  {host}:{}", settings.port)
 }

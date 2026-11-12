@@ -238,7 +238,11 @@ impl TerminalView {
             } else {
                 i18n_key::COMMON_RECONNECT
             },
-            shortcut: "",
+            shortcut: if self.is_running() {
+                ""
+            } else {
+                "Ctrl+Shift+R"
+            },
             icon: if self.is_running() {
                 Icon::Disconnect
             } else {
@@ -349,6 +353,29 @@ impl TerminalView {
             .flex_shrink_0()
             .items_center()
             .gap(px(4.))
+            .when(!self.is_running(), |d| {
+                d.child(
+                    ui::icon_button_enabled(
+                        ("reconnect", index),
+                        Icon::Refresh,
+                        if interactive {
+                            i18n_key::TERMINAL_RECONNECT_IN_THIS_TAB
+                        } else {
+                            i18n_key::COMMON_FINISH_THE_CURRENT_INPUT_OR_DIALOG_FIRST
+                        },
+                        terminal_visible,
+                    )
+                    .w_auto()
+                    .px_2()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .text_color(rgb(ui::colors().accent))
+                    .child(tr(i18n_key::COMMON_RECONNECT))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.reconnect_ended(window, cx);
+                    })),
+                )
+            })
             .when(self.viewed_run + 1 < self.runs.len(), |d| {
                 d.child(
                     ui::icon_button_enabled(
@@ -385,6 +412,7 @@ impl TerminalView {
             )
             .when(self.kind == TerminalKind::Ssh, |d| {
                 d.child(self.tool_button(SessionTool::Docker, cx))
+                    .child(self.tool_button(SessionTool::Ports, cx))
             })
             .child(
                 ui::icon_button_enabled(
@@ -468,6 +496,7 @@ impl TerminalView {
     fn tool_button(&self, tool: SessionTool, cx: &Context<Self>) -> AnyElement {
         let (id, label, glyph) = match tool {
             SessionTool::Docker => ("session-docker", i18n_key::DOCKER_TITLE, Icon::Container),
+            SessionTool::Ports => ("session-ports", i18n_key::PORTS_TITLE, Icon::Link),
             SessionTool::Files => ("session-files", i18n_key::TERMINAL_FILES, Icon::Folder),
             SessionTool::Commands => (
                 "session-commands",
@@ -506,6 +535,7 @@ impl TerminalView {
                     SessionTool::Commands => PaneEvent::Commands,
                     SessionTool::Resources => PaneEvent::Resources,
                     SessionTool::Docker => PaneEvent::Docker,
+                    SessionTool::Ports => PaneEvent::Ports,
                 });
             }))
             .into_any_element()

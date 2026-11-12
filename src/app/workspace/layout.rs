@@ -81,6 +81,10 @@ impl Workspace {
             return;
         }
         if self.utility_overlay {
+            if let Some(ports) = self.active_ports() {
+                ports.read(cx).focus_handle().focus(window);
+                return;
+            }
             if let Some(commands) = self.active_commands() {
                 commands.read(cx).focus_handle().focus(window);
                 return;
@@ -245,8 +249,11 @@ impl Workspace {
         cx.notify();
     }
     pub(super) fn input_composing(&self, window: &Window, cx: &App) -> bool {
-        self.active_docker()
-            .is_some_and(|view| view.read(cx).input_composing(cx))
+        self.active_ports()
+            .is_some_and(|ports| ports.read(cx).input_composing(cx))
+            || self
+                .active_docker()
+                .is_some_and(|view| view.read(cx).input_composing(cx))
             || self.modal_composing(cx)
             || self.session_filter.read(cx).is_composing()
             || self

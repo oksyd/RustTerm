@@ -377,3 +377,20 @@ terminal-zmodem-direction-status = ZMODEM { $direction } · { $status }
 terminal-zmodem-select-a-download-folder = ZMODEM: select a download folder
 
 terminal-zmodem-select-files-to-upload = ZMODEM: select files to upload
+
+terminal-status-editing = { " " }· Editing command
+terminal-status-awaiting-input = { " " }· Awaiting input
+terminal-reconnect-in-this-tab = Reconnect (Ctrl+Shift+R) in this tab; previous output remains available in earlier connections.
+terminal-reconnect-ended-session = Reconnect the disconnected terminal session
+terminal-status-executing = { " " }· Running command
+terminal-status-history-search = { " " }· Searching history
+terminal-interaction-history-supported = Shell integration reports command editing, execution and Zsh incremental history search. See Help for common shell shortcuts.
+terminal-interaction-history-unavailable = This shell integration reports prompt readiness and command execution, but cannot distinguish command editing from history search. Awaiting input covers both. See Help for common shell shortcuts.
+terminal-shell-shortcuts = Shell shortcuts
+terminal-shell-search-history = Search command history backward
+terminal-shell-kill-to-start = Cut to line start / cut whole line (shell-dependent)
+terminal-shell-kill-to-end = Cut from cursor to line end
+terminal-shell-yank = Paste previously cut text
+terminal-shell-line-start-end = Move to line start / end
+terminal-shell-shortcuts-note = Common Emacs editing bindings; your shell, editing mode or plugins may change them. RustTerm passes these keys through without notifications.
+terminal-shell-status-support = The status bar follows the active terminal. Bash and Fish show Awaiting input or Running command. Zsh can also distinguish command editing from built-in incremental history search when its hooks are available. Fullscreen programs use the alternate-screen status.

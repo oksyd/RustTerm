@@ -62,6 +62,9 @@ struct ProfileDraft {
     group: Option<Uuid>,
     ssh_auth: SshAuthentication,
     shell_integration: bool,
+    forwards: Vec<rustterm::config::PortForward>,
+    auto_forward: rustterm::config::ssh::AutoForwardConfig,
+    forward_draft: Option<Vec<String>>,
     database_tls: bool,
     es_auth: rustterm::config::ElasticsearchAuth,
     sqlite_read_only: bool,
@@ -84,6 +87,11 @@ pub struct ProfileForm {
     group_scroll: ScrollHandle,
     ssh_auth: SshAuthentication,
     shell_integration: bool,
+    forwards: Vec<rustterm::config::PortForward>,
+    auto_forward: rustterm::config::ssh::AutoForwardConfig,
+    forward_editor: Option<Entity<crate::app::port_editor::PortEditor>>,
+    forward_subscription: Option<Subscription>,
+    forward_error: Option<String>,
     database_tls: bool,
     es_auth: rustterm::config::ElasticsearchAuth,
     sqlite_read_only: bool,
@@ -327,7 +335,19 @@ impl ProfileForm {
                 ]);
             }
         }
+        let ssh_config = profile
+            .as_ref()
+            .and_then(|p| match &p.connection {
+                Connection::Ssh(ssh) => Some(ssh.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
         let mut form = Self {
+            forwards: ssh_config.forwards,
+            auto_forward: ssh_config.auto_forward,
+            forward_editor: None,
+            forward_subscription: None,
+            forward_error: None,
             id: profile
                 .as_ref()
                 .map_or_else(Uuid::new_v4, |profile| profile.id),
@@ -411,6 +431,12 @@ impl ProfileForm {
             group: self.group,
             ssh_auth: self.ssh_auth,
             shell_integration: self.shell_integration,
+            forwards: self.forwards.clone(),
+            auto_forward: self.auto_forward.clone(),
+            forward_draft: self
+                .forward_editor
+                .as_ref()
+                .map(|editor| editor.read(cx).draft(cx)),
             database_tls: self.database_tls,
             es_auth: self.es_auth,
             sqlite_read_only: self.sqlite_read_only,

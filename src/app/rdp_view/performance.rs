@@ -35,12 +35,21 @@ pub(super) struct Performance {
     uploaded_tiles: u64,
     uploaded_bytes: u64,
     paint_errors: u64,
+    cursor_uploads: u64,
+    cursor_bytes: u64,
+    cursor_errors: u64,
     prepare: Timing,
     paint: Timing,
     age: Timing,
 }
 
 impl Performance {
+    pub fn cursor_painted(&mut self, stats: super::cursor::PaintStats) {
+        self.cursor_uploads += stats.uploads;
+        self.cursor_bytes += stats.bytes;
+        self.cursor_errors += stats.errors;
+    }
+
     pub fn prepared(&mut self, frame: &RdpFrame, tiles: u64, bytes: u64, elapsed: Duration) {
         self.started.get_or_insert_with(Instant::now);
         self.prepare_calls += 1;
@@ -111,6 +120,15 @@ impl Performance {
                 self.uploaded_tiles,
                 self.uploaded_bytes,
                 self.paint_errors,
+            ],
+        );
+        window.record_values(
+            "rdp-ui-cursor",
+            [
+                pane,
+                self.cursor_uploads,
+                self.cursor_bytes,
+                self.cursor_errors,
             ],
         );
         // Sums and maxima, in microseconds; frame age is publication to CPU paint.
@@ -190,6 +208,20 @@ pub(super) fn record_backend(window: &WindowState, pane: usize, sample: &RdpPerf
             micros(sample.max_snapshot_time),
         ],
     );
+    for (name, latency) in [
+        ("rdp-command-latency-us", &sample.command_latency),
+        ("rdp-writer-latency-us", &sample.writer_latency),
+    ] {
+        window.record_values(
+            name,
+            [
+                pane,
+                latency.samples,
+                micros(latency.total),
+                micros(latency.max),
+            ],
+        );
+    }
     if let Some((captures, checked, mismatched)) = sample.snapshot_audit {
         window.record_values(
             "rdp-snapshot-damage-audit",

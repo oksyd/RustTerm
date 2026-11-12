@@ -66,6 +66,7 @@ impl Workspace {
             SessionTool::Files => self.open_files(window, cx),
             SessionTool::Resources => self.open_resources(window, cx),
             SessionTool::Docker => self.open_docker(window, cx),
+            SessionTool::Ports => self.open_ports(window, cx),
             SessionTool::Commands => self.open_commands(window, cx),
         }
     }
@@ -146,6 +147,7 @@ impl Workspace {
             SessionTool::Commands => (Icon::Terminal, i18n_key::WORKSPACE_COMMANDS),
             SessionTool::Resources => (Icon::Pulse, i18n_key::RESOURCES_RESOURCES),
             SessionTool::Docker => (Icon::Container, i18n_key::DOCKER_TITLE),
+            SessionTool::Ports => (Icon::Link, i18n_key::PORTS_TITLE),
         };
         let content = match tool {
             SessionTool::Files => self
@@ -158,6 +160,7 @@ impl Workspace {
                 .map(IntoElement::into_any_element),
             SessionTool::Resources => self.active_resources().map(IntoElement::into_any_element),
             SessionTool::Docker => self.active_docker().map(IntoElement::into_any_element),
+            SessionTool::Ports => self.active_ports().map(IntoElement::into_any_element),
         }
         .unwrap_or_else(|| {
             div()

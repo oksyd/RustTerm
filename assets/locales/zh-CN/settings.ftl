@@ -2,6 +2,9 @@ settings-ask-before-pasting-multiple-lines-into-a-terminal = 向终端粘贴多�
 
 settings-background = 背景
 
+settings-highlight-selection-matches = 高亮选中文本的其他匹配项
+settings-highlight-selection-matches-help = 双击单词或选中一小段文本，高亮可见输出中的相同内容；取消选区后清除高亮。
+
 settings-background-output-does-not-reset-the-idle-timer = 后台输出不会重置闲置计时。
 
 settings-cancel-password-change = 取消修改密码

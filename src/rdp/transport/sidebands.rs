@@ -232,48 +232,6 @@ impl Sidebands {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn optional_udp_reports_failure_before_the_handshake_expires() {
-        // An open UDP socket that never replies simulates a firewall silently
-        // dropping the handshake, without ICMP producing an immediate failure.
-        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut tunnels = Sidebands::new(
-            blackhole.local_addr().unwrap(),
-            "localhost".into(),
-            "unused".into(),
-            Duration::from_secs(20),
-        );
-        let request = Request {
-            id: 19,
-            protocol: TransportProtocol::Reliable,
-            cookie: [3; 16],
-        };
-        let end = tokio::time::Instant::now() + Duration::from_millis(200);
-        assert!(tunnels.open(request.clone(), Some(end)));
-        let result = tokio::time::timeout_at(end, async {
-            let Some(Update::Connected {
-                request_id,
-                result: Err(_),
-            }) = tunnels.next().await
-            else {
-                panic!("missing optional tunnel failure");
-            };
-            assert_eq!(request_id, request.id);
-            assert_eq!(tunnels.connected(), 0);
-            // The caller still has time to finish the TCP failure response.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            request.response(0x8000_4004)
-        })
-        .await
-        .unwrap();
-        assert_eq!(&result[8..], &0x8000_4004u32.to_le_bytes());
-    }
-}
-
 async fn run(
     tunnel: udp::Tunnel,
     mut commands: mpsc::Receiver<Write>,
@@ -348,5 +306,47 @@ async fn receive(
             })
             .await
             .map_err(|_| RdpError::Disconnected)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn optional_udp_reports_failure_before_the_handshake_expires() {
+        // An open UDP socket that never replies simulates a firewall silently
+        // dropping the handshake, without ICMP producing an immediate failure.
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut tunnels = Sidebands::new(
+            blackhole.local_addr().unwrap(),
+            "localhost".into(),
+            "unused".into(),
+            Duration::from_secs(20),
+        );
+        let request = Request {
+            id: 19,
+            protocol: TransportProtocol::Reliable,
+            cookie: [3; 16],
+        };
+        let end = tokio::time::Instant::now() + Duration::from_millis(200);
+        assert!(tunnels.open(request.clone(), Some(end)));
+        let result = tokio::time::timeout_at(end, async {
+            let Some(Update::Connected {
+                request_id,
+                result: Err(_),
+            }) = tunnels.next().await
+            else {
+                panic!("missing optional tunnel failure");
+            };
+            assert_eq!(request_id, request.id);
+            assert_eq!(tunnels.connected(), 0);
+            // The caller still has time to finish the TCP failure response.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            request.response(0x8000_4004)
+        })
+        .await
+        .unwrap();
+        assert_eq!(&result[8..], &0x8000_4004u32.to_le_bytes());
     }
 }

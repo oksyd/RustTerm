@@ -11,11 +11,13 @@ mod input_capture;
 mod interaction;
 mod layout;
 mod pane;
+mod port_editor;
 mod rdp_view;
 mod redis_view;
 mod resize;
 mod resource_monitor;
 mod resource_view;
+mod startup_error;
 mod terminal_view;
 mod text_input;
 mod tunnel_panel;
@@ -121,6 +123,15 @@ pub(crate) fn run() -> Result<()> {
     if std::env::args_os().skip(1).collect::<Vec<_>>() == ["--credential-worker"] {
         return rustterm::config::run_credential_worker().map_err(Into::into);
     }
+    let mut context = startup_error::StartupContext::default();
+    let result = run_application(&mut context);
+    if let Err(error) = &result {
+        startup_error::report(error, &context);
+    }
+    result
+}
+
+fn run_application(context: &mut startup_error::StartupContext) -> Result<()> {
     if std::env::args().skip(1).eq(["--version"]) {
         println!("RustTerm {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -131,8 +142,11 @@ pub(crate) fn run() -> Result<()> {
     };
     let restore = options.should_restore_workspace();
     let paths = AppPaths::discover(options.config_dir.clone())?;
+    context.paths = Some(paths.clone());
     let restart_directory = options.config_dir.as_ref().map(|_| paths.config.clone());
     let lock = ConfigLock::acquire(&paths.config)?;
+    // Load failures also need diagnostics, before a GPUI window exists.
+    context.logs_ready = paths.prepare_logs().is_ok();
     let mut config = paths.load_config()?;
     set_language(config.settings.language);
     #[cfg(target_os = "linux")]
@@ -185,8 +199,6 @@ pub(crate) fn run() -> Result<()> {
         restore,
         restart: restart.clone(),
     };
-    // A log failure must not prevent users from accessing their connections.
-    let _ = paths.prepare_logs();
     let logs = paths.logs();
     diagnostics::record(&logs, "application-start", 0);
     diagnostics::record(

@@ -10,7 +10,10 @@ mod isolation_tests;
 
 pub use connection::{AuthenticationChallenge, AuthenticationPrompt, HostKeyChallenge};
 pub(crate) use connection::{TunnelConnector, connect_tunnel};
-pub use forwarding::{ForwardController, ForwardState, ForwardStatus};
+pub use forwarding::{
+    DiscoveredService, DiscoveryStatus, ForwardController, ForwardRegistry, ForwardSettings,
+    ForwardState, ForwardStatus,
+};
 
 use super::{
     ActorCommand, FailureKind, SessionState, actor,
@@ -68,6 +71,8 @@ pub struct SshOptions {
     pub shell_integration: bool,
     pub jump_hosts: Vec<crate::config::SshJumpHost>,
     pub forwards: Vec<crate::config::PortForward>,
+    pub auto_forward: crate::config::ssh::AutoForwardConfig,
+    pub forwarding_registry: Option<(ForwardRegistry, crate::config::Uuid)>,
     pub authentication: Option<mpsc::Sender<AuthenticationChallenge>>,
 }
 pub(super) async fn run(
@@ -311,7 +316,13 @@ async fn connect(
     let (exec, exec_requests) = crate::session::exec::ExecClient::new(shared.io_stop.clone());
     *shared.docker.lock().unwrap_or_else(|e| e.into_inner()) =
         Some(crate::docker::DockerClient::new(exec));
-    let (forwarding, forwarding_task) = forwarding::start(options, shared.io_stop.clone());
+    let (forwarding, forwarding_task) = match options.forwarding_registry.take() {
+        Some((registry, id)) => (registry.acquire(id, options).await, None),
+        None => {
+            let (controller, task) = forwarding::start(options, shared.io_stop.clone());
+            (controller, Some(task))
+        }
+    };
     *shared.forwarding.lock().unwrap_or_else(|e| e.into_inner()) = Some(forwarding);
     let monitor_shared = shared.clone();
     let monitor = tokio::spawn(async move {
@@ -351,7 +362,15 @@ async fn connect(
         output,
         input,
         exit,
-        tasks: vec![reader_task, writer_task, monitor, forwarding_task],
+        tasks: [
+            Some(reader_task),
+            Some(writer_task),
+            Some(monitor),
+            forwarding_task,
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
         reaper: None,
     })
 }

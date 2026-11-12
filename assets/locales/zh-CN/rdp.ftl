@@ -62,6 +62,38 @@ rdp-copy-from-remote = 复制远程内容
 
 rdp-could-not-connect-to-the-rdp-server = 无法连接 RDP 服务器
 
+rdp-connection-failed = RDP 连接失败
+rdp-stage-resolve = 解析服务器地址
+rdp-stage-connect = 连接服务器端口
+rdp-stage-socket-setup = 设置网络连接
+rdp-stage-negotiation = 协商 RDP 连接
+rdp-stage-tls = 建立安全连接
+rdp-stage-authentication = 身份认证
+rdp-stage-session-setup = 初始化远程桌面
+rdp-stage-session = 传输会话数据
+rdp-stage-multitransport = 传输辅助通道数据
+rdp-failure-name-resolution = 无法解析服务器地址
+rdp-failure-refused = 连接被拒绝
+rdp-failure-reset = 连接被重置
+rdp-failure-closed = 对端已关闭连接
+rdp-failure-timed-out = 操作超时
+rdp-failure-unreachable = 网络或目标地址不可达
+rdp-failure-permission-denied = 系统拒绝网络访问
+rdp-failure-other = 发生网络读写错误
+rdp-server-security-incompatible = 服务器的 RDP 安全要求与此连接不兼容
+rdp-server-certificate-unavailable = 服务器没有有效的身份认证证书
+rdp-server-client-certificate-required = 服务器要求客户端证书身份认证
+rdp-server-entra-required = 服务器要求 Microsoft Entra ID 身份认证
+rdp-server-negotiation-rejected = 服务器拒绝了 RDP 安全协商
+rdp-server-admin-disconnected = 管理员已断开远程会话
+rdp-server-admin-logged-off = 管理员已注销远程会话
+rdp-server-idle-timeout = 会话空闲时间达到服务器限制，连接已断开
+rdp-server-session-time-limit = 会话活动时长达到服务器限制，连接已断开
+rdp-server-session-replaced = 此远程桌面会话已被另一条连接取代
+rdp-server-out-of-memory = 服务器可用内存不足
+rdp-server-connection-denied = 服务器拒绝了此连接
+rdp-server-session-ended = 服务器已结束远程桌面会话
+
 rdp-could-not-offer-the-remote-files-to-the-local-clipboard = 无法将远程文件放入本机剪贴板
 
 rdp-could-not-read-a-file-for-the-remote-desktop = 无法读取要传送到远程桌面的文件

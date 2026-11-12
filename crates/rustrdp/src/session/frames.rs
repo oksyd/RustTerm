@@ -23,6 +23,7 @@ pub struct FrameToken {
     session: Arc<()>,
     sequence: u64,
     frame_id: u32,
+    requires_presentation: bool,
 }
 
 impl FrameToken {
@@ -30,6 +31,13 @@ impl FrameToken {
     /// and activation, so this value alone must not be used to confirm a frame.
     pub fn frame_id(&self) -> u32 {
         self.frame_id
+    }
+
+    /// Whether this receipt or an earlier pending frame needs legacy Surface
+    /// presentation acknowledgement. Graphics pipeline frames can otherwise be
+    /// acknowledged after copying their complete graphics output buffer.
+    pub fn requires_presentation(&self) -> bool {
+        self.requires_presentation
     }
 }
 
@@ -107,12 +115,16 @@ impl Acknowledgements {
             session: Arc::clone(session),
             sequence,
             frame_id,
+            requires_presentation: self
+                .pending
+                .iter()
+                .any(|entry| entry.2 == Acknowledgement::Legacy),
         })
     }
 
     #[cfg(test)]
     pub fn acknowledge(&mut self, token: &FrameToken, info: &ConnectionInfo) -> Result<Vec<Event>> {
-        self.acknowledge_with(token, |id, _| {
+        self.acknowledge_with(token, true, |id, _| {
             Ok(vec![Event::Send(wire::share_data(
                 info.user_id,
                 info.io_channel_id,
@@ -126,6 +138,7 @@ impl Acknowledgements {
     pub fn acknowledge_with(
         &mut self,
         token: &FrameToken,
+        presented: bool,
         mut encode: impl FnMut(u32, Acknowledgement) -> Result<Vec<Event>>,
     ) -> Result<Vec<Event>> {
         if !self
@@ -135,10 +148,15 @@ impl Acknowledgements {
         {
             return Ok(Vec::new());
         }
+        // A graphics token may already have been acknowledged after output
+        // copying, while earlier legacy frames still await presentation. The
+        // later presentation of that same token must release those frames too.
+        // Tokens are opaque and session-bound; sequence order survives resets,
+        // so stale activation tokens cannot release any newer pending receipt.
         let Some(position) = self
             .pending
             .iter()
-            .position(|&(sequence, id, _)| sequence == token.sequence && id == token.frame_id)
+            .rposition(|&(sequence, _, _)| sequence <= token.sequence)
         else {
             return Ok(Vec::new());
         };
@@ -146,9 +164,13 @@ impl Acknowledgements {
         // encoding failure must leave the pending receipt sequence retryable.
         let mut events = Vec::new();
         for &(_, id, kind) in self.pending.iter().take(position + 1) {
-            events.extend(encode(id, kind)?);
+            if presented || kind != Acknowledgement::Legacy {
+                events.extend(encode(id, kind)?);
+            }
         }
-        self.pending.drain(..=position);
+        self.pending.retain(|&(sequence, _, kind)| {
+            sequence > token.sequence || (!presented && kind == Acknowledgement::Legacy)
+        });
         Ok(events)
     }
 }
@@ -156,6 +178,44 @@ impl Acknowledgements {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "graphics")]
+    #[test]
+    fn output_consumption_leaves_legacy_frames_pending_until_presentation() {
+        let mut acknowledgements = Acknowledgements::new(true);
+        let legacy = acknowledgements.complete(1).unwrap().unwrap();
+        let graphics = acknowledgements.complete_graphics(2, 1).unwrap();
+        assert!(legacy.requires_presentation());
+        assert!(graphics.requires_presentation());
+        // A failed encoder must leave both types retryable.
+        assert_eq!(
+            acknowledgements
+                .acknowledge_with(&graphics, false, |_, _| Err(Error::Invalid("test encoder"))),
+            Err(Error::Invalid("test encoder"))
+        );
+        let mut encoded = Vec::new();
+        acknowledgements
+            .acknowledge_with(&graphics, false, |id, kind| {
+                encoded.push((id, kind));
+                Ok(Vec::new())
+            })
+            .unwrap();
+        assert_eq!(encoded, [(2, Acknowledgement::Graphics { total: 1 })]);
+        assert_eq!(acknowledgements.pending.len(), 1);
+        acknowledgements
+            .acknowledge_with(&legacy, false, |_, _| panic!("legacy frame not presented"))
+            .unwrap();
+        // The GUI can skip the earlier frame and paint the latest combined
+        // output. Its GFX token must still release the older legacy receipt.
+        assert_eq!(
+            ids(acknowledgements.acknowledge(&graphics, &info()).unwrap()),
+            [1]
+        );
+        assert!(acknowledgements.pending.is_empty());
+        acknowledgements
+            .acknowledge_with(&graphics, true, |_, _| panic!("duplicate acknowledgement"))
+            .unwrap();
+    }
 
     fn info() -> ConnectionInfo {
         super::super::tests::session().info
@@ -196,9 +256,11 @@ mod tests {
         assert_eq!(acknowledgements.complete(1).unwrap(), None);
         let first = acknowledgements.complete_graphics(91, 1).unwrap();
         let second = acknowledgements.complete_graphics(3, 2).unwrap();
+        assert!(!first.requires_presentation());
+        assert!(!second.requires_presentation());
         let mut encoded = Vec::new();
         acknowledgements
-            .acknowledge_with(&second, |id, kind| {
+            .acknowledge_with(&second, true, |id, kind| {
                 encoded.push((id, kind));
                 Ok(Vec::new())
             })
@@ -212,7 +274,7 @@ mod tests {
         );
         assert!(
             acknowledgements
-                .acknowledge_with(&first, |_, _| panic!("stale frame"))
+                .acknowledge_with(&first, true, |_, _| panic!("stale frame"))
                 .unwrap()
                 .is_empty()
         );

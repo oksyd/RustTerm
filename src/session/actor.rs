@@ -126,6 +126,9 @@ pub(super) async fn run(
                     Some(Output::Data(bytes)) => {
                         match transfer.receive(bytes).await {
                             Ok(bytes) => {
+                                if let Some(forwarding) = shared.forwarding.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                                    forwarding.observe_output(&bytes);
+                                }
                                 if transfer.take_discard_deferred() {
                                     discard_pending_writes(&mut transfer, &mut outbox, &mut deferred_input, &shared);
                                 }
@@ -531,6 +534,10 @@ fn command_effect(
             terminal.set_highlight(enabled);
             None
         }
+        ActorCommand::User(Command::SetSelectionHighlight(enabled)) => {
+            terminal.set_selection_highlight(enabled);
+            None
+        }
         ActorCommand::User(Command::SetHistoryBudget { lines, bytes }) => {
             shared.requested_budget.store(bytes, Ordering::Release);
             budget::rebalance();
@@ -860,6 +867,7 @@ mod tests {
             Command::ClearSelection,
             Command::Scroll(1),
             Command::SetHighlight(false),
+            Command::SetSelectionHighlight(false),
             Command::SetTheme(crate::config::Theme::default()),
             Command::Search {
                 query: "ready".into(),

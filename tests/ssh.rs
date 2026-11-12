@@ -32,6 +32,7 @@ struct Handler {
     received: Arc<Mutex<Vec<u8>>>,
     exec_commands: Arc<Mutex<Vec<String>>>,
     reject_exec: Arc<AtomicBool>,
+    port_snapshot: Arc<Mutex<Option<String>>>,
     bridged: std::collections::HashSet<ChannelId>,
     remote_listeners: Arc<Mutex<std::collections::BTreeMap<u32, tokio::task::JoinHandle<()>>>>,
     backpressure: Option<Arc<Backpressure>>,
@@ -208,6 +209,18 @@ impl server::Handler for Handler {
             .lock()
             .unwrap()
             .push(String::from_utf8(command.to_vec()).unwrap());
+        if String::from_utf8_lossy(command).contains("RUSTTERM_PORTS_V1") {
+            if let Some(snapshot) = self.port_snapshot.lock().unwrap().clone() {
+                session.channel_success(channel)?;
+                session.data(channel, snapshot.into_bytes())?;
+                session.eof(channel)?;
+                session.close(channel)?;
+                return Ok(());
+            }
+        } else if String::from_utf8_lossy(command).contains("system dial-stdio") {
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
         if self.reject_exec.load(Ordering::SeqCst) {
             session.channel_failure(channel)?;
         } else {
@@ -300,6 +313,7 @@ impl Fixture {
             received: Arc::new(Mutex::new(Vec::new())),
             exec_commands: Arc::new(Mutex::new(Vec::new())),
             reject_exec: Arc::new(AtomicBool::new(false)),
+            port_snapshot: Arc::new(Mutex::new(None)),
             bridged: std::collections::HashSet::new(),
             remote_listeners: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             backpressure,
@@ -346,6 +360,8 @@ impl Fixture {
             shell_integration: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
+            auto_forward: Default::default(),
+            forwarding_registry: None,
             authentication: None,
         }
     }
@@ -660,6 +676,8 @@ async fn stalled_handshake_times_out_and_can_be_cancelled() {
         shell_integration: false,
         jump_hosts: Vec::new(),
         forwards: Vec::new(),
+        auto_forward: Default::default(),
+        forwarding_registry: None,
         authentication: None,
     };
     let server = tokio::spawn(async move {
@@ -839,6 +857,9 @@ async fn local_and_socks_forwarding_relay_and_stop_existing_streams() {
         let mut options = server.options(&path, SshAuth::Password("secret".into()));
         options.forwards = vec![
             PortForward {
+                id: uuid::Uuid::new_v4(),
+                name: String::new(),
+                protocol: Default::default(),
                 kind: ForwardKind::Local,
                 bind_host: "127.0.0.1".into(),
                 bind_port: local_port,
@@ -847,6 +868,9 @@ async fn local_and_socks_forwarding_relay_and_stop_existing_streams() {
                 enabled: true,
             },
             PortForward {
+                id: uuid::Uuid::new_v4(),
+                name: String::new(),
+                protocol: Default::default(),
                 kind: ForwardKind::Dynamic,
                 bind_host: "127.0.0.1".into(),
                 bind_port: dynamic_port,
@@ -902,6 +926,141 @@ async fn local_and_socks_forwarding_relay_and_stop_existing_streams() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn shared_forwarding_survives_tabs_and_live_edits_preserve_other_streams() {
+    use rustterm::{
+        config::ssh::parse_forwards,
+        session::{ForwardRegistry, ForwardState},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = Fixture::new(None).await;
+        let directory = private_directory();
+        let path = directory.path().join("hosts");
+        server.trust(&path);
+        let registry = ForwardRegistry::default();
+        let profile = uuid::Uuid::new_v4();
+        let mut options = server.options(&path, SshAuth::Password("secret".into()));
+        options.forwarding_registry = Some((registry.clone(), profile));
+        let first = Session::spawn_ssh(options.clone(), 80, 24, 100).unwrap();
+        let second = Session::spawn_ssh(options, 80, 24, 100).unwrap();
+        until(|| first.forwarding().is_some() && second.forwarding().is_some()).await;
+        let controller = registry.get(profile).unwrap();
+        assert!(controller.same_instance(&first.forwarding().unwrap()));
+        assert!(controller.same_instance(&second.forwarding().unwrap()));
+        assert_eq!(
+            server.handler.authentications.load(Ordering::SeqCst),
+            2,
+            "idle port manager does not open another SSH transport"
+        );
+        let one = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let two = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let changed = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let ports = [
+            one.local_addr().unwrap().port(),
+            two.local_addr().unwrap().port(),
+            changed.local_addr().unwrap().port(),
+        ];
+        let mut settings = controller.settings();
+        settings.rules = parse_forwards(&format!(
+            "L 127.0.0.1:{} target:80; L 127.0.0.1:{} target:81",
+            ports[0], ports[1]
+        ))
+        .unwrap();
+        drop((one, two, changed));
+        controller.configure(settings.clone()).unwrap();
+        until(|| {
+            controller.statuses().len() == 2
+                && controller
+                    .statuses()
+                    .iter()
+                    .all(|s| s.state == ForwardState::Running)
+        })
+        .await;
+        assert_eq!(server.handler.authentications.load(Ordering::SeqCst), 3);
+        let mut ongoing = tokio::net::TcpStream::connect(("127.0.0.1", ports[1]))
+            .await
+            .unwrap();
+        ongoing.write_all(b"before").await.unwrap();
+        let mut response = [0; 6];
+        ongoing.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"before");
+        settings.rules[0].bind_port = ports[2];
+        controller.configure(settings.clone()).unwrap();
+        until(|| {
+            controller.statuses().iter().any(|s| {
+                s.local_address.is_some_and(|a| a.port() == ports[2])
+                    && s.state == ForwardState::Running
+            })
+        })
+        .await;
+        first.close();
+        second.close();
+        drop((first, second));
+        ongoing.write_all(b"after!").await.unwrap();
+        ongoing.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"after!");
+        assert!(registry.get(profile).is_some());
+        settings.rules.remove(0);
+        controller.configure(settings).unwrap();
+        until(|| controller.statuses().len() == 1).await;
+        ongoing.write_all(b"intact").await.unwrap();
+        ongoing.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"intact");
+        registry.stop_all();
+        assert_eq!(ongoing.read(&mut response).await.unwrap(), 0);
+        until(|| {
+            controller
+                .statuses()
+                .iter()
+                .all(|s| s.state == ForwardState::Stopped)
+        })
+        .await;
+        assert!(TcpListener::bind(("127.0.0.1", ports[1])).await.is_ok());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn terminal_url_verifies_listener_and_manual_stop_is_persistent() {
+    use rustterm::config::ssh::ForwardProtocol;
+    use rustterm::session::{ForwardRegistry, ForwardState};
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let server = Fixture::new(None).await;
+        let directory = private_directory();
+        let path = directory.path().join("hosts");
+        server.trust(&path);
+        let snapshot = |port: Option<u16>| format!("RUSTTERM_PORTS_V1 1000\n{}RUSTTERM_PORTS_END\nRUSTTERM_PROCESS\t42\t1000\t/usr/bin/node\n", port.map(|port| format!("LISTEN 0 128 127.0.0.1:{port} *:* users:((\"node\",pid=42,fd=4))\n")).unwrap_or_default());
+        *server.handler.port_snapshot.lock().unwrap() = Some(snapshot(None));
+        let reserved = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = reserved.local_addr().unwrap().port();
+        let registry = ForwardRegistry::default();
+        let id = uuid::Uuid::new_v4();
+        let mut options = server.options(&path, SshAuth::Password("secret".into()));
+        options.forwarding_registry = Some((registry.clone(), id));
+        options.auto_forward.enabled = true;
+        let session = Session::spawn_ssh(options, 80, 24, 100).unwrap();
+        until(|| session.forwarding().is_some()).await;
+        let controller = session.forwarding().unwrap();
+        until(|| controller.discovery().docker_error.is_some()).await;
+        assert!(controller.statuses().is_empty());
+        *server.handler.port_snapshot.lock().unwrap() = Some(snapshot(Some(port)));
+        // The mock shell echoes this startup URL into the terminal output actor.
+        session.send(Command::Input(format!("http://localhost:{port}/\r\n").into_bytes())).unwrap();
+        until(|| controller.statuses().iter().any(|s| s.state == ForwardState::Running)).await;
+        let status = controller.statuses().remove(0);
+        assert_ne!(status.local_address.unwrap().port(), port, "occupied preferred port falls back");
+        assert_eq!(status.rule.protocol, ForwardProtocol::Http);
+        controller.enable_rule(status.rule.id, false).unwrap();
+        until(|| controller.statuses()[0].state == ForwardState::Stopped).await;
+        controller.refresh().unwrap();
+        until(|| controller.settings().automatic.services.iter().all(|p| !p.enabled)).await;
+        assert!(!controller.statuses()[0].enabled);
+        session.close(); registry.stop_all();
+    }).await.unwrap();
 }
 
 #[tokio::test]
@@ -1020,6 +1179,9 @@ async fn remote_forwarding_accepts_registered_routes_and_cancels_listener() {
         });
         let mut options = server.options(&path, SshAuth::Password("secret".into()));
         options.forwards.push(PortForward {
+            id: uuid::Uuid::new_v4(),
+            name: String::new(),
+            protocol: Default::default(),
             kind: ForwardKind::Remote,
             bind_host: "127.0.0.1".into(),
             bind_port: remote_port,

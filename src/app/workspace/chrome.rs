@@ -8,7 +8,7 @@ use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Decorations, Div, MouseButton, Stateful, Window, WindowControlArea,
-    canvas, div, px, rgb, rgba,
+    canvas, div, px, relative, rgb, rgba,
 };
 use rustterm::config::{Connection, Uuid};
 use rustterm::i18n::messages as i18n_key;
@@ -880,11 +880,40 @@ impl Workspace {
                             .rounded_full()
                             .bg(rgb(color)),
                     )
-                    .child(div().flex_shrink_0().child(label))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .when(matches!(pane, Some(Pane::Terminal(_))), |label| {
+                                label.w(px(260.)).max_w(relative(0.75)).truncate()
+                            })
+                            .child(label),
+                    )
                     .child(div().min_w_0().truncate().child(name))
                     .into_any_element(),
             })
             .when_some(self.resource_summary(), |bar, summary| bar.child(summary))
+            .when(!self.ports.registry.connections().is_empty(), |bar| {
+                bar.child(
+                    div()
+                        .id("background-ports")
+                        .px_2()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .cursor_pointer()
+                        .tab_index(0)
+                        .child(ui::icon(ui::Icon::Link))
+                        .child(format!(
+                            "{} {}",
+                            tr(i18n_key::PORTS_TITLE),
+                            self.background_port_count()
+                        ))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_all_ports(window, cx)),
+                        ),
+                )
+            })
             .when(self.saving || self.pending_credentials > 0, |bar| {
                 bar.child(
                     div()

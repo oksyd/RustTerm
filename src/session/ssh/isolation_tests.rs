@@ -209,6 +209,9 @@ impl Fixture {
                 shell_integration: false,
                 jump_hosts: Vec::new(),
                 forwards: vec![PortForward {
+                    id: uuid::Uuid::new_v4(),
+                    name: String::new(),
+                    protocol: Default::default(),
                     kind: ForwardKind::Remote,
                     bind_host: "127.0.0.1".into(),
                     bind_port: 2222,
@@ -216,6 +219,8 @@ impl Fixture {
                     destination_port,
                     enabled,
                 }],
+                auto_forward: Default::default(),
+                forwarding_registry: None,
                 authentication: None,
             },
             80,
