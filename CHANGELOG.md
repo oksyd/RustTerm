@@ -1,8 +1,17 @@
+## [0.1.12] - 2026-11-12
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.11] - 2026-11-12
 
 ### 🚀 Features
 
 - Add SSH auto-forwarding
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.11
 ## [0.1.10] - 2026-11-09
 
 ### 🐛 Bug Fixes
