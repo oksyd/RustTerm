@@ -4,13 +4,12 @@ version = "0.1.12"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.99.1"
-publish = false
+publish = true
 include = [
     "Cargo.toml",
     "Cargo.lock",
     "build.rs",
     "src/**",
-    "assets/**",
     "tests/**",
     "README.md",
     "LICENSE",
