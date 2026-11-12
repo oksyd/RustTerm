@@ -1,8 +1,25 @@
+## [0.1.13] - 2026-11-12
+
+### 🚀 Features
+
+- Redesign workspace UI
+
+### 🐛 Bug Fixes
+
+- Prevent shell test hangs and Docker connection races
+
+### ⚙️ Miscellaneous Tasks
+
+- Update
 ## [0.1.12] - 2026-11-12
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.12
 ## [0.1.11] - 2026-11-12
 
 ### 🚀 Features
