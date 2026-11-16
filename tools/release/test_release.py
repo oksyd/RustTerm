@@ -142,7 +142,7 @@ class ReleaseTests(unittest.TestCase):
         result = subprocess.run(
             ['cargo', 'package', '--list', '--offline'], cwd=source,
             capture_output=True, text=True, timeout=30, check=True)
-        packaged = set(result.stdout.splitlines())
+        packaged = {path.replace('\\', '/') for path in result.stdout.splitlines()}
         self.assertFalse(private & packaged)
         self.assertTrue(public <= packaged, public - packaged)
 
