@@ -1,8 +1,17 @@
+## [0.1.16] - 2026-11-16
+
+### 🐛 Bug Fixes
+
+- Ci
 ## [0.1.15] - 2026-11-16
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.15
 ## [0.1.14] - 2026-11-16
 
 ### 🚜 Refactor
