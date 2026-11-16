@@ -1,3 +1,8 @@
+## [0.1.14] - 2026-11-16
+
+### 🚜 Refactor
+
+- *(database)* Replace patched SQLx with dedicated async drivers
 ## [0.1.13] - 2026-11-12
 
 ### 🚀 Features
@@ -11,6 +16,7 @@
 ### ⚙️ Miscellaneous Tasks
 
 - Update
+- Release rustterm version 0.1.13
 ## [0.1.12] - 2026-11-12
 
 ### 🐛 Bug Fixes
