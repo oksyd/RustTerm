@@ -6,6 +6,35 @@ use std::{io::Cursor, sync::Arc};
 const MAX_PIXELS: u64 = 8 * 1024 * 1024;
 pub(crate) type MimeData = Vec<(&'static str, Arc<[u8]>)>;
 
+pub(crate) fn from_png(bytes: Vec<u8>) -> Result<ClipboardContent, ReadError> {
+    if bytes.len() > MAX_CONTENT_BYTES {
+        return Err(ReadError::TooLarge);
+    }
+    let image = decode_png(&bytes)?;
+    image_content(&image, bytes)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn from_dib(bytes: Vec<u8>) -> Result<ClipboardContent, ReadError> {
+    if bytes.len() > MAX_CONTENT_BYTES {
+        return Err(ReadError::TooLarge);
+    }
+    let image = decode_dib(&bytes)?;
+    image_content(&image, encode_png(&image)?)
+}
+
+fn image_content(image: &RgbaImage, png: Vec<u8>) -> Result<ClipboardContent, ReadError> {
+    let dib = encode_dib(image);
+    if png.len() + dib.len() > MAX_CONTENT_BYTES {
+        return Err(ReadError::TooLarge);
+    }
+    Ok(ClipboardContent {
+        png: Some(png),
+        dib: Some(dib),
+        ..Default::default()
+    })
+}
+
 pub(crate) fn from_mime(formats: Vec<(&str, Vec<u8>)>) -> Result<ClipboardContent, ReadError> {
     let mut content = ClipboardContent::default();
     for (mime, bytes) in formats {
@@ -13,9 +42,9 @@ pub(crate) fn from_mime(formats: Vec<(&str, Vec<u8>)>) -> Result<ClipboardConten
             "text/html" => content.html = Some(utf8(bytes)?),
             "text/rtf" | "application/rtf" if content.rtf.is_none() => content.rtf = Some(bytes),
             "image/png" => {
-                let image = decode_png(&bytes)?;
-                content.dib = Some(encode_dib(&image));
-                content.png = Some(bytes);
+                let image = from_png(bytes)?;
+                content.dib = image.dib;
+                content.png = image.png;
             }
             "text/plain;charset=utf-8" | "UTF8_STRING" | "text/plain" if content.text.is_none() => {
                 content.text = Some(utf8(bytes)?);
@@ -56,15 +85,7 @@ pub(crate) fn to_mime(content: &ClipboardContent) -> Result<MimeData, ReadError>
         formats.push(("application/rtf", bytes));
     }
     if let Some(image) = image {
-        let mut png = Vec::new();
-        image::codecs::png::PngEncoder::new(&mut png)
-            .write_image(
-                image.as_raw(),
-                image.width(),
-                image.height(),
-                image::ExtendedColorType::Rgba8,
-            )
-            .map_err(|_| ReadError::Invalid)?;
+        let png = encode_png(&image)?;
         if png.len() > MAX_CONTENT_BYTES {
             return Err(ReadError::TooLarge);
         }
@@ -181,6 +202,19 @@ fn encode_dib(image: &RgbaImage) -> Vec<u8> {
     dib
 }
 
+fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, ReadError> {
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|_| ReadError::Invalid)?;
+    Ok(png)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +237,20 @@ mod tests {
             .find(|(mime, _)| *mime == "image/png")
             .unwrap();
         assert_eq!(decode_png(&png.1).unwrap(), image);
+        let content = from_dib(encode_dib(&image)).unwrap();
+        assert_eq!(decode_png(content.png.as_ref().unwrap()).unwrap(), image);
+        assert_eq!(decode_dib(content.dib.as_ref().unwrap()).unwrap(), image);
+    }
+
+    #[test]
+    fn clipboard_image_validation_rejects_truncation_and_oversized_dimensions() {
+        assert!(matches!(from_png(vec![0; 32]), Err(ReadError::Invalid)));
+        assert!(matches!(from_dib(vec![0; 32]), Err(ReadError::Invalid)));
+        let image = RgbaImage::new(1, 1);
+        let mut dib = encode_dib(&image);
+        dib[4..8].copy_from_slice(&16000u32.to_le_bytes());
+        dib[8..12].copy_from_slice(&(-16000i32).to_le_bytes());
+        assert!(matches!(from_dib(dib), Err(ReadError::TooLarge)));
     }
 
     #[test]

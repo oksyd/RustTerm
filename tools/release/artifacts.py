@@ -37,6 +37,14 @@ def package_info():
     return tomllib.loads((ROOT / 'Cargo.toml').read_text(encoding='utf-8'))['package']
 
 
+def windows_layout():
+    layout = package_info()['metadata']['rustterm']['windows']
+    names = [layout['binary'], layout['manifest'], *layout['files']]
+    if any(not re.fullmatch(r'[A-Za-z0-9_\-][A-Za-z0-9_.\-]*', name) for name in names) or len({name.lower() for name in names}) != len(names):
+        raise ValueError('Invalid or duplicate Windows release filename')
+    return layout
+
+
 def digest(path):
     with Path(path).open('rb') as source:
         return hashlib.file_digest(source, 'sha256').hexdigest()
@@ -195,15 +203,13 @@ def package_windows(options):
         staging = Path(temporary)
         root = staging / name
         root.mkdir()
-        shutil.copyfile(binary, root / 'rustterm.exe')
-        for name_in_repo, name_in_archive in [
-            ('LICENSE', 'LICENSE'), ('README.md', 'README.md'),
-            ('assets/licenses/alacritty_terminal-LICENSE-APACHE', 'alacritty_terminal-LICENSE-APACHE'),
-        ]:
+        layout = windows_layout()
+        shutil.copyfile(binary, root / layout['binary'])
+        for name_in_archive, name_in_repo in layout['files'].items():
             shutil.copyfile(ROOT / name_in_repo, root / name_in_archive)
         manifest = {'version': version, 'platform': 'windows-x86_64', 'target': target,
                     'variant': variant, 'binary_sha256': digest(binary), 'lock_sha256': digest(ROOT / 'Cargo.lock')}
-        (root / 'build-info.json').write_text(json.dumps(manifest, indent=2)+'\n', encoding='utf-8')
+        (root / layout['manifest']).write_text(json.dumps(manifest, indent=2)+'\n', encoding='utf-8')
         archive = staging / f'{name}.zip'
         with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as package:
             for file in sorted(root.iterdir()):
@@ -356,7 +362,8 @@ def verify_archive(archive, version, platform_name):
     name = f'rustterm-{version}-{platform_name}'
     verify_checksum(archive)
     windows = platform_name.startswith('windows-')
-    expected = ({'rustterm.exe', 'build-info.json', 'README.md', 'LICENSE', 'alacritty_terminal-LICENSE-APACHE'}
+    layout = windows_layout() if windows else None
+    expected = ({layout['binary'], layout['manifest'], *layout['files']}
                 if windows else LINUX_FILES | {'build-info.json', 'install.py', 'install.sh'})
     with (zipfile.ZipFile(archive) if windows else tarfile.open(archive, 'r:gz')) as package:
         entries = package.infolist() if windows else package.getmembers()
@@ -376,10 +383,10 @@ def verify_archive(archive, version, platform_name):
         if seen != expected: raise ValueError('Incomplete release archive')
         def read(member):
             return package.open(f'{name}/{member}') if windows else package.extractfile(f'{name}/{member}')
-        with read('build-info.json') as source: manifest = json.load(source)
+        with read(layout['manifest'] if windows else 'build-info.json') as source: manifest = json.load(source)
         if any(manifest.get(k) != v for k,v in {'version': version,'platform':platform_name,'variant':'release'}.items()):
             raise ValueError('Release manifest version/platform/variant mismatch')
-        with read('rustterm.exe' if windows else 'bin/rustterm') as source:
+        with read(layout['binary'] if windows else 'bin/rustterm') as source:
             if hashlib.file_digest(source, 'sha256').hexdigest() != manifest.get('binary_sha256'):
                 raise ValueError('Executable checksum mismatch')
         with read('rustterm.exe' if windows else 'bin/rustterm') as source:

@@ -1,6 +1,6 @@
 # RustRDP
 
-[![Rust](https://img.shields.io/badge/rust-1.99.1%2B-orange.svg)](Cargo.toml)
+[![Rust](https://img.shields.io/badge/rust-1.100.0%2B-orange.svg)](Cargo.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 A Sans-I/O RDP client protocol library. Applications provide networking, verified

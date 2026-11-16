@@ -322,14 +322,13 @@ impl RdpView {
                 return;
             }
             self.clipboard.expect_remote_copy(local);
+            self.clipboard
+                .remember_native_copy(file_clipboard::sequence());
             if self.config.clipboard {
                 // Observe ownership from the copy gesture, before its network
                 // round trip. A delayed FORMAT_LIST must not adopt a newer
                 // Ubuntu selection as the baseline for this remote copy.
-                self.file_export_snapshot = Some(
-                    cx.background_executor()
-                        .spawn(async { file_clipboard::export::Snapshot::capture() }),
-                );
+                self.file_export_snapshot = Some(self.capture_clipboard_snapshot(cx));
             }
         }
         // AltGr text must not be interpreted as a Ctrl+Alt remote shortcut.
@@ -570,6 +569,11 @@ impl RdpView {
         if self.window_state.is_locked() {
             return;
         }
+        self.refresh_clipboard_ownership(cx);
+        let local_image = self.config.clipboard && file_clipboard::image_available();
+        if local_image {
+            self.clipboard.local_image(file_clipboard::sequence());
+        }
         // Keep an explicitly selected file offer only while the local clipboard
         // matches its selection-time snapshot. New local text takes precedence.
         if paste && !force_local && self.clipboard.has_selected_files() {
@@ -589,7 +593,9 @@ impl RdpView {
         let Some(revision) = self.begin_clipboard(cx) else {
             return;
         };
-        let local = if self.config.clipboard {
+        let local = if local_image {
+            Ok(self.clipboard.image_text())
+        } else if self.config.clipboard {
             self.read_clipboard(cx)
         } else {
             Err(i18n_key::RDP_SHARED_CLIPBOARD_IS_DISABLED_FOR_THIS_CONNECTION)
@@ -738,6 +744,8 @@ impl RdpView {
         if self.send(RdpCommand::Clipboard { revision, action }, cx) {
             let local = selected.then(|| self.read_clipboard(cx));
             self.clipboard.publish_files(local);
+            self.clipboard
+                .remember_native_copy(file_clipboard::sequence());
             self.error = None;
             self.file_transfer = None;
             cx.emit(PaneEvent::Activity);
@@ -864,7 +872,11 @@ impl RdpView {
         }
         self.window_state
             .record("rdp-clipboard-read-start", self.index);
-        let result = clipboard_text(cx.read_from_clipboard());
+        let result = if file_clipboard::image_available() {
+            Ok(None) // Image data is copied only by the background native reader.
+        } else {
+            clipboard_text(cx.read_from_clipboard())
+        };
         self.window_state.record(
             match &result {
                 Ok(Some(_)) => "rdp-clipboard-read-text",
@@ -874,6 +886,26 @@ impl RdpView {
             self.index,
         );
         result
+    }
+
+    pub(super) fn capture_clipboard_snapshot(
+        &self,
+        cx: &Context<Self>,
+    ) -> Task<Result<file_clipboard::export::Snapshot, file_clipboard::export::ExportError>> {
+        // The Windows sequence query is immediate. Capture before forwarding
+        // Ctrl+C, so an asynchronous task cannot adopt a later local copy.
+        #[cfg(windows)]
+        let snapshot = file_clipboard::export::Snapshot::capture();
+        cx.background_executor().spawn(async move {
+            #[cfg(windows)]
+            {
+                snapshot
+            }
+            #[cfg(not(windows))]
+            {
+                file_clipboard::export::Snapshot::capture()
+            }
+        })
     }
 
     pub(super) fn receive_clipboard_offer(
@@ -926,10 +958,7 @@ impl RdpView {
             self.file_export_snapshot = if explicit {
                 snapshot
             } else if window.is_window_active() || application_active {
-                Some(
-                    cx.background_executor()
-                        .spawn(async { file_clipboard::export::Snapshot::capture() }),
-                )
+                Some(self.capture_clipboard_snapshot(cx))
             } else {
                 None
             };
@@ -1021,10 +1050,7 @@ impl RdpView {
             let Some(revision) = self.begin_clipboard(cx) else {
                 return;
             };
-            self.file_export_snapshot = Some(
-                cx.background_executor()
-                    .spawn(async { file_clipboard::export::Snapshot::capture() }),
-            );
+            self.file_export_snapshot = Some(self.capture_clipboard_snapshot(cx));
             self.publish_remote_content(revision, content, cx);
             return;
         }

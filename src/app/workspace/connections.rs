@@ -150,6 +150,7 @@ impl Workspace {
             }
             Connection::Rdp(config) => {
                 let launch = RdpLaunch {
+                    ssh,
                     config: config.clone(),
                     secret,
                 };
@@ -203,7 +204,9 @@ impl Workspace {
             self.add_database(profile, launch, reconnect, split, window, cx);
             return;
         }
-        if let Connection::Telnet(config) = &profile.connection {
+        if let Connection::Telnet(config) = &profile.connection
+            && config.ssh_profile.is_none()
+        {
             let session = Session::spawn_telnet(
                 rustterm::session::TelnetOptions {
                     host: config.host.clone(),
@@ -245,7 +248,7 @@ impl Workspace {
                     })
                     .cloned()
                 else {
-                    self.error = Some(i18n_key::DATABASE_THE_SSH_PROFILE_FOR_THIS_DATABASE_CONNECTION_IS_UNAVAILABLE_EDIT.into());
+                    self.error = Some(i18n_key::CONNECTIONS_SSH_ROUTE_UNAVAILABLE.into());
                     cx.notify();
                     return;
                 };
@@ -482,6 +485,7 @@ impl Workspace {
             }
             Connection::Rdp(config) => {
                 let launch = RdpLaunch {
+                    ssh,
                     config: config.clone(),
                     secret: value,
                 };
@@ -498,8 +502,22 @@ impl Workspace {
                 };
                 self.add_database(profile, launch, reconnect, split, window, cx);
             }
-            Connection::Local(_) | Connection::Telnet(_) => {
-                unreachable!("local and Telnet sessions do not use a credential dialog")
+            Connection::Telnet(config) => {
+                let session = Session::spawn_telnet_with_ssh(
+                    rustterm::session::TelnetOptions {
+                        host: config.host.clone(),
+                        port: config.port,
+                        timeout_secs: config.timeout_secs,
+                    },
+                    ssh,
+                    80,
+                    24,
+                    self.config.settings.history_lines,
+                );
+                self.add_session(profile, session, reconnect, split, window, cx);
+            }
+            Connection::Local(_) => {
+                unreachable!("local sessions do not use a credential dialog")
             }
         }
         self.restore_focus(window, cx);
@@ -687,7 +705,7 @@ pub(super) fn needs_password(profile: &Profile) -> bool {
 }
 
 fn can_connect_with_saved_credentials(profile: &Profile, tunnel: Option<&Profile>) -> bool {
-    (profile_reference(profile).is_some() || matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None))
+    (profile_reference(profile).is_some() || matches!(profile.connection, Connection::Telnet(_)) || matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None))
         // Sentinel has a separate, session-only password that the user may need
         // to supply even when the Redis data-node password is saved.
         && !matches!(&profile.connection, Connection::Redis(config)
@@ -698,7 +716,8 @@ fn can_connect_with_saved_credentials(profile: &Profile, tunnel: Option<&Profile
 }
 
 pub(super) fn credential_optional(profile: &Profile) -> bool {
-    matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None)
+    matches!(&profile.connection, Connection::Telnet(_))
+        || matches!(&profile.connection, Connection::Elasticsearch(config) if config.auth == rustterm::config::ElasticsearchAuth::None)
         || matches!(
             &profile.connection,
             Connection::Ssh(SshConfig {

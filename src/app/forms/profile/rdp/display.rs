@@ -96,6 +96,7 @@ impl ProfileForm {
                 return None;
             };
             (!self.rdp.clear_certificate
+                && settings.ssh_profile == self.ssh_profile
                 && settings.host == self.fields.get(i18n_key::WORKSPACE_HOST, cx)
                 && self
                     .fields
@@ -106,7 +107,7 @@ impl ProfileForm {
             .then_some(settings.certificate_sha256.as_ref())
             .flatten()
         });
-        column()
+        column().child(self.tunnel_picker(cx))
             .child(self.fields.selected_rows(ADVANCED))
             .child(hint(i18n_key::RDP_NETWORK_KEEPALIVE_HELP))
             .child(self.rdp_toggle(

@@ -28,13 +28,146 @@ fn input_loss_notice() -> &'static str {
     )
 }
 
+/// Inputs to the lifecycle owner, rather than freely assignable snapshots.
+/// Progress can never revive a closing, disconnected or failed session.
+pub(super) enum LifecycleEvent {
+    Connecting,
+    WaitingHostKey {
+        host: String,
+        port: u16,
+        algorithm: String,
+        fingerprint: String,
+    },
+    WaitingAuthentication,
+    Connected,
+    Closing,
+    Disconnected {
+        exit_code: Option<u32>,
+    },
+    Failed {
+        kind: FailureKind,
+        message: String,
+    },
+    InputLost,
+    Released,
+}
+impl LifecycleEvent {
+    pub(super) fn failed(kind: FailureKind, message: impl Into<String>) -> Self {
+        Self::Failed {
+            kind,
+            message: message.into(),
+        }
+    }
+    fn is_progress(&self) -> bool {
+        matches!(
+            self,
+            Self::Connecting
+                | Self::WaitingHostKey { .. }
+                | Self::WaitingAuthentication
+                | Self::Connected
+        )
+    }
+}
+
+struct Lifecycle {
+    state: SessionState,
+    input_lost: bool,
+    released: bool,
+}
+impl Default for Lifecycle {
+    fn default() -> Self {
+        Self {
+            state: SessionState::Connecting,
+            input_lost: false,
+            released: false,
+        }
+    }
+}
+impl Lifecycle {
+    /// Pure transition policy. Cancellation and notifications stay at the boundary.
+    fn apply(&mut self, event: LifecycleEvent, notice: &str, separator: &str) -> bool {
+        if event.is_progress() && (!self.state.is_running() || self.state == SessionState::Closing)
+        {
+            return false;
+        }
+        if self.released && !matches!(event, LifecycleEvent::Disconnected { .. }) {
+            return false;
+        }
+        match event {
+            LifecycleEvent::Connecting => self.state = SessionState::Connecting,
+            LifecycleEvent::Connected => self.state = SessionState::Connected,
+            LifecycleEvent::WaitingAuthentication => {
+                self.state = SessionState::WaitingAuthentication
+            }
+            LifecycleEvent::WaitingHostKey {
+                host,
+                port,
+                algorithm,
+                fingerprint,
+            } => {
+                self.state = SessionState::WaitingHostKey {
+                    host,
+                    port,
+                    algorithm,
+                    fingerprint,
+                };
+            }
+            LifecycleEvent::Released => {
+                self.released = true;
+                self.closing();
+            }
+            LifecycleEvent::Closing => self.closing(),
+            LifecycleEvent::Disconnected { exit_code } => {
+                if !matches!(self.state, SessionState::Failed { .. }) {
+                    self.state = SessionState::Disconnected { exit_code };
+                }
+            }
+            LifecycleEvent::Failed { kind, mut message } => {
+                if self.input_lost {
+                    append_notice(&mut message, notice, separator);
+                }
+                self.state = SessionState::Failed { kind, message };
+            }
+            LifecycleEvent::InputLost => {
+                if self.input_lost {
+                    return false;
+                }
+                self.input_lost = true;
+                match &mut self.state {
+                    SessionState::Failed { message, .. } => {
+                        append_notice(message, notice, separator)
+                    }
+                    _ => {
+                        self.state = SessionState::Failed {
+                            kind: FailureKind::Write,
+                            message: notice.into(),
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+    fn closing(&mut self) {
+        if self.state.is_running() {
+            self.state = SessionState::Closing;
+        }
+    }
+}
+fn append_notice(message: &mut String, notice: &str, separator: &str) {
+    if !message.contains(notice) {
+        message.push_str(separator);
+        message.push_str(notice);
+    }
+}
+
 pub(super) struct Shared {
     pub(super) id: uuid::Uuid,
     pub(super) created_at: SystemTime,
     pub(super) ended_at: Mutex<Option<SystemTime>>,
     pub(super) final_alternate: RwLock<Option<Arc<Snapshot>>>,
     pub(super) remote_failure: Mutex<Option<(FailureKind, String)>>,
-    pub(super) state: Mutex<SessionState>,
+    lifecycle: Mutex<Lifecycle>,
     pub(super) snapshot: watch::Sender<Arc<Snapshot>>,
     pub(super) command_completion: watch::Sender<Option<ShellCommand>>,
     pub(super) command_history: Mutex<Arc<[ShellCommand]>>,
@@ -62,7 +195,6 @@ pub(super) struct Shared {
     pub(super) retained_base: AtomicUsize,
     pub(super) evicted: AtomicBool,
     pub(super) unacknowledged_inputs: AtomicUsize,
-    pub(super) input_loss_reported: AtomicBool,
     pub(super) input_loss_message: OnceLock<&'static str>,
 }
 impl Shared {
@@ -73,7 +205,7 @@ impl Shared {
             ended_at: Mutex::new(None),
             final_alternate: RwLock::new(None),
             remote_failure: Mutex::new(None),
-            state: Mutex::new(SessionState::Connecting),
+            lifecycle: Mutex::new(Lifecycle::default()),
             snapshot: watch::Sender::new(Arc::new(terminal.snapshot())),
             command_completion: watch::Sender::new(None),
             command_history: Mutex::new(terminal.command_history()),
@@ -104,7 +236,6 @@ impl Shared {
             retained_base: AtomicUsize::new(0),
             evicted: AtomicBool::new(false),
             unacknowledged_inputs: AtomicUsize::new(0),
-            input_loss_reported: AtomicBool::new(false),
             input_loss_message: OnceLock::new(),
         })
     }
@@ -120,25 +251,14 @@ impl Shared {
                 });
     }
     pub(super) fn report_input_loss(&self) {
-        if self.actor_stop.is_cancelled() || self.input_loss_reported.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match &mut *state {
-            SessionState::Failed { message, .. } => {
-                if !message.contains(self.input_loss_notice()) {
-                    message.push_str(crate::i18n::tr(i18n_key::COMMON_DETAIL_SEPARATOR));
-                    message.push_str(self.input_loss_notice());
-                }
-            }
-            _ => {
-                *state = SessionState::Failed {
-                    kind: FailureKind::Write,
-                    message: self.input_loss_notice().into(),
-                };
-            }
-        }
-        self.changed();
+        self.transition(LifecycleEvent::InputLost);
+    }
+    #[cfg(test)]
+    pub(super) fn input_loss_reported(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .input_lost
     }
     pub(super) fn changed(&self) {
         self.revision.send_modify(|revision| {
@@ -151,40 +271,36 @@ impl Shared {
             self.changed();
         }
     }
-    pub(super) fn state(&self, value: SessionState) {
-        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = value;
-        self.changed();
-    }
-    pub(super) fn closing(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.is_running() && *state != SessionState::Closing {
-            *state = SessionState::Closing;
-            self.changed();
-        }
-    }
-    pub(super) fn live_state(&self, value: SessionState) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if self.io_stop.is_cancelled() {
+    /// A synchronous event mailbox: only Lifecycle owns and mutates status.
+    /// Publishing under the same lock preserves event order without delaying a
+    /// user disconnect behind terminal output or a blocked transport worker.
+    pub(super) fn transition(&self, event: LifecycleEvent) -> bool {
+        let mut lifecycle = self.lifecycle.lock().unwrap_or_else(|e| e.into_inner());
+        if event.is_progress() && self.io_stop.is_cancelled() {
             return false;
         }
-        *state = value;
-        self.changed();
-        true
-    }
-    pub(super) fn failed(&self, kind: FailureKind, message: impl Into<String>) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let mut message = message.into();
-        if self.input_loss_reported.load(Ordering::Acquire)
-            && !message.contains(self.input_loss_notice())
-        {
-            message.push_str(crate::i18n::tr(i18n_key::COMMON_DETAIL_SEPARATOR));
-            message.push_str(self.input_loss_notice());
+        let before = lifecycle.state.clone();
+        let notice = if matches!(event, LifecycleEvent::InputLost) || lifecycle.input_lost {
+            self.input_loss_notice()
+        } else {
+            ""
+        };
+        let accepted = lifecycle.apply(
+            event,
+            notice,
+            crate::i18n::tr(i18n_key::COMMON_DETAIL_SEPARATOR),
+        );
+        if lifecycle.state != before {
+            self.changed();
         }
-        *state = SessionState::Failed { kind, message };
-        self.changed();
+        accepted
     }
     pub(super) fn current_state(&self) -> SessionState {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.lifecycle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .state
+            .clone()
     }
 }
 
@@ -193,13 +309,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_session_cannot_be_revived_by_late_handshake_state() {
+        let shared = Shared::new(&Terminal::new(80, 24, 0));
+        shared.transition(LifecycleEvent::failed(
+            FailureKind::RemoteClosed,
+            "remote closed",
+        ));
+        assert!(!shared.transition(LifecycleEvent::Connected));
+        assert!(matches!(
+            shared.current_state(),
+            SessionState::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn releasing_an_archive_ignores_late_failure_and_input_loss_events() {
+        let shared = Shared::new(&Terminal::new(80, 24, 0));
+        shared.transition(LifecycleEvent::Connected);
+        shared.transition(LifecycleEvent::Released);
+        assert!(!shared.transition(LifecycleEvent::failed(FailureKind::Write, "late write")));
+        shared.report_input_loss();
+        assert!(!shared.transition(LifecycleEvent::Connected));
+        assert_eq!(shared.current_state(), SessionState::Closing);
+        assert!(!shared.input_loss_reported());
+        shared.transition(LifecycleEvent::Disconnected { exit_code: Some(0) });
+        assert_eq!(
+            shared.current_state(),
+            SessionState::Disconnected { exit_code: Some(0) }
+        );
+    }
+
+    #[test]
+    fn disconnect_completion_does_not_overwrite_a_worker_failure() {
+        let shared = Shared::new(&Terminal::new(80, 24, 0));
+        shared.transition(LifecycleEvent::Closing);
+        shared.transition(LifecycleEvent::failed(
+            FailureKind::Process,
+            "reaper failed",
+        ));
+        shared.transition(LifecycleEvent::Disconnected { exit_code: None });
+        assert_eq!(
+            shared.current_state(),
+            SessionState::Failed {
+                kind: FailureKind::Process,
+                message: "reaper failed".into()
+            }
+        );
+    }
+
+    #[test]
     fn session_changes_coalesce_without_snapshot_publication() {
         let shared = Shared::new(&Terminal::new(80, 24, 0));
         let mut changes = shared.revision.subscribe();
         let snapshots = shared.snapshot.subscribe();
         let initial = *changes.borrow_and_update();
 
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         shared.changed();
         assert!(changes.has_changed().unwrap());
         assert_eq!(*changes.borrow_and_update(), initial + 2);
@@ -207,7 +372,7 @@ mod tests {
         assert!(!snapshots.has_changed().unwrap());
 
         // Reading state after marking the revision cannot consume a concurrent event.
-        shared.closing();
+        shared.transition(LifecycleEvent::Closing);
         assert_eq!(shared.current_state(), SessionState::Closing);
         assert!(changes.has_changed().unwrap());
     }
@@ -218,7 +383,7 @@ mod tests {
         shared.changed();
         let mut changes = shared.revision.subscribe();
         assert_eq!(*changes.borrow_and_update(), 2);
-        shared.failed(FailureKind::RemoteClosed, "closed");
+        shared.transition(LifecycleEvent::failed(FailureKind::RemoteClosed, "closed"));
         assert!(matches!(
             shared.current_state(),
             SessionState::Failed { .. }
@@ -231,15 +396,15 @@ mod tests {
         let terminal = Terminal::new(80, 24, 10);
         let shared = Shared::new(&terminal);
         shared.io_stop.cancel();
-        shared.state(SessionState::Disconnected { exit_code: None });
-        assert!(!shared.live_state(SessionState::WaitingHostKey {
+        shared.transition(LifecycleEvent::Disconnected { exit_code: None });
+        assert!(!shared.transition(LifecycleEvent::WaitingHostKey {
             host: "example.test".into(),
             port: 22,
             algorithm: "ssh-ed25519".into(),
             fingerprint: "SHA256:example".into()
         }));
-        assert!(!shared.live_state(SessionState::Connecting));
-        assert!(!shared.live_state(SessionState::Connected));
+        assert!(!shared.transition(LifecycleEvent::Connecting));
+        assert!(!shared.transition(LifecycleEvent::Connected));
         assert_eq!(
             shared.current_state(),
             SessionState::Disconnected { exit_code: None }

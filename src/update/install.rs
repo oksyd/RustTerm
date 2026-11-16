@@ -4,6 +4,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 const MANIFEST: &str = "share/doc/rustterm/build-info.json";
@@ -23,6 +24,8 @@ pub struct Installation {
     prefix: PathBuf,
     manifest_sha256: [u8; 32],
     debian: bool,
+    portable: bool,
+    pending: Arc<Mutex<Option<super::portable::Prepared>>>,
 }
 impl Installation {
     pub fn current() -> Result<Self> {
@@ -30,6 +33,9 @@ impl Installation {
     }
 
     pub fn at_executable(executable: &Path) -> Result<Self> {
+        if cfg!(all(windows, target_arch = "x86_64")) {
+            return Self::at_portable_executable(executable);
+        }
         ensure!(
             cfg!(all(target_os = "linux", target_arch = "x86_64")),
             "Unsupported update platform"
@@ -62,20 +68,80 @@ impl Installation {
             prefix,
             manifest_sha256: Sha256::digest(&marker).into(),
             debian: manifest["installation"] == "deb",
+            portable: false,
+            pending: Arc::default(),
         };
         installation.validate()?;
         Ok(installation)
     }
 
     pub fn executable(&self) -> PathBuf {
-        self.prefix.join("bin/rustterm")
+        self.prefix.join(if self.portable {
+            "rustterm.exe"
+        } else {
+            "bin/rustterm"
+        })
     }
 
     pub fn is_debian(&self) -> bool {
         self.debian
     }
 
+    pub fn is_portable(&self) -> bool {
+        self.portable
+    }
+
+    fn at_portable_executable(executable: &Path) -> Result<Self> {
+        ensure!(
+            executable.is_absolute()
+                && executable
+                    .file_name()
+                    .is_some_and(|name| name == "rustterm.exe"),
+            "Not a portable RustTerm executable"
+        );
+        let prefix = executable
+            .parent()
+            .context("No executable directory")?
+            .canonicalize()?;
+        let manifest_sha256 = super::portable::validate_installation(&prefix, CURRENT_VERSION)?;
+        Ok(Self {
+            prefix,
+            manifest_sha256,
+            debian: false,
+            portable: true,
+            pending: Arc::default(),
+        })
+    }
+
+    pub(super) fn prepare_portable(&self, package: &Path, version: &str) -> Result<()> {
+        self.validate()?;
+        let prepared =
+            super::portable::prepare(&self.prefix, package, version, self.manifest_sha256)?;
+        *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(prepared);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub fn restart_portable(&self, config_dir: Option<&Path>) -> Result<()> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let prepared = pending
+            .as_ref()
+            .context("No verified update is ready to install")?;
+        super::windows::launch(prepared, config_dir)?;
+        // The helper has opened a handle to this process and now owns cleanup.
+        pending.take().unwrap().handoff();
+        Ok(())
+    }
+
     pub(super) fn validate(&self) -> Result<()> {
+        if self.portable {
+            ensure!(
+                super::portable::validate_installation(&self.prefix, CURRENT_VERSION)?
+                    == self.manifest_sha256,
+                "The installed version changed. Restart RustTerm before updating again."
+            );
+            return Ok(());
+        }
         ensure!(self.prefix != Path::new("/"), "Invalid installation prefix");
         let marker = self.prefix.join(MANIFEST);
         ensure!(

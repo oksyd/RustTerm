@@ -91,11 +91,18 @@ fn tab_profile(tab: &Tab, profiles: &HashMap<usize, Profile>) -> Option<Uuid> {
         .then_some(first.id)
 }
 
-/// Preserve each group's first position and its members' relative order.
+/// Pinned tabs form an independent prefix; the rest keep automatic SSH groups.
 pub(super) fn group_tabs(tabs: &[Tab], profiles: &HashMap<usize, Profile>) -> Vec<TabGroup> {
-    let mut groups: Vec<TabGroup> = Vec::new();
+    let mut groups: Vec<TabGroup> = tabs
+        .iter()
+        .filter(|tab| tab.pinned)
+        .map(|tab| TabGroup {
+            profile: None,
+            tabs: vec![tab.id],
+        })
+        .collect();
     let mut positions: HashMap<Uuid, usize> = HashMap::new();
-    for tab in tabs {
+    for tab in tabs.iter().filter(|tab| !tab.pinned) {
         let profile = tab_profile(tab, profiles);
         if let Some(index) = profile.and_then(|profile| positions.get(&profile)).copied() {
             groups[index].tabs.push(tab.id);
@@ -134,6 +141,15 @@ fn move_tab(
     to: usize,
     whole_group: bool,
 ) {
+    let Some(source_tab) = tabs.iter().find(|tab| tab.id == from) else {
+        return;
+    };
+    let Some(target_tab) = tabs.iter().find(|tab| tab.id == to) else {
+        return;
+    };
+    if source_tab.pinned != target_tab.pinned {
+        return;
+    }
     let mut groups = group_tabs(tabs, profiles);
     let Some(source) = groups.iter().position(|group| group.tabs.contains(&from)) else {
         return;
@@ -159,6 +175,20 @@ fn move_tab(
 }
 
 impl Workspace {
+    pub(super) fn set_tab_pinned(&mut self, id: usize, pinned: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return;
+        };
+        if tab.pinned == pinned {
+            return;
+        }
+        tab.pinned = pinned;
+        self.regroup_tabs();
+        self.expand_active_tab_group();
+        self.persist_workspace(cx);
+        cx.notify();
+    }
+
     pub(super) fn tab_groups(&self) -> Vec<TabGroup> {
         group_tabs(&self.tabs, &self.pane_profiles)
     }
@@ -179,6 +209,7 @@ impl Workspace {
         if let Some(profile) = self
             .tabs
             .get(self.active)
+            .filter(|tab| !tab.pinned)
             .and_then(|tab| tab_profile(tab, &self.pane_profiles))
         {
             self.collapsed_tab_groups.remove(&profile);

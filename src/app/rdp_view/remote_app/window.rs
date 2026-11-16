@@ -397,9 +397,10 @@ impl ApplicationWindow {
                         cx,
                     );
                     owner.clipboard.expect_remote_copy(local);
-                    owner.file_export_snapshot = Some(cx.background_executor().spawn(async {
-                        super::super::file_clipboard::export::Snapshot::capture()
-                    }));
+                    owner
+                        .clipboard
+                        .remember_native_copy(super::super::file_clipboard::sequence());
+                    owner.file_export_snapshot = Some(owner.capture_clipboard_snapshot(cx));
                 }
             });
         }

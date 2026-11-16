@@ -8,6 +8,7 @@ fn fixture(profiles: &[Profile]) -> (Vec<Tab>, HashMap<usize, Profile>) {
         .map(|(i, profile)| Tab {
             id: i + 1,
             title: profile.name.clone(),
+            pinned: false,
             layout: PaneNode::Leaf(i + 1),
             focused: i + 1,
         })
@@ -22,6 +23,58 @@ fn fixture(profiles: &[Profile]) -> (Vec<Tab>, HashMap<usize, Profile>) {
 
 fn ids(tabs: &[Tab]) -> Vec<usize> {
     tabs.iter().map(|tab| tab.id).collect()
+}
+
+#[test]
+fn pinned_tabs_stay_before_groups_and_unpinning_restores_automatic_membership() {
+    let ssh = Profile::ssh("server", Default::default());
+    let (mut tabs, profiles) = fixture(&[
+        ssh.clone(),
+        ssh.clone(),
+        ssh.clone(),
+        Profile::rdp("desktop", Default::default()),
+    ]);
+    tabs[1].pinned = true;
+    tabs[3].pinned = true;
+    let groups = group_tabs(&tabs, &profiles);
+    assert_eq!(
+        groups,
+        vec![
+            TabGroup {
+                profile: None,
+                tabs: vec![2]
+            },
+            TabGroup {
+                profile: None,
+                tabs: vec![4]
+            },
+            TabGroup {
+                profile: Some(ssh.id),
+                tabs: vec![1, 3]
+            },
+        ]
+    );
+    apply_order(&mut tabs, &groups);
+    assert_eq!(ids(&tabs), [2, 4, 1, 3]);
+    tabs[0].pinned = false;
+    let groups = group_tabs(&tabs, &profiles);
+    apply_order(&mut tabs, &groups);
+    assert_eq!(ids(&tabs), [4, 2, 1, 3]);
+    assert_eq!(groups[1].profile, Some(ssh.id));
+}
+
+#[test]
+fn dragging_respects_the_pin_boundary_and_keeps_both_partitions_reorderable() {
+    let (mut tabs, profiles) = fixture(&vec![Profile::local("local", Default::default()); 4]);
+    tabs[0].pinned = true;
+    tabs[1].pinned = true;
+    move_tab(&mut tabs, &profiles, 1, 2, false);
+    assert_eq!(ids(&tabs), [2, 1, 3, 4]);
+    move_tab(&mut tabs, &profiles, 4, 3, false);
+    assert_eq!(ids(&tabs), [2, 1, 4, 3]);
+    move_tab(&mut tabs, &profiles, 1, 3, false);
+    move_tab(&mut tabs, &profiles, 4, 2, false);
+    assert_eq!(ids(&tabs), [2, 1, 4, 3]);
 }
 
 #[test]
@@ -120,6 +173,7 @@ fn groups_appear_on_second_tab_and_disappear_when_only_one_remains() {
     tabs.push(Tab {
         id: 4,
         title: a.name.clone(),
+        pinned: false,
         layout: PaneNode::Leaf(4),
         focused: 4,
     });

@@ -139,6 +139,7 @@ impl ProfileForm {
                 working_directory: get(REMOTE_APP[2]),
             });
         }
+        settings.ssh_profile = self.ssh_profile;
         settings.host = get(i18n_key::WORKSPACE_HOST);
         settings.port = parse_value(i18n_key::WORKSPACE_PORT, &get(i18n_key::WORKSPACE_PORT))?;
         settings.username = get(i18n_key::WORKSPACE_USERNAME);
@@ -286,19 +287,20 @@ mod tests {
         assert_eq!(preferences.credential, saved.credential);
         assert_eq!(preferences.certificate_sha256, saved.certificate_sha256);
 
-        for field in 0..4 {
+        for field in 0..5 {
             let mut changed = saved.clone();
             match field {
                 0 => changed.host = "another.example.invalid".into(),
                 1 => changed.port = 3390,
                 2 => changed.username = "another-user".into(),
-                _ => changed.domain = None,
+                3 => changed.domain = None,
+                _ => changed.ssh_profile = Some(Uuid::new_v4()),
             }
             preserve_references(&mut changed, id, &profiles, false);
             assert_eq!(changed.credential, None);
             assert_eq!(
                 changed.certificate_sha256,
-                if field < 2 {
+                if field < 2 || field == 4 {
                     None
                 } else {
                     saved.certificate_sha256.clone()

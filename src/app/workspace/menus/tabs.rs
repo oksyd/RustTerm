@@ -17,26 +17,43 @@ pub(in crate::app::workspace) struct TabMenu {
     target: Target,
     // Keep the list stable while open; availability is checked again on activation.
     new_session: bool,
+    pinned: bool,
+}
+
+const fn tab_items(pinned: bool) -> [MenuItem; 5] {
+    use MenuAction::*;
+    [
+        MenuItem::new(i18n_key::WORKSPACE_NEW_TAB_SESSION, "", NewTabSession),
+        MenuItem::new(
+            if pinned {
+                i18n_key::WORKSPACE_UNPIN_TAB
+            } else {
+                i18n_key::WORKSPACE_PIN_TAB
+            },
+            "",
+            SetTabPinned(!pinned),
+        ),
+        MenuItem::new(i18n_key::WORKSPACE_CLOSE_TAB, "", CloseTab),
+        MenuItem::new(i18n_key::WORKSPACE_CLOSE_OTHER_TABS, "", CloseOtherTabs),
+        MenuItem::new(
+            i18n_key::WORKSPACE_CLOSE_TABS_TO_RIGHT,
+            "",
+            CloseTabsToRight,
+        ),
+    ]
 }
 
 impl TabMenu {
     pub(super) fn items(self) -> &'static [MenuItem] {
         use MenuAction::*;
-        const TAB: &[MenuItem] = &[
-            MenuItem::new(i18n_key::WORKSPACE_NEW_TAB_SESSION, "", NewTabSession),
-            MenuItem::new(i18n_key::WORKSPACE_CLOSE_TAB, "", CloseTab),
-            MenuItem::new(i18n_key::WORKSPACE_CLOSE_OTHER_TABS, "", CloseOtherTabs),
-            MenuItem::new(
-                i18n_key::WORKSPACE_CLOSE_TABS_TO_RIGHT,
-                "",
-                CloseTabsToRight,
-            ),
-        ];
+        const TAB: &[MenuItem] = &tab_items(false);
+        const PINNED: &[MenuItem] = &tab_items(true);
         const GROUP: &[MenuItem] = &[
             MenuItem::new(i18n_key::WORKSPACE_NEW_TAB_SESSION, "", NewTabSession),
             MenuItem::new(i18n_key::WORKSPACE_CLOSE_TAB_GROUP, "", CloseTabGroup),
         ];
         let items = match self.target {
+            Target::Tab(_) if self.pinned => PINNED,
             Target::Tab(_) => TAB,
             Target::Group(_) => GROUP,
         };
@@ -49,6 +66,7 @@ impl MenuAction {
         matches!(
             self,
             Self::NewTabSession
+                | Self::SetTabPinned(_)
                 | Self::CloseTab
                 | Self::CloseOtherTabs
                 | Self::CloseTabsToRight
@@ -101,6 +119,7 @@ impl Workspace {
         self.menu = Some(Menu::Tab(TabMenu {
             target,
             new_session: self.tab_session_profile(target, cx).is_some(),
+            pinned: matches!(target, Target::Tab(id) if self.tabs.iter().any(|tab| tab.id == id && tab.pinned)),
         }));
         // Opening a background tab's menu does not switch tabs or acknowledge output.
         self.menu_anchor = position;
@@ -145,6 +164,10 @@ impl Workspace {
         }
         if action == MenuAction::NewTabSession {
             self.tab_session_profile(menu.target, cx).is_some()
+        } else if let MenuAction::SetTabPinned(pinned) = action {
+            target_tabs(menu.target, &self.tabs, &self.pane_profiles)
+                .iter()
+                .any(|tab| tab.pinned != pinned)
         } else {
             !close_targets(menu.target, action, &self.tabs, &self.pane_profiles).is_empty()
         }
@@ -164,6 +187,8 @@ impl Workspace {
             if let Some(profile) = self.tab_session_profile(menu.target, cx) {
                 self.connect_profile(profile, None, window, cx);
             }
+        } else if let (Target::Tab(id), MenuAction::SetTabPinned(pinned)) = (menu.target, action) {
+            self.set_tab_pinned(id, pinned, cx);
         } else {
             // Resolve by stable ID, then freeze pane IDs before the asynchronous
             // confirmation. New tabs opened while confirming must not be closed.
@@ -223,10 +248,10 @@ fn close_targets(
     };
     tabs.iter()
         .enumerate()
-        .filter(|(candidate, _)| match action {
+        .filter(|(candidate, tab)| match action {
             CloseTab => *candidate == index,
-            CloseOtherTabs => *candidate != index,
-            CloseTabsToRight => *candidate > index,
+            CloseOtherTabs => *candidate != index && !tab.pinned,
+            CloseTabsToRight => *candidate > index && !tab.pinned,
             _ => false,
         })
         .flat_map(|(_, tab)| tab.layout.leaves())

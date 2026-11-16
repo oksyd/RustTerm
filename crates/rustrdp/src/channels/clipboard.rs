@@ -375,7 +375,7 @@ impl Clipboard {
                                     }
                                     ContentFormat::Rtf => {
                                         self.remote_content.rtf =
-                                            Some(body.strip_suffix(&[0]).unwrap_or(body).to_vec())
+                                            Some(body.trim_suffix(&[0]).to_vec())
                                     }
                                     ContentFormat::Png => {
                                         self.remote_content.png = Some(body.to_vec())
@@ -1419,6 +1419,74 @@ fn require_empty(data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_advertise_png_and_standard_bitmap_formats_and_serve_either_on_request() {
+        for flags in [0, LONG_NAMES] {
+            for (header, format_id) in [(40u32, 8u32), (124, 17)] {
+                let mut sender = file_clipboard(flags);
+                sender.files_enabled = false; // Images do not require file redirection.
+                // Image decoding belongs to the host boundary. CLIPRDR transports
+                // the validated representations unchanged, whichever the peer asks for.
+                let png = b"PNG representation supplied by the host".to_vec();
+                let mut dib = vec![0; header as usize + 4];
+                dib[..4].copy_from_slice(&header.to_le_bytes());
+                dib[4..8].copy_from_slice(&1u32.to_le_bytes());
+                dib[8..12].copy_from_slice(&1u32.to_le_bytes());
+                dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+                dib[14..16].copy_from_slice(&32u16.to_le_bytes());
+                dib[header as usize..].copy_from_slice(&[0, 0, 255, 255]);
+                let actions = sender
+                    .set_content(ClipboardContent {
+                        png: Some(png.clone()),
+                        dib: Some(dib.clone()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let offer = actions
+                    .iter()
+                    .find_map(|action| match action {
+                        Action::Send(bytes) if bytes[..2] == FORMAT_LIST.to_le_bytes() => {
+                            Some(bytes)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let formats = parse_formats(&offer[8..], flags == LONG_NAMES, flags == 0).unwrap();
+                assert_eq!(formats.png, Some(PNG));
+                assert_eq!(formats.dib, Some(format_id));
+                assert!(!formats.unicode);
+                assert!(!actions.iter().any(|action| matches!(
+                    action,
+                    Action::Event(ChannelEvent::ClipboardPublished)
+                )));
+
+                // Windows may request delayed rendering before acknowledging the offer.
+                for acknowledged in [false, true] {
+                    if acknowledged {
+                        assert!(
+                            sender
+                                .receive(&pdu(FORMAT_LIST_RESPONSE, OK, &[]))
+                                .unwrap()
+                                .iter()
+                                .any(|action| matches!(
+                                    action,
+                                    Action::Event(ChannelEvent::ClipboardPublished)
+                                ))
+                        );
+                    }
+                    for (id, expected) in [(PNG, &png), (format_id, &dib)] {
+                        let response = sender
+                            .receive(&pdu(DATA_REQUEST, 0, &id.to_le_bytes()))
+                            .unwrap();
+                        assert!(
+                            matches!(response.as_slice(), [Action::Send(bytes)] if *bytes == pdu(DATA_RESPONSE, OK, expected))
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn rich_selection_is_received_as_one_coherent_offer() {

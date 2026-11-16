@@ -166,7 +166,7 @@ impl Workspace {
                 .cloned()
             else {
                 self.recovery.stop_reconnect(id);
-                self.error = Some(i18n_key::DATABASE_THE_SSH_PROFILE_FOR_THIS_DATABASE_CONNECTION_IS_UNAVAILABLE_EDIT.into());
+                self.error = Some(i18n_key::CONNECTIONS_SSH_ROUTE_UNAVAILABLE.into());
                 cx.notify();
                 return;
             };
@@ -461,6 +461,7 @@ impl Workspace {
                 restored_tabs.push(Tab {
                     id: tab_id,
                     title: tab.title,
+                    pinned: tab.pinned,
                     focused: layout.leaves()[0],
                     layout,
                 });
@@ -621,6 +622,7 @@ impl Workspace {
             .filter_map(|tab| {
                 save_layout(&tab.layout, &positions).map(|layout| SavedTab {
                     title: tab.title.clone(),
+                    pinned: tab.pinned,
                     layout,
                 })
             })

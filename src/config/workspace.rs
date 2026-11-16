@@ -17,6 +17,8 @@ pub struct SavedWorkspace {
 #[serde(deny_unknown_fields)]
 pub struct SavedTab {
     pub title: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub layout: SavedLayout,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -1,3 +1,5 @@
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 use super::{
@@ -73,7 +75,7 @@ pub(super) async fn run(
                         // A cancelled writer can close the channel before the
                         // select's cancellation branch gets scheduled.
                         if !shared.io_stop.is_cancelled() {
-                            shared.failed(FailureKind::Write, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED));
+                            shared.transition(LifecycleEvent::failed(FailureKind::Write, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED)));
                         }
                         break;
                     };
@@ -83,13 +85,13 @@ pub(super) async fn run(
                 _ = tokio::time::sleep_until(prefix_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if prefix_deadline.is_some() => {
                     let bytes = transfer.flush_prefix();
                     if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
-                        shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_TERMINAL_PROTOCOL_RESPONSE));
+                        shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_TERMINAL_PROTOCOL_RESPONSE)));
                         break;
                     }
                 },
                 _ = tokio::time::sleep_until(selection_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if selection_deadline.is_some() => {
                     if let Err(kind) = transfer.expire().await {
-                        shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_FAILED_TO_CANCEL_FILE_TRANSFER));
+                        shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_FAILED_TO_CANCEL_FILE_TRANSFER)));
                         break;
                     }
                 },
@@ -100,16 +102,16 @@ pub(super) async fn run(
                                 discard_pending_writes(&mut transfer, &mut outbox, &mut deferred_input, &shared);
                             }
                             if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
-                                shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_TERMINAL_PROTOCOL_RESPONSE));
+                                shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_TERMINAL_PROTOCOL_RESPONSE)));
                                 break;
                             }
                         },
-                        Err(kind) => { shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_FILE_TRANSFER_DATA)); break; }
+                        Err(kind) => { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_FILE_TRANSFER_DATA))); break; }
                     }
                 },
                 _ = tokio::time::sleep_until(drain), if drain_deadline.is_some() => {
                     if !(read_eof && exit_received) {
-                        shared.failed(FailureKind::Timeout, crate::i18n::tr(i18n_key::CONNECTIONS_PROCESS_EXIT_AND_END_OF_OUTPUT_WERE_NOT_BOTH_CONFIRMED));
+                        shared.transition(LifecycleEvent::failed(FailureKind::Timeout, crate::i18n::tr(i18n_key::CONNECTIONS_PROCESS_EXIT_AND_END_OF_OUTPUT_WERE_NOT_BOTH_CONFIRMED)));
                     }
                     break;
                 },
@@ -123,8 +125,8 @@ pub(super) async fn run(
                 result = &mut transport.exit, if !exit_received => {
                     exit_received = true;
                     drain_deadline.get_or_insert(tokio::time::Instant::now() + if transfer.active() { SHUTDOWN_TIMEOUT } else { EXIT_DRAIN_TIMEOUT });
-                    shared.closing();
-                    match result { Ok(Ok(code)) => exit_code = code, Ok(Err(message)) => { shared.failed(FailureKind::Process, message); break; }, Err(_) => { shared.failed(FailureKind::Process, crate::i18n::tr(i18n_key::CONNECTIONS_THE_TRANSPORT_TASK_ENDED_UNEXPECTEDLY)); break; } }
+                    shared.transition(LifecycleEvent::Closing);
+                    match result { Ok(Ok(code)) => exit_code = code, Ok(Err(message)) => { shared.transition(LifecycleEvent::failed(FailureKind::Process, message)); break; }, Err(_) => { shared.transition(LifecycleEvent::failed(FailureKind::Process, crate::i18n::tr(i18n_key::CONNECTIONS_THE_TRANSPORT_TASK_ENDED_UNEXPECTEDLY))); break; } }
                 }
                 output = transport.output.recv(), if !read_eof => match output {
                     Some(Output::Data(bytes)) => {
@@ -137,22 +139,22 @@ pub(super) async fn run(
                                     discard_pending_writes(&mut transfer, &mut outbox, &mut deferred_input, &shared);
                                 }
                                 if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
-                                    if !shared.io_stop.is_cancelled() { shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_PROTOCOL_RESPONSE_THE_CONNECTION_HAS_STOPPED)); }
+                                    if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_PROTOCOL_RESPONSE_THE_CONNECTION_HAS_STOPPED))); }
                                     break;
                                 }
                             },
-                            Err(kind) => { shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_PROTOCOL_RESPONSE)); break; }
+                            Err(kind) => { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_PROTOCOL_RESPONSE))); break; }
                         }
                     }
                     Some(Output::Eof) | None => {
                         read_eof = true;
                         drain_deadline.get_or_insert(tokio::time::Instant::now() + if transfer.active() { SHUTDOWN_TIMEOUT } else { EXIT_DRAIN_TIMEOUT });
-                        shared.closing();
+                        shared.transition(LifecycleEvent::Closing);
                     },
                     Some(Output::Error(kind,message)) => {
                         // Transport cancellation also wakes pending reads/writes
                         // with errors. An intentional disconnect is not a failure.
-                        if !shared.io_stop.is_cancelled() { shared.failed(kind,message); }
+                        if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind,message)); }
                         break;
                     },
                 },
@@ -166,14 +168,14 @@ pub(super) async fn run(
                     match command {
                         ActorCommand::ZmodemStart { id, selection } => {
                             if let Err(kind) = transfer.start(id, selection).await {
-                                shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_FILE_TRANSFER_COULD_NOT_START_AND_THE_REMOTE_TRANSFER_COULD));
+                                shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_FILE_TRANSFER_COULD_NOT_START_AND_THE_REMOTE_TRANSFER_COULD)));
                                 break;
                             }
                             continue;
                         }
                         ActorCommand::ZmodemCancel { id } => {
                             if let Err(kind) = transfer.cancel(id).await {
-                                shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_CANCELLATION_MESSAGE));
+                                shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_CANCELLATION_MESSAGE)));
                                 break;
                             }
                             continue;
@@ -182,7 +184,7 @@ pub(super) async fn run(
                             // These bytes were admitted before the handshake was seen.
                             // Hold them once, without sending them into the binary protocol.
                             if deferred_input.len() >= COMMAND_CAPACITY {
-                                shared.failed(FailureKind::Backpressure, crate::i18n::tr(i18n_key::CONNECTIONS_PENDING_INPUT_EXCEEDED_THE_LIMIT_DURING_FILE_TRANSFER_THE_CONNECTION));
+                                shared.transition(LifecycleEvent::failed(FailureKind::Backpressure, crate::i18n::tr(i18n_key::CONNECTIONS_PENDING_INPUT_EXCEEDED_THE_LIMIT_DURING_FILE_TRANSFER_THE_CONNECTION)));
                                 break;
                             }
                             deferred_input.push_back(command);
@@ -197,7 +199,7 @@ pub(super) async fn run(
                         if transfer.active() && matches!(write, WriteCommand::Resize(..)) {
                             deferred_resize = Some(write);
                         } else if let Err(kind) = outbox.push(write, ephemeral) {
-                            if !shared.io_stop.is_cancelled() { shared.failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED)); }
+                            if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_INPUT_COULD_NOT_BE_DELIVERED_AND_THE_CONNECTION_HAS_STOPPED))); }
                             break;
                         }
                     }
@@ -218,7 +220,9 @@ pub(super) async fn run(
         {
             Ok(Some(code)) => exit_code = Some(code),
             Ok(None) => {}
-            Err((kind, message)) => shared.failed(kind, message),
+            Err((kind, message)) => {
+                shared.transition(LifecycleEvent::failed(kind, message));
+            }
         }
         if !matches!(shared.current_state(), SessionState::Failed { .. }) {
             if let Some((kind, message)) = shared
@@ -227,9 +231,9 @@ pub(super) async fn run(
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
             {
-                shared.failed(kind, message);
+                shared.transition(LifecycleEvent::failed(kind, message));
             } else {
-                shared.state(SessionState::Disconnected { exit_code });
+                shared.transition(LifecycleEvent::Disconnected { exit_code });
             }
         }
     }
@@ -594,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn zmodem_actor_isolates_input_resize_and_terminal_replies() {
         let (session, terminal, commands) = Session::create(80, 24, 0).unwrap();
-        session.shared.state(SessionState::Connected);
+        session.shared.transition(LifecycleEvent::Connected);
         let (output, receive) = mpsc::channel(8);
         let (input, mut writes) = mpsc::channel(8);
         let (exit, exited) = oneshot::channel();
@@ -802,7 +806,7 @@ mod tests {
     #[test]
     fn hidden_shell_state_tracks_prompt_and_directory_without_grid_snapshots() {
         let (session, mut terminal, _commands) = Session::create(80, 24, 10).unwrap();
-        session.shared.state(SessionState::Connected);
+        session.shared.transition(LifecycleEvent::Connected);
         session.set_visible(false);
         let mut outbox = Outbox::default();
         feed_output(
@@ -900,7 +904,7 @@ mod tests {
             true,
         );
         apply_budget(&mut terminal, &session.shared);
-        session.shared.state(SessionState::Connected);
+        session.shared.transition(LifecycleEvent::Connected);
         publish_snapshot(&mut terminal, &session.shared);
         feed_output(b"", &mut terminal, &session.shared, &mut outbox).unwrap();
         assert_eq!(session.output_revision(), 1);
@@ -1001,7 +1005,7 @@ mod tests {
         terminal.feed(b"\x1b[?1049l");
         terminal.scroll(2);
         let shared = Shared::new(&terminal);
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         shared.unacknowledged_inputs.store(1, Ordering::Release);
 
         assert!(command_effect(command, &mut terminal, &shared, true).is_none());
@@ -1024,7 +1028,7 @@ mod tests {
         assert!(write.is_none());
         assert_eq!(shared.unacknowledged_inputs.load(Ordering::Acquire), 0);
         // A delayed EOF/exit notification must not clear the input-loss failure.
-        shared.closing();
+        shared.transition(LifecycleEvent::Closing);
         let SessionState::Failed { kind, message } = shared.current_state() else {
             panic!("input loss was hidden");
         };
@@ -1032,8 +1036,11 @@ mod tests {
         assert!(message.contains(shared.input_loss_notice()));
         assert!(!message.contains("private-command-marker"));
         // A later reaper error still reports that the accepted input was not confirmed.
-        shared.failed(FailureKind::Process, "process cleanup failed");
-        shared.closing();
+        shared.transition(LifecycleEvent::failed(
+            FailureKind::Process,
+            "process cleanup failed",
+        ));
+        shared.transition(LifecycleEvent::Closing);
         let SessionState::Failed { kind, message } = shared.current_state() else {
             panic!("cleanup hid input loss");
         };
@@ -1047,13 +1054,13 @@ mod tests {
         // Model a notice captured in an earlier locale without mutating global language.
         let first_notice = "input loss in the first locale";
         shared.input_loss_message.set(first_notice).unwrap();
-        shared.failed(FailureKind::Write, first_notice);
+        shared.transition(LifecycleEvent::failed(FailureKind::Write, first_notice));
         shared.report_input_loss();
         let SessionState::Failed { message, .. } = shared.current_state() else {
             panic!("input loss was hidden");
         };
         assert_eq!(message, first_notice);
-        shared.failed(FailureKind::Process, message);
+        shared.transition(LifecycleEvent::failed(FailureKind::Process, message));
         let SessionState::Failed { message, .. } = shared.current_state() else {
             panic!("input loss was hidden");
         };

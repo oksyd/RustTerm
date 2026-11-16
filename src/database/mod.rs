@@ -11,11 +11,10 @@ pub mod sql;
 mod sqlite;
 pub mod table;
 #[cfg(test)]
+#[path = "../../tests/database/wire.rs"]
+mod test_wire;
+#[cfg(test)]
 mod tests;
-#[cfg(unix)]
-mod transport;
-#[cfg(windows)]
-#[path = "transport_windows.rs"]
 mod transport;
 
 pub use session::TransactionStatus;
@@ -45,11 +44,6 @@ const MAX_RESULT_SETS: usize = 64;
 
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DatabaseError {
-    #[error(
-        "{}",
-        crate::i18n::tr(i18n_key::DATABASE_SSH_TUNNEL_PLATFORM_UNAVAILABLE)
-    )]
-    SshTunnelPlatformUnavailable,
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::DATABASE_INVALID_DATABASE_CONNECTION_SETTINGS)
@@ -264,7 +258,7 @@ struct Inner {
     read_only: bool,
     active: Arc<Mutex<Option<CancellationToken>>>,
     transaction: Arc<AtomicU8>,
-    mysql_options: Option<sqlx::mysql::MySqlConnectOptions>,
+    mysql_options: Option<mysql::Options>,
     monitor_timeout: Duration,
 }
 impl Drop for Inner {
@@ -281,20 +275,29 @@ impl DatabaseClient {
         secret: Secret,
         ssh: Option<(SshOptions, mpsc::Sender<HostKeyChallenge>)>,
     ) -> Result<Self> {
+        let connection = crate::connection_route::Prepared::resolve(config, ssh)
+            .map_err(|_| DatabaseError::InvalidConfig)?;
+        Self::connect_prepared(connection, secret).await
+    }
+    pub(crate) async fn connect_prepared(
+        connection: crate::connection_route::Prepared<
+            DatabaseConfig,
+            (SshOptions, mpsc::Sender<HostKeyChallenge>),
+        >,
+        secret: Secret,
+    ) -> Result<Self> {
+        let (config, route) = connection.into_parts();
         config
             .validate()
             .map_err(|_| DatabaseError::InvalidConfig)?;
         let engine = config.engine();
         let read_only = matches!(&config, DatabaseConfig::Sqlite(config) if config.read_only);
         let server = config.server();
-        if secret.expose().len() > 65_536
-            || server.and_then(|config| config.ssh_profile).is_some() != ssh.is_some()
-            || (server.is_none() && !secret.expose().is_empty())
-        {
+        if secret.expose().len() > 65_536 || (server.is_none() && !secret.expose().is_empty()) {
             return Err(DatabaseError::InvalidConfig);
         }
         let stop = CancellationToken::new();
-        let mut cancellation = CancelOnDrop(Some(stop.clone()));
+        let cancellation = stop.clone().drop_guard();
         let worker_stop = stop.clone();
         let (queue, receive) = mpsc::channel(1);
         let (connected, ready) = oneshot::channel();
@@ -305,19 +308,19 @@ impl DatabaseClient {
         let monitor_timeout =
             Duration::from_secs(config.server().map_or(10, |c| c.timeout_secs).clamp(1, 30));
         runtime()?.spawn(async move {
-            let guard = CancelOnDrop(Some(worker_stop.clone()));
+            let guard = worker_stop.clone().drop_guard();
             let query_timeout = Duration::from_secs(config.query_timeout_secs());
             let connection_timeout =
                 Duration::from_secs(config.server().map_or(10, |config| config.timeout_secs));
             let opening_stop = worker_stop.clone();
             let open = async move {
-                let tunnel = match ssh {
-                    Some((options, trust)) => Some(
+                let tunnel = match route {
+                    crate::connection_route::Route::Ssh((options, trust)) => Some(
                         crate::session::connect_tunnel(options, trust, opening_stop.child_token())
                             .await
                             .map_err(|(kind, _)| ssh_error(kind))?,
                     ),
-                    None => None,
+                    crate::connection_route::Route::Direct => None,
                 };
                 tokio::time::timeout(
                     connection_timeout,
@@ -357,7 +360,7 @@ impl DatabaseClient {
             drop(guard);
         });
         let mysql_options = ready.await.map_err(|_| DatabaseError::Disconnected)??;
-        cancellation.0 = None;
+        cancellation.disarm();
         Ok(Self(Arc::new(Inner {
             queue,
             stop,
@@ -683,9 +686,6 @@ impl Collector {
             budget: Budget::new(limit),
         }
     }
-    fn needs_columns(&self) -> bool {
-        self.current.columns.is_empty()
-    }
     fn columns(&mut self, columns: Vec<String>) -> Result<()> {
         if self.results.len() >= MAX_RESULT_SETS {
             return Err(DatabaseError::Limit);
@@ -732,33 +732,7 @@ fn display_bytes(bytes: &[u8]) -> String {
         _ => format!("0x{}", hex(bytes)),
     }
 }
-fn classify(error: sqlx::Error) -> DatabaseError {
-    match error {
-        sqlx::Error::Database(error) => {
-            let code = error
-                .code()
-                .map_or_else(String::new, |code| code.into_owned());
-            if code.starts_with("28") {
-                DatabaseError::Authentication
-            } else {
-                server_error(code, error.message())
-            }
-        }
-        sqlx::Error::Tls(_) => DatabaseError::Tls,
-        sqlx::Error::Io(_) => DatabaseError::Disconnected,
-        sqlx::Error::Configuration(_) => DatabaseError::InvalidConfig,
-        _ => DatabaseError::Protocol,
-    }
-}
 
-struct CancelOnDrop(Option<CancellationToken>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(stop) = &self.0 {
-            stop.cancel();
-        }
-    }
-}
 fn runtime() -> Result<&'static Runtime> {
     static RUNTIME: OnceLock<std::result::Result<Runtime, std::io::Error>> = OnceLock::new();
     RUNTIME

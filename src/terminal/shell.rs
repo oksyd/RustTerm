@@ -680,8 +680,7 @@ fn readline_search_prompt(text: &str) -> bool {
     let Some(text) = text.strip_prefix('(') else {
         return false;
     };
-    let text = text.strip_prefix("failed ").unwrap_or(text);
-    let text = text.strip_prefix("reverse-").unwrap_or(text);
+    let text = text.trim_prefix("failed ").trim_prefix("reverse-");
     text.strip_prefix("i-search)`")
         .is_some_and(|query| query.contains("': "))
 }

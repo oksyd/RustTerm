@@ -340,7 +340,7 @@ rdp-the-clipboard-changed-while-reading-files-copy-and-paste-again = The clipboa
 
 rdp-the-clipboard-contains-an-invalid-file-list = The clipboard contains invalid or unsupported data
 
-rdp-the-clipboard-file-list-is-too-large-select-fewer-files = The clipboard file list is too large; select fewer files
+rdp-the-clipboard-file-list-is-too-large-select-fewer-files = Clipboard data is too large; copy a smaller image or fewer files
 
 rdp-the-desktop-did-not-grant-exclusive-keyboard-control = The desktop did not grant exclusive keyboard control.
 

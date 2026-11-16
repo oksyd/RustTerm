@@ -175,7 +175,7 @@ impl ProfileForm {
         let mut es_auth = rustterm::config::ElasticsearchAuth::None;
         let mut sqlite_read_only = true;
         let mut redis_topology = rustterm::config::RedisTopology::Standalone;
-        let mut ssh_profile = None;
+        let mut ssh_profile = profile.as_ref().and_then(|p| p.connection.ssh_profile());
         let mut rdp = rdp::RdpFormState::default();
         match kind {
             ProfileKind::Ssh => {
@@ -476,10 +476,18 @@ impl ProfileForm {
     pub fn profile(&self, current_profiles: &[Profile], cx: &App) -> anyhow::Result<Profile> {
         let get = |key| self.fields.get(key, cx);
         let name = self.profile_name(cx);
+        if self.ssh_profile.is_some_and(|id| {
+            !current_profiles
+                .iter()
+                .any(|p| p.id == id && matches!(p.connection, Connection::Ssh(_)))
+        }) {
+            anyhow::bail!(rustterm::i18n::tr(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE));
+        }
         let connection = match self.kind {
             ProfileKind::Ssh => Connection::Ssh(self.ssh_config(current_profiles, cx)?),
             ProfileKind::Telnet => {
                 let config = TelnetConfig {
+                    ssh_profile: self.ssh_profile,
                     host: get(i18n_key::WORKSPACE_HOST),
                     port: parse_value(i18n_key::WORKSPACE_PORT, &get(i18n_key::WORKSPACE_PORT))?,
                     timeout_secs: parse_value(

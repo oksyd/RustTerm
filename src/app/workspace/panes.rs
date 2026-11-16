@@ -619,6 +619,7 @@ impl Workspace {
             self.tabs.push(Tab {
                 id: tab_id,
                 title: profile.name,
+                pinned: false,
                 layout: PaneNode::Leaf(id),
                 focused: id,
             });

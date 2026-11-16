@@ -1,7 +1,9 @@
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 use super::{
-    ActorCommand, FailureKind, SessionState, actor,
+    ActorCommand, FailureKind, actor,
     state::Shared,
     transport::{
         OUTPUT_CAPACITY, Output, Transport, WRITE_CAPACITY, WRITE_STALL_TIMEOUT, WriteCommand,
@@ -376,16 +378,16 @@ pub(super) async fn run(
                 _ => unreachable!(),
             };
             if shared.io_stop.is_cancelled() {
-                shared.state(SessionState::Disconnected { exit_code: None });
+                shared.transition(LifecycleEvent::Disconnected { exit_code: None });
             } else {
-                shared.failed(FailureKind::Spawn, message);
+                shared.transition(LifecycleEvent::failed(FailureKind::Spawn, message));
             }
             actor::run(terminal, commands, shared, None).await;
             return;
         }
     };
     let transport = start_transport(pty, shared.clone());
-    shared.live_state(SessionState::Connected);
+    shared.transition(LifecycleEvent::Connected);
     actor::run(terminal, commands, shared, Some(transport)).await;
 }
 

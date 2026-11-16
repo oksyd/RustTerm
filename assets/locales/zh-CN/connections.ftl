@@ -734,3 +734,17 @@ connections-advanced-tab = 高级
 connections-launch-options = 可选启动参数
 connections-configured = 已配置
 connections-query-timeout-summary = 查询超时：{ $seconds } 秒
+
+connections-invalid-ssh-route = SSH 隧道必须引用已有的 SSH 连接。
+
+connections-ssh-fingerprint-tunnel =
+    SSH 主机：{ $host }:{ $port }
+    算法：{ $algorithm }
+    SHA-256 指纹：{ $fingerprint }
+
+    此 SSH 连接将承载发往 { $target }:{ $target_port } 的流量。保存前请通过可信渠道核实指纹。
+
+
+connections-ssh-route-help = 目标主机和端口由 SSH 服务器访问，TLS 仍验证目标主机名。
+connections-ssh-route-unavailable = 此隧道使用的 SSH 连接不可用，请修改隧道设置后重新连接。
+connections-ssh-route-in-use = 此 SSH 连接正被其他连接用作隧道，请先修改相关连接的隧道设置再删除。

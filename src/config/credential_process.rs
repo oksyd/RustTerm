@@ -237,35 +237,28 @@ fn exchange(
     timeout: Duration,
     mutates: bool,
 ) -> Result<Reply, CredentialError> {
-    use std::{
-        io::ErrorKind,
-        process::{Child, Stdio},
-        time::Instant,
-    };
-    struct Reap(Child);
-    impl Drop for Reap {
-        fn drop(&mut self) {
-            // kill may report InvalidInput after try_wait reaped an exited worker; harmless.
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+    use std::{io::ErrorKind, mem::DropGuard, process::Stdio, time::Instant};
     fn nonblocking(fd: &impl std::os::fd::AsFd) -> Result<(), CredentialError> {
         let flags = rustix::fs::fcntl_getfl(fd).map_err(|_| CredentialError::Unavailable)?;
         rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)
             .map_err(|_| CredentialError::Unavailable)
     }
     let started = Instant::now();
-    let mut child = Reap(
+    let mut child = DropGuard::new(
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| CredentialError::Unavailable)?,
+        |mut child| {
+            // kill may report InvalidInput after try_wait reaped an exited worker; harmless.
+            let _ = child.kill();
+            let _ = child.wait();
+        },
     );
-    let mut input = Some(child.0.stdin.take().ok_or(CredentialError::Unavailable)?);
-    let mut output = child.0.stdout.take().ok_or(CredentialError::Unavailable)?;
+    let mut input = Some(child.stdin.take().ok_or(CredentialError::Unavailable)?);
+    let mut output = child.stdout.take().ok_or(CredentialError::Unavailable)?;
     nonblocking(input.as_ref().ok_or(CredentialError::Unavailable)?)?;
     nonblocking(&output)?;
     let mut sent = 0;
@@ -312,7 +305,7 @@ fn exchange(
                 Err(_) => return Err(uncertain(sent)),
             }
         }
-        if let Some(status) = child.0.try_wait().map_err(|_| uncertain(sent))? {
+        if let Some(status) = child.try_wait().map_err(|_| uncertain(sent))? {
             if !status.success() {
                 return Err(uncertain(sent));
             }
@@ -341,19 +334,9 @@ fn exchange(
     mutates: bool,
 ) -> Result<Reply, CredentialError> {
     use std::{
-        os::windows::process::CommandExt,
-        process::{Child, Stdio},
-        sync::mpsc,
-        time::Instant,
+        mem::DropGuard, os::windows::process::CommandExt, process::Stdio, sync::mpsc, time::Instant,
     };
-    struct Reap(Child);
-    impl Drop for Reap {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut child = Reap(
+    let mut child = DropGuard::new(
         command
             .creation_flags(0x08000000)
             .stdin(Stdio::piped())
@@ -361,9 +344,13 @@ fn exchange(
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| CredentialError::Unavailable)?,
+        |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        },
     );
-    let mut input = child.0.stdin.take().ok_or(CredentialError::Unavailable)?;
-    let output = child.0.stdout.take().ok_or(CredentialError::Unavailable)?;
+    let mut input = child.stdin.take().ok_or(CredentialError::Unavailable)?;
+    let output = child.stdout.take().ok_or(CredentialError::Unavailable)?;
     let wire = Zeroizing::new(wire.to_vec());
     let (send, receive) = mpsc::sync_channel(1);
     let writer = std::thread::spawn(move || input.write_all(&wire));

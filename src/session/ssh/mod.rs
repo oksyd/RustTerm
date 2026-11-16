@@ -1,7 +1,9 @@
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 mod broker;
-mod connection;
+pub(super) mod connection;
 mod dial;
 mod forwarding;
 
@@ -89,9 +91,9 @@ pub(super) async fn run(
         Err((kind, message)) => {
             if !matches!(shared.current_state(), SessionState::Failed { .. }) {
                 if shared.io_stop.is_cancelled() {
-                    shared.state(SessionState::Disconnected { exit_code: None });
+                    shared.transition(LifecycleEvent::Disconnected { exit_code: None });
                 } else {
-                    shared.failed(kind, message);
+                    shared.transition(LifecycleEvent::failed(kind, message));
                 }
             }
             None
@@ -357,7 +359,7 @@ async fn connect(
         // reads again. Waiting for the handle observes its actual shutdown.
         let _ = tokio::time::timeout(IO_TIMEOUT, &mut handle).await;
     });
-    shared.live_state(SessionState::Connected);
+    shared.transition(LifecycleEvent::Connected);
     Ok(Transport {
         output,
         input,

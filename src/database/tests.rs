@@ -1,3 +1,4 @@
+use super::test_wire as wire;
 use super::*;
 use crate::config::SqlConfig;
 use tokio::{
@@ -58,12 +59,7 @@ async fn pg_start(stream: &mut TcpStream) {
     stream.write_all(&response).await.unwrap();
 }
 async fn pg_query_raw(stream: &mut TcpStream) -> String {
-    assert_eq!(stream.read_u8().await.unwrap(), b'Q');
-    let length = stream.read_u32().await.unwrap() as usize;
-    let mut query = vec![0; length - 4];
-    stream.read_exact(&mut query).await.unwrap();
-    assert_eq!(query.pop(), Some(0));
-    String::from_utf8(query).unwrap()
+    wire::Wire::new(stream, false).query().await
 }
 
 fn untag_query(query: &str) -> &str {
@@ -211,13 +207,26 @@ fn mysql_packet(output: &mut Vec<u8>, sequence: &mut u8, body: &[u8]) {
     output.extend_from_slice(body);
 }
 async fn mysql_read_raw(stream: &mut TcpStream) -> Vec<u8> {
-    let mut header = [0; 4];
-    stream.read_exact(&mut header).await.unwrap();
-    let length = u32::from_le_bytes([header[0], header[1], header[2], 0]) as usize;
-    let mut body = vec![0; length];
-    stream.read_exact(&mut body).await.unwrap();
-    body
+    loop {
+        let mut wire = wire::Wire::new(&mut *stream, true);
+        let packet = wire.read_packet().await;
+        if packet == [14] {
+            wire.complete(0, false).await;
+        } else {
+            return packet;
+        }
+    }
 }
+
+async fn mysql_closed(stream: &mut TcpStream) {
+    let mut tail = Vec::new();
+    stream.read_to_end(&mut tail).await.unwrap();
+    assert!(
+        tail.is_empty() || tail == [1, 0, 0, 0, 1],
+        "expected EOF or COM_QUIT"
+    );
+}
+
 async fn mysql_read(stream: &mut TcpStream) -> Vec<u8> {
     let bytes = mysql_read_raw(stream).await;
     if bytes.starts_with(b"\x03/* rustterm:") {
@@ -280,29 +289,21 @@ fn mysql_row(output: &mut Vec<u8>, sequence: &mut u8, value: &str) {
     mysql_packet(output, sequence, &row);
 }
 async fn mysql_start(stream: &mut TcpStream) {
-    let capabilities: u32 = 1 | 4 | 8 | 0x200 | 0x2000 | 0x8000 | 0x10000 | 0x20000 | 0x80000;
-    let mut handshake = b"\x0a8.0.36\0".to_vec();
-    handshake.extend_from_slice(&1_u32.to_le_bytes());
-    handshake.extend_from_slice(b"12345678\0");
-    handshake.extend_from_slice(&(capabilities as u16).to_le_bytes());
-    handshake.extend_from_slice(&[33, 2, 0]);
-    handshake.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
-    handshake.push(21);
-    handshake.extend_from_slice(&[0; 10]);
-    handshake.extend_from_slice(b"901234567890\0mysql_native_password\0");
-    let mut response = Vec::new();
-    mysql_packet(&mut response, &mut 0, &handshake);
-    stream.write_all(&response).await.unwrap();
-    mysql_read(stream).await;
-    let mut response = Vec::new();
-    mysql_ok(&mut response, &mut 2, 0, false);
-    stream.write_all(&response).await.unwrap();
-    let setup = mysql_read(stream).await;
-    assert_eq!(setup[0], 3);
-    assert!(setup[1..].starts_with(b"SET NAMES"));
-    let mut response = Vec::new();
-    mysql_ok(&mut response, &mut 1, 0, false);
-    stream.write_all(&response).await.unwrap();
+    let mut wire = wire::Wire::new(stream, true);
+    wire.greeting(false).await;
+    wire.login().await;
+    assert_eq!(
+        wire.read_packet().await,
+        b"\x03SELECT @@max_allowed_packet,@@wait_timeout"
+    );
+    wire.rows(
+        &[("@@max_allowed_packet", false), ("@@wait_timeout", false)],
+        &[vec![Some(b"67108864"), Some(b"28800")]],
+        false,
+    )
+    .await;
+    assert_eq!(wire.read_packet().await, b"\x03SET NAMES utf8mb4");
+    wire.complete(0, false).await;
 }
 
 #[tokio::test]
@@ -497,6 +498,14 @@ async fn cancellation_after_commit_keeps_confirmed_batch_success() {
             pg_message(&mut response, b'C', b"SELECT 1\0");
             pg_message(&mut response, b'Z', b"I");
             control.write_all(&response).await.unwrap();
+            let mut wire = wire::Wire::new(&mut stream, false);
+            assert_eq!(wire.stream.read_u8().await.unwrap(), b'Q');
+            assert_eq!(wire.stream.read_u32().await.unwrap(), 5);
+            assert_eq!(wire.stream.read_u8().await.unwrap(), 0);
+            wire.message(b'I', &[]).await;
+            wire.ready(b'I').await;
+            let mut end = [0; 1];
+            assert_eq!(wire.stream.read(&mut end).await.unwrap(), 0);
         });
         let client = DatabaseClient::connect(
             DatabaseConfig::Postgres(config),
@@ -519,6 +528,7 @@ async fn cancellation_after_commit_keeps_confirmed_batch_success() {
         edit.await.unwrap().unwrap();
         assert!(client.is_connected());
         assert_eq!(client.transaction_status(), TransactionStatus::Idle);
+        client.close();
         server.await.unwrap();
     })
     .await
@@ -742,9 +752,7 @@ async fn mysql_monitor_uses_separate_connection_preserves_transaction_and_closes
             main.write_all(&ok).await.unwrap();
             assert_eq!(mysql_read(&mut main).await, b"\x03ROLLBACK");
             main.write_all(&ok).await.unwrap();
-            let mut byte = [0];
-            let count = monitor.read(&mut byte).await.unwrap();
-            assert_eq!(count, 0);
+            mysql_closed(&mut monitor).await;
         });
         let client = DatabaseClient::connect(
             DatabaseConfig::Mysql(config),
@@ -792,8 +800,7 @@ async fn cancelling_mysql_monitor_never_cancels_the_editor_connection() {
             mysql_start(&mut monitor).await;
             assert_eq!(mysql_read(&mut monitor).await, b"\x03SHOW FULL PROCESSLIST");
             sent.send(()).unwrap();
-            let mut byte = [0];
-            assert_eq!(monitor.read(&mut byte).await.unwrap(), 0);
+            mysql_closed(&mut monitor).await;
             assert_eq!(mysql_read(&mut main).await, b"\x03SELECT 1");
             mysql_fields(&mut main, &["value"], &[vec![Some("1")]]).await;
         });

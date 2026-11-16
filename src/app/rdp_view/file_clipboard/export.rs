@@ -1,9 +1,32 @@
-//! Owns an X11 clipboard selection while downloaded files are offered to the desktop.
+//! Publishes remote content without replacing a newer native clipboard selection.
 
 use rustterm::i18n::messages as i18n_key;
 use std::{path::PathBuf, sync::Arc};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(not(windows))]
+pub(crate) type Content = super::content::MimeData;
+#[cfg(windows)]
+pub(crate) type Content = windows::Content;
+
+pub(crate) fn prepare_content(content: &rustrdp::ClipboardContent) -> Result<Content, ExportError> {
+    #[cfg(windows)]
+    {
+        windows::Content::prepare(content)
+    }
+    #[cfg(not(windows))]
+    {
+        super::content::to_mime(content).map_err(|_| ExportError::Invalid)
+    }
+}
+
+pub(crate) fn files_supported() -> bool {
+    cfg!(target_os = "linux")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ExportError {
@@ -39,6 +62,8 @@ impl std::error::Error for ExportError {}
 pub(crate) struct Snapshot {
     #[cfg(target_os = "linux")]
     worker: linux::Worker,
+    #[cfg(windows)]
+    sequence: u32,
 }
 
 impl Snapshot {
@@ -49,7 +74,13 @@ impl Snapshot {
                 worker: linux::Worker::capture()?,
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                sequence: super::windows::clipboard_sequence(),
+            })
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             Err(ExportError::Unavailable)
         }
@@ -59,10 +90,12 @@ impl Snapshot {
 pub(crate) struct Export {
     #[cfg(target_os = "linux")]
     owner: linux::Owner,
+    #[cfg(windows)]
+    owner: windows::Owner,
 }
 
 impl Export {
-    /// Claims an empty selection only if no copy occurred since the snapshot.
+    /// Starts a publication only if no copy occurred since the snapshot.
     pub(crate) fn begin(snapshot: Snapshot) -> Result<Self, ExportError> {
         #[cfg(target_os = "linux")]
         {
@@ -70,7 +103,13 @@ impl Export {
                 owner: snapshot.worker.begin()?,
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                owner: windows::Owner::begin(snapshot.sequence)?,
+            })
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = snapshot;
             Err(ExportError::Unavailable)
@@ -113,10 +152,7 @@ impl Export {
     }
 
     /// Publishes all native representations under one selection ownership claim.
-    pub(crate) fn publish_content(
-        &self,
-        formats: super::content::MimeData,
-    ) -> Result<(), ExportError> {
+    pub(crate) fn publish_content(&self, formats: Content) -> Result<(), ExportError> {
         #[cfg(target_os = "linux")]
         {
             self.owner.publish(linux::Payload {
@@ -124,7 +160,11 @@ impl Export {
                 formats,
             })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            self.owner.publish(formats)
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let _ = formats;
             Err(ExportError::Unavailable)
@@ -132,22 +172,22 @@ impl Export {
     }
 
     pub(crate) fn is_current(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.owner.is_current()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             false
         }
     }
 
     pub(crate) fn cancellation(&self) -> CancellationToken {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
             self.owner.cancellation()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         {
             let token = CancellationToken::new();
             token.cancel();
@@ -156,7 +196,7 @@ impl Export {
     }
 
     pub(crate) fn cancel(&self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.owner.cancel();
     }
 }
@@ -883,7 +923,7 @@ mod linux {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

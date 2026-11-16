@@ -60,7 +60,7 @@ struct Connection {
 
 /// Owns optional UDP connections without blocking the main RDP handshake or I/O.
 pub(in crate::rdp) struct Sidebands {
-    peer: SocketAddr,
+    peer: Option<SocketAddr>,
     name: String,
     fingerprint: String,
     deadline: Duration,
@@ -71,7 +71,12 @@ pub(in crate::rdp) struct Sidebands {
 }
 
 impl Sidebands {
-    pub fn new(peer: SocketAddr, name: String, fingerprint: String, deadline: Duration) -> Self {
+    pub fn new(
+        peer: Option<SocketAddr>,
+        name: String,
+        fingerprint: String,
+        deadline: Duration,
+    ) -> Self {
         let (sender, events) = mpsc::channel(EVENT_CAPACITY);
         Self {
             peer,
@@ -90,6 +95,9 @@ impl Sidebands {
         request: Request,
         handshake_deadline: Option<tokio::time::Instant>,
     ) -> bool {
+        let Some(peer) = self.peer else {
+            return false;
+        };
         if self.connections.contains_key(&request.protocol) {
             return false;
         }
@@ -101,7 +109,6 @@ impl Sidebands {
                 sender: None,
             },
         );
-        let peer = self.peer;
         let name = self.name.clone();
         let fingerprint = self.fingerprint.clone();
         let events = self.sender.clone();
@@ -314,12 +321,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn ssh_routes_cannot_open_a_direct_udp_sideband() {
+        let mut sidebands = Sidebands::new(
+            None,
+            "remote.invalid".into(),
+            "unused".into(),
+            Duration::from_secs(2),
+        );
+        for protocol in [TransportProtocol::Reliable, TransportProtocol::Lossy] {
+            assert!(!sidebands.open(
+                Request {
+                    id: 1,
+                    protocol,
+                    cookie: [0; 16]
+                },
+                None
+            ));
+        }
+        assert!(sidebands.connections.is_empty());
+        assert!(sidebands.tasks.is_empty());
+    }
+
+    #[tokio::test]
     async fn optional_udp_reports_failure_before_the_handshake_expires() {
         // An open UDP socket that never replies simulates a firewall silently
         // dropping the handshake, without ICMP producing an immediate failure.
         let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut tunnels = Sidebands::new(
-            blackhole.local_addr().unwrap(),
+            Some(blackhole.local_addr().unwrap()),
             "localhost".into(),
             "unused".into(),
             Duration::from_secs(20),

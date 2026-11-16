@@ -1,6 +1,5 @@
 //! Read-only MySQL session monitoring on a separate, lazily opened connection.
 use super::*;
-use sqlx::mysql::MySqlConnectOptions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -30,7 +29,7 @@ pub struct Snapshot {
 }
 
 struct MonitorInner {
-    options: MySqlConnectOptions,
+    options: mysql::Options,
     stop: CancellationToken,
     timeout: Duration,
     connection: tokio::sync::Mutex<Option<mysql::Connection>>,
@@ -81,7 +80,7 @@ impl MysqlMonitor {
         }
         let inner = self.0.clone();
         let cancel = CancellationToken::new();
-        let _guard = CancelOnDrop(Some(cancel.clone()));
+        let _guard = cancel.clone().drop_guard();
         let (reply, response) = oneshot::channel();
         runtime()?.spawn(async move {
             let operation = async {

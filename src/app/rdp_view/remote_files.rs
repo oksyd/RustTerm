@@ -63,6 +63,16 @@ struct FileClipboard {
 impl gpui::Global for FileClipboard {}
 
 impl RdpView {
+    pub(super) fn refresh_clipboard_ownership(&self, cx: &App) {
+        if cx.has_global::<FileClipboard>()
+            && let Some(export) = &cx.global::<FileClipboard>().current
+        {
+            // Recheck native ownership at paste time, including changes whose
+            // clipboard notification has not yet reached the message thread.
+            export.is_current();
+        }
+    }
+
     pub(super) fn cancel_remote_file_receive(&mut self, cx: &mut Context<Self>) {
         self.file_export_snapshot = None;
         self.content_publication = None;
@@ -111,8 +121,7 @@ impl RdpView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let formats =
-                        file_clipboard::to_mime(&content).map_err(|_| ExportError::Invalid)?;
+                    let formats = file_clipboard::export::prepare_content(&content)?;
                     if worker_cancel.is_cancelled() {
                         return Err(ExportError::Changed);
                     }
@@ -180,6 +189,7 @@ impl RdpView {
             || revision != self.clipboard.revision()
             || !self.config.clipboard
             || !self.config.clipboard_files
+            || !file_clipboard::export::files_supported()
             || self.closed
             || self.state != State::Connected
         {

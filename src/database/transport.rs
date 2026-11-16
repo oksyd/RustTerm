@@ -1,77 +1,116 @@
 use super::{DatabaseError, Result};
-use crate::{
-    config::{SqlConfig, SqlEngine},
-    session::TunnelConnector,
-};
-use std::path::{Path, PathBuf};
+use crate::session::TunnelConnector;
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::{
-    net::UnixListener,
-    task::{JoinHandle, JoinSet},
+    io::{AsyncRead, AsyncWrite, copy_bidirectional},
+    net::TcpListener,
+    task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
 
-/// A private Unix socket preserves the database hostname for TLS verification.
-/// The session and its short-lived cancellation connection use the same route.
-pub(super) struct TunnelBridge {
-    directory: tempfile::TempDir,
-    socket: PathBuf,
+#[derive(Clone)]
+pub(super) struct Route {
+    tunnel: Option<TunnelConnector>,
+    host: String,
+    port: u16,
+    stop: CancellationToken,
+}
+
+impl Route {
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn new(
+        tunnel: Option<TunnelConnector>,
+        host: String,
+        port: u16,
+        stop: CancellationToken,
+    ) -> Self {
+        Self {
+            tunnel,
+            host,
+            port,
+            stop,
+        }
+    }
+
+    pub async fn forward(&self) -> Result<Option<Forward>> {
+        if self.stop.is_cancelled() {
+            return Err(DatabaseError::Disconnected);
+        }
+        let Some(tunnel) = &self.tunnel else {
+            return Ok(None);
+        };
+        let stream = tokio::select! {
+            biased;
+            _ = self.stop.cancelled() => return Err(DatabaseError::Disconnected),
+            stream = tunnel.open(self.host.clone(), self.port) => stream.map_err(|(kind, _)| super::ssh_error(kind))?,
+        };
+        Forward::start(stream, self.stop.clone()).await.map(Some)
+    }
+}
+
+pub(super) struct Forward {
+    pub address: SocketAddr,
     task: JoinHandle<()>,
 }
-impl TunnelBridge {
-    pub async fn open(
-        engine: SqlEngine,
-        config: &SqlConfig,
-        tunnel: TunnelConnector,
-        stop: CancellationToken,
-    ) -> Result<Self> {
-        let host = crate::config::known_hosts::normalize_host(&config.host)
-            .map_err(|_| DatabaseError::InvalidConfig)?;
-        let directory = tempfile::Builder::new()
-            .prefix("rustterm-sql-")
-            .tempdir()
-            .map_err(|_| DatabaseError::SshConnection)?;
-        let name = match engine {
-            SqlEngine::Mysql => "mysql.sock".to_owned(),
-            SqlEngine::Postgres => format!(".s.PGSQL.{}", config.port),
-            SqlEngine::Sqlite | SqlEngine::ClickHouse => return Err(DatabaseError::InvalidConfig),
-        };
-        let socket = directory.path().join(name);
-        let listener = UnixListener::bind(&socket).map_err(|_| DatabaseError::SshConnection)?;
-        let port = config.port;
+
+impl Forward {
+    async fn start<S>(mut remote: S, stop: CancellationToken) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| DatabaseError::Connection)?;
+        let address = listener
+            .local_addr()
+            .map_err(|_| DatabaseError::Connection)?;
         let task = tokio::spawn(async move {
-            let mut streams = JoinSet::new();
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = stop.cancelled() => break,
-                    _ = streams.join_next(), if !streams.is_empty() => {},
-                    accepted = listener.accept(), if streams.len() < 2 => {
-                        let Ok((mut local, _)) = accepted else { break };
-                        let tunnel = tunnel.clone();
-                        let host = host.clone();
-                        streams.spawn(async move {
-                            let Ok(mut remote) = tunnel.open(host, port).await else { return };
-                            let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
-                        });
-                    }
-                }
+            let forward = async move {
+                let (mut local, _) = listener.accept().await?;
+                drop(listener);
+                local.set_nodelay(true)?;
+                copy_bidirectional(&mut local, &mut remote).await?;
+                Ok::<_, std::io::Error>(())
+            };
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => {},
+                _ = forward => {},
             }
         });
-        Ok(Self {
-            directory,
-            socket,
-            task,
-        })
-    }
-    pub fn directory(&self) -> &Path {
-        self.directory.path()
-    }
-    pub fn socket(&self) -> &Path {
-        &self.socket
+        Ok(Self { address, task })
     }
 }
-impl Drop for TunnelBridge {
+
+impl Drop for Forward {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
+
+pub(super) fn native_roots() -> Vec<rustls::pki_types::CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+pub(super) fn is_tls_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<rustls::Error>() || error.is::<rustls::pki_types::InvalidDnsNameError>() {
+            return true;
+        }
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| {
+                io.get_ref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests;

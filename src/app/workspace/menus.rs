@@ -84,6 +84,7 @@ pub(super) enum MenuAction {
     OpenProfileBelow,
     DeleteProfile,
     NewTabSession,
+    SetTabPinned(bool),
     CloseTab,
     CloseOtherTabs,
     CloseTabsToRight,
@@ -748,7 +749,8 @@ impl Workspace {
                     self.set_active(index, window, cx);
                 }
             }
-            NewTabSession | CloseTab | CloseOtherTabs | CloseTabsToRight | CloseTabGroup => {
+            NewTabSession | SetTabPinned(_) | CloseTab | CloseOtherTabs | CloseTabsToRight
+            | CloseTabGroup => {
                 unreachable!("tab actions are dispatched with their explicit context")
             }
             NewConnection => unreachable!("submenu navigation is handled before command dispatch"),

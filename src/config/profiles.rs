@@ -195,6 +195,8 @@ impl Connection {
 
     pub fn ssh_profile(&self) -> Option<Uuid> {
         match self {
+            Self::Rdp(config) => config.ssh_profile,
+            Self::Telnet(config) => config.ssh_profile,
             Self::Redis(config) => config.ssh_profile,
             Self::Elasticsearch(config) => config.ssh_profile,
             Self::Mysql(config) | Self::Postgres(config) | Self::ClickHouse(config) => {

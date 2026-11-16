@@ -153,6 +153,7 @@ impl Workspace {
                 ..
             } => {
                 let target = match &profile.connection {
+                    Connection::Telnet(s) => format!("Telnet · {}:{}", s.host, s.port),
                     Connection::Ssh(s) => format!("{}@{}:{}", s.username, s.host, s.port),
                     Connection::Redis(s) => {
                         format!("Redis · {}:{} · DB {}", s.host, s.port, s.database)
@@ -178,9 +179,10 @@ impl Workspace {
                         .flex_col()
                         .gap_3()
                         .child(target)
-                        .child(secret.clone())
+                        .when(!matches!(profile.connection, Connection::Telnet(_)), |body| body.child(secret.clone()))
                         .when_some(sentinel_secret.as_ref(), |body, secret| body.child(tr(i18n_key::WORKSPACE_SENTINEL_PASSWORD_THIS_CONNECTION_ONLY)).child(secret.clone()))
                         .child(tr(match profile.connection {
+                            Connection::Telnet(_) => i18n_key::CONNECTIONS_TELNET_IS_UNENCRYPTED_ENTER_LOGIN_CREDENTIALS_IN_THE_TERMINAL_WHEN,
                             Connection::Elasticsearch(_) => i18n_key::ES_AUTH_HELP,
                             Connection::Redis(_) => i18n_key::REDIS_AUTHENTICATION_IS_SKIPPED_ONLY_WHEN_BOTH_USERNAME_AND_PASSWORD_ARE,
                             Connection::Mysql(_) | Connection::Postgres(_) | Connection::ClickHouse(_) => i18n_key::DATABASE_ENTER_THE_DATABASE_PASSWORD_TLS_VERIFIES_THE_SERVER_CERTIFICATE_AND,
@@ -205,7 +207,7 @@ impl Workspace {
                                     cx.notify();
                                 })),
                         ))
-                        .when(!self.can_save_connection_credential(profile), |body| body.child(tr(
+                        .when(!matches!(profile.connection, Connection::Telnet(_)) && !self.can_save_connection_credential(profile), |body| body.child(tr(
                             i18n_key::DATABASE_THIS_DATABASE_SELECTION_APPLIES_TO_THIS_PANE_CREDENTIALS_ARE_USED,
                         )))
                         .when_some(tunnel.as_ref(), |content, tunnel| {

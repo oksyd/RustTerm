@@ -603,33 +603,50 @@ impl Workspace {
             .on_drop(cx.listener(move |this, drag: &TabDrag, _, cx| {
                 this.reorder_tab(drag.id, id, drag.whole_group, cx);
             }))
-            .child(
-                icon_button(
-                    ("tab-close", id),
-                    Icon::Close,
-                    i18n_key::WORKSPACE_CLOSE_WORKSPACE_TAB_AND_ALL_ITS_PANES,
+            .when(tab.pinned, |d| {
+                d.child(
+                    div()
+                        .size(px(24.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            icon(Icon::Pin)
+                                .size(px(12.))
+                                .text_color(rgb(ui::colors().muted)),
+                        ),
                 )
-                .size(px(24.))
-                .when(!active, |button| {
-                    button
-                        .opacity(0.)
-                        .group_hover("workspace-tab", |style| style.opacity(1.))
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        if this.menu.take().is_some() {
-                            this.restore_popup_focus(window, cx);
-                            cx.notify();
-                        }
+            })
+            .when(!tab.pinned, |d| {
+                d.child(
+                    icon_button(
+                        ("tab-close", id),
+                        Icon::Close,
+                        i18n_key::WORKSPACE_CLOSE_WORKSPACE_TAB_AND_ALL_ITS_PANES,
+                    )
+                    .size(px(24.))
+                    .when(!active, |button| {
+                        button
+                            .opacity(0.)
+                            .group_hover("workspace-tab", |style| style.opacity(1.))
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            if this.menu.take().is_some() {
+                                this.restore_popup_focus(window, cx);
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
-                    }),
+                        this.confirm_close(close_ids.clone(), window, cx);
+                    })),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.confirm_close(close_ids.clone(), window, cx);
-                })),
-            )
+            })
             .child(
                 div()
                     .absolute()
@@ -827,7 +844,8 @@ impl Workspace {
                 })
                 .map_or(tab.id, |group| group.tabs[0])
         });
-        let visible = visible_strip(&entries, active, (available - 76.).max(0.));
+        let pinned = self.tabs.iter().filter(|tab| tab.pinned).count();
+        let visible = visible_tab_entries(&entries, pinned, active, (available - 76.).max(0.));
         let mut strip = div()
             .id("tab-strip")
             .relative()
@@ -837,7 +855,8 @@ impl Workspace {
             .flex()
             .items_center();
         let mut previous = None;
-        for entry in &entries[visible.clone()] {
+        for index in &visible {
+            let entry = &entries[*index];
             if let Some(profile) = entry.profile
                 && previous != Some(profile)
                 && let Some(group) = groups.iter().find(|group| group.profile == Some(profile))
@@ -1080,6 +1099,23 @@ struct StripEntry {
     folded: bool,
 }
 
+fn visible_tab_entries(
+    entries: &[StripEntry],
+    pinned: usize,
+    active: Option<usize>,
+    width: f32,
+) -> Vec<usize> {
+    let (pins, regular) = entries.split_at(pinned);
+    // Keep pins at the left while reserving room for the active regular tab and
+    // its group label. On narrow windows all hidden tabs remain in the menu.
+    let active_regular = regular.iter().find(|entry| Some(entry.id) == active);
+    let reserved = active_regular.map_or(0., |entry| strip_width(std::slice::from_ref(entry)));
+    let pins = visible_strip(pins, active, (width - reserved).max(0.));
+    let remaining = (width - strip_width(&entries[pins.clone()])).max(0.);
+    let regular = visible_strip(regular, active, remaining);
+    pins.chain(regular.map(|index| index + pinned)).collect()
+}
+
 fn strip_width(entries: &[StripEntry]) -> f32 {
     let mut previous = None;
     entries
@@ -1134,6 +1170,34 @@ fn short_group_name(host: &str) -> String {
 #[cfg(test)]
 mod strip_tests {
     use super::*;
+    #[test]
+    fn overflow_keeps_pins_on_the_left_without_hiding_the_active_regular_tab() {
+        let entries: Vec<_> = (1..=6)
+            .map(|id| StripEntry {
+                id,
+                profile: None,
+                folded: false,
+            })
+            .collect();
+        assert_eq!(
+            visible_tab_entries(&entries, 2, Some(6), TAB_WIDTH * 4.),
+            [0, 1, 4, 5]
+        );
+        assert_eq!(
+            visible_tab_entries(&entries, 2, Some(6), TAB_WIDTH * 2.),
+            [0, 5]
+        );
+        assert_eq!(visible_tab_entries(&entries, 2, Some(6), TAB_WIDTH), [5]);
+        assert_eq!(visible_tab_entries(&entries, 2, Some(2), TAB_WIDTH), [1]);
+        assert!(visible_tab_entries(&entries, 2, Some(6), TAB_WIDTH - 1.).is_empty());
+        assert!(visible_tab_entries(&[], 0, None, 1000.).is_empty());
+        let mut grouped = entries;
+        grouped[5].profile = Some(Uuid::new_v4());
+        assert_eq!(
+            visible_tab_entries(&grouped, 2, Some(6), TAB_WIDTH * 2. + GROUP_WIDTH),
+            [0, 5]
+        );
+    }
     #[test]
     fn overflow_keeps_active_tab_and_its_group_with_whole_close_targets() {
         let a = Uuid::new_v4();

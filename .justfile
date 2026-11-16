@@ -21,10 +21,14 @@ _ci-format:
   cargo fmt --all --check
   cargo fmt --manifest-path crates/rustrdp/Cargo.toml --check
 
+[script("bash", "-euo", "pipefail")]
 _ci-rust:
   cargo clippy --locked --all-targets -p rustterm -p rustrdp -- -D warnings
+  nextest_config=$(mktemp)
+  trap 'rm -f "$nextest_config"' EXIT
+  printf '%s\n' '[profile.default]' 'slow-timeout = { period = "30s", terminate-after = 2, grace-period = "2s" }' > "$nextest_config"
   # Zsh PTY tests are optional locally; Actions installs and requires Zsh explicitly.
-  cargo nextest run --locked --all-targets -p rustterm -p rustrdp --status-level slow
+  cargo nextest run --config-file "$nextest_config" --locked --all-targets -p rustterm -p rustrdp --status-level slow
   cargo test --locked --doc -p rustterm -p rustrdp
 
 _ci-python:

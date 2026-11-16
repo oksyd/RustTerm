@@ -1,4 +1,3 @@
-database-a-database-ssh-tunnel-must-reference-an-existing-ssh-profile = A database SSH tunnel must reference an existing SSH profile
 
 database-a-primary-key-is-required-to-edit-rows-safely = A primary key is required to edit rows safely.
 
@@ -322,7 +321,6 @@ database-the-sqlite-file-already-exists-choose-another-path = The SQLite file al
 
 database-the-sqlite-file-is-not-writable-open-it-in-read = The SQLite file is not writable; open it in read-only mode
 
-database-the-ssh-profile-for-this-database-connection-is-unavailable-edit = The SSH profile for this database connection is unavailable. Edit its tunnel settings before reconnecting.
 
 database-the-table-edit-contains-an-invalid-value-or-column = The table edit contains an invalid value or column.
 
@@ -340,7 +338,6 @@ database-this-database-selection-applies-to-this-pane-credentials-are-used = Thi
 
 database-this-row-has-no-reliable-unique-key = This row has no reliable unique key.
 
-database-this-ssh-profile-is-used-by-a-database-tunnel-change = This SSH profile is used by a database tunnel. Change those database connections before deleting it.
 
 database-this-table-cannot-be-edited-safely = This table cannot be edited safely.
 
@@ -378,7 +375,6 @@ database-write-sql-ctrl-enter-runs-the-current-statement = Write SQL. Ctrl+Enter
 
 database-write-sql-ctrl-enter-runs-the-selection-or-the-entire = Write SQL. Ctrl+Enter runs the selection or the entire editor.
 
-database-ssh-tunnel-platform-unavailable = SQL SSH tunnels are not available on this platform. Use a direct database connection.
 
 database-clickhouse-connection-hint = Use the HTTP port (8123), or HTTPS (usually 8443) with TLS. Leave the database blank to use the server default.
 database-clickhouse-result-format = ClickHouse returned an unsupported result format or incomplete response. Remove the FORMAT clause, or use FORMAT JSONCompact.

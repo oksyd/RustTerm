@@ -1,3 +1,5 @@
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 use super::{
@@ -8,6 +10,7 @@ use super::{
         write_all_cancellable,
     },
 };
+use super::{SshOptions, stream::NetworkStream};
 use crate::terminal::Terminal;
 use std::{
     sync::{Arc, Mutex, atomic::Ordering},
@@ -28,20 +31,21 @@ type TelnetResult<T> = std::result::Result<T, (FailureKind, String)>;
 
 pub(super) async fn run(
     options: TelnetOptions,
+    ssh: Option<SshOptions>,
     terminal: Terminal,
     columns: u16,
     rows: u16,
     commands: mpsc::Receiver<ActorCommand>,
     shared: Arc<Shared>,
 ) {
-    let transport = match connect(options, columns, rows, shared.clone()).await {
+    let transport = match connect(options, ssh, columns, rows, shared.clone()).await {
         Ok(transport) => Some(transport),
         Err((kind, message)) => {
             if !matches!(shared.current_state(), SessionState::Failed { .. }) {
                 if shared.io_stop.is_cancelled() {
-                    shared.state(SessionState::Disconnected { exit_code: None });
+                    shared.transition(LifecycleEvent::Disconnected { exit_code: None });
                 } else {
-                    shared.failed(kind, message);
+                    shared.transition(LifecycleEvent::failed(kind, message));
                 }
             }
             None
@@ -52,10 +56,21 @@ pub(super) async fn run(
 
 async fn connect(
     options: TelnetOptions,
+    ssh: Option<SshOptions>,
     columns: u16,
     rows: u16,
     shared: Arc<Shared>,
 ) -> TelnetResult<Transport> {
+    if let Some(ssh) = ssh {
+        let tunnel = super::ssh::connection::connect_tunnel_ui(
+            ssh,
+            super::ssh::connection::Ui::Terminal(shared.clone()),
+            shared.io_stop.child_token(),
+        )
+        .await?;
+        let stream = tunnel.open(options.host, options.port).await?;
+        return Ok(transport(NetworkStream::Ssh(stream), columns, rows, shared));
+    }
     let deadline =
         tokio::time::Instant::now() + Duration::from_secs(options.timeout_secs.clamp(1, 600));
     let connect = async {
@@ -76,11 +91,11 @@ async fn connect(
         result = tokio::time::timeout_at(deadline, connect) => result
             .map_err(|_| (FailureKind::Timeout, crate::i18n::tr(i18n_key::CONNECTIONS_TELNET_CONNECTION_TIMED_OUT).into()))??,
     };
-    Ok(transport(stream, columns, rows, shared))
+    Ok(transport(NetworkStream::Tcp(stream), columns, rows, shared))
 }
 
-fn transport(stream: TcpStream, columns: u16, rows: u16, shared: Arc<Shared>) -> Transport {
-    let (mut reader, mut writer) = stream.into_split();
+fn transport(stream: NetworkStream, columns: u16, rows: u16, shared: Arc<Shared>) -> Transport {
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let codec = Arc::new(Mutex::new(Codec::new(columns, rows)));
     let controls = Arc::new(Notify::new());
     let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
@@ -211,7 +226,7 @@ fn transport(stream: TcpStream, columns: u16, rows: u16, shared: Arc<Shared>) ->
             break;
         }
     });
-    shared.live_state(SessionState::Connected);
+    shared.transition(LifecycleEvent::Connected);
     Transport {
         output,
         input,
@@ -687,6 +702,7 @@ mod tests {
                     port: address.port(),
                     timeout_secs: 1,
                 },
+                None,
                 80,
                 24,
                 shared.clone(),

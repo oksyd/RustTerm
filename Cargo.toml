@@ -3,16 +3,33 @@ name = "rustterm"
 version = "0.1.13"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.99.1"
+rust-version = "1.100.0"
+description = "A native desktop workspace for terminals, remote desktops, and databases"
+repository = "https://github.com/oksyd/RustTerm"
+readme = "README.md"
 publish = true
 include = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "build.rs",
-    "src/**",
-    "tests/**",
-    "README.md",
-    "LICENSE",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/build.rs",
+    "/src/**/*.rs",
+    "/src/**/*.py",
+    "/src/**/*.sh",
+    "/src/**/*.bash",
+    "/src/**/*.zsh",
+    "/src/**/*.fish",
+    "/tests/**/*.rs",
+    "/tests/fixtures/**/*.pem",
+    "/assets/**/*.svg",
+    "/assets/**/*.png",
+    "/assets/**/*.ico",
+    "/assets/**/*.ftl",
+    "/assets/locales/languages.json",
+    "/assets/windows.rc",
+    "/assets/io.rustterm.RustTerm.desktop",
+    "/assets/licenses/*",
+    "/README.md",
+    "/LICENSE",
 ]
 
 [dependencies]
@@ -33,7 +50,9 @@ russh-sftp = { version = "3.0.1", default-features = false }
 ssh-key = { version = "=0.7.0-rc.11", default-features = false, features = ["alloc", "ecdsa"] }
 
 redis = { version = "1.8.0", default-features = false, features = ["tokio-comp"] }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "mysql", "mysql-rsa", "postgres"] }
+mysql_async = { version = "0.37.1", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
+tokio-postgres = { version = "0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres-rustls = { version = "0.14.0", default-features = false, features = ["ring"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled", "hooks", "limits"] }
 
 rustrdp = { version = "0.1.0", default-features = false, features = ["graphics"] }
@@ -54,6 +73,7 @@ url = { version = "2.5.8", default-features = false, features = ["std"] }
 semver = { version = "1.0.28", default-features = false, features = ["std"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 sspi = { version = "0.23.0", default-features = false }
 x509-cert = { version = "0.2.5", default-features = false, features = ["std"] }
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
@@ -80,10 +100,6 @@ tempfile = { version = "3.27.0", default-features = false, features = ["getrando
 libc = { version = "0.2.186", default-features = false }
 rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "process", "event", "net"] }
 
-[target.'cfg(windows)'.dependencies]
-raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
-windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell"] }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 rustrdp = { version = "0.1.0", default-features = false, features = ["audio-codecs"] }
 x11rb = { version = "0.13.2", default-features = false, features = ["xfixes"] }
@@ -93,10 +109,12 @@ wayland-backend = { version = "0.3.17", default-features = false, features = ["c
 wayland-protocols = { version = "0.32.13", default-features = false, features = ["client", "unstable"] }
 libloading = { version = "0.8.9", default-features = false }
 
-[dev-dependencies]
-rand = { version = "0.10.3", default-features = false, features = ["thread_rng"] }
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = { version = "0.6.2", default-features = false, features = ["std"] }
+windows-sys = { version = "0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_System_Threading", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole"] }
 
 [build-dependencies]
+toml = { version = "1.1.8", default-features = false, features = ["serde", "parse"] }
 embed-resource = { version = "3.0.12", default-features = false }
 fluent-syntax = { version = "0.12.0", default-features = false }
 unic-langid = { version = "0.9.6", default-features = false }
@@ -104,6 +122,9 @@ serde = { version = "1.0.229", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.154", default-features = false, features = ["alloc"] }
 syn = { version = "2.0.119", default-features = false, features = ["full", "parsing"] }
 proc-macro2 = { version = "1.0.107", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.10.3", default-features = false, features = ["thread_rng"] }
 
 [patch.crates-io]
 rustrdp = { path = "crates/rustrdp" }
@@ -134,3 +155,12 @@ tag-name = "{{prefix}}{{version}}"
 pre-release-commit-message = "chore: release {{crate_name}} version {{version}}"
 tag-message = "chore: release {{crate_name}} version {{version}}"
 pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+
+[package.metadata.rustterm.windows]
+binary = "rustterm.exe"
+manifest = "build-info.json"
+
+[package.metadata.rustterm.windows.files]
+"LICENSE" = "LICENSE"
+"README.md" = "README.md"
+"alacritty_terminal-LICENSE-APACHE" = "assets/licenses/alacritty_terminal-LICENSE-APACHE"

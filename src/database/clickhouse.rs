@@ -203,13 +203,13 @@ impl Connection {
         let completion = if matches!(mode, RequestMode::Query) {
             let done = CancellationToken::new();
             *self.active.lock().unwrap() = Some(done.clone());
-            Some(CancelOnDrop(Some(done)))
+            Some(done.drop_guard())
         } else {
             None
         };
         let this = self.clone();
         let stop = self.stop.child_token();
-        let _guard = CancelOnDrop(Some(stop.clone()));
+        let _guard = stop.clone().drop_guard();
         tokio::task::spawn_blocking(move || {
             let _completion = completion;
             this.blocking_request(sql, limit, query_id, mode, stop)

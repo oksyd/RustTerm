@@ -88,6 +88,7 @@ impl ProfileForm {
         self.rdp_view.page = page;
         self.rdp_view.scroll.set_offset(gpui::Point::default());
         self.group_open = false;
+        self.tunnel_open = false;
         self.rdp_view.tab_focus[page as usize].focus(window);
         cx.notify();
     }

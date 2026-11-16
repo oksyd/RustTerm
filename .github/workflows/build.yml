@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/git
             target
             !target/**/incremental
-          key: rust-build-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.toolchain.outputs.rust }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', '.github/workflows/build.yml', 'tools/release/artifacts.py') }}
+          key: rust-build-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.toolchain.outputs.rust }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'vendor/**/Cargo.toml', '.github/workflows/build.yml', 'tools/release/artifacts.py') }}
           restore-keys: rust-build-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ steps.toolchain.outputs.rust }}-
       - name: Install Ubuntu build dependencies
         if: runner.os == 'Linux'
@@ -104,6 +104,8 @@ jobs:
           cargo test --locked --bin rustterm app::workspace::ports::
           cargo test --locked --test ssh
           cargo test --locked --test ssh_tunnel
+          cargo test --locked --lib database::
+          cargo test --locked --test database
           cargo test --locked --lib docker::
           cargo test --locked --test docker
           python3 -m unittest discover -s src/update/installer -p test_install.py
@@ -127,6 +129,20 @@ jobs:
           $env:PATH = "${env:ProgramFiles}\NASM;$env:PATH"
           cargo test --locked -p rustrdp
           if ($LASTEXITCODE -ne 0) { throw 'RDP protocol tests failed' }
+          cargo test --locked --bin rustterm app::rdp_view::file_clipboard::
+          if ($LASTEXITCODE -ne 0) { throw 'RDP native clipboard tests failed' }
+          cargo test --locked --bin rustterm app::rdp_view::clipboard::
+          if ($LASTEXITCODE -ne 0) { throw 'RDP clipboard state tests failed' }
+          cargo test --locked --lib update::
+          if ($LASTEXITCODE -ne 0) { throw 'Update tests failed' }
+          cargo test --locked --lib config::credential_process::tests
+          if ($LASTEXITCODE -ne 0) { throw 'Credential worker tests failed' }
+          cargo test --locked --lib database::
+          if ($LASTEXITCODE -ne 0) { throw 'Database tests failed' }
+          cargo test --locked --test ssh_tunnel
+          if ($LASTEXITCODE -ne 0) { throw 'SSH tunnel tests failed' }
+          cargo test --locked --test database
+          if ($LASTEXITCODE -ne 0) { throw 'SQL driver tests failed' }
           python tools/release/artifacts.py package-windows --release --output dist
           if ($LASTEXITCODE -ne 0) { throw 'Windows packaging failed' }
       - if: inputs.upload-artifacts

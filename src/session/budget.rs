@@ -39,6 +39,7 @@ fn evict(session: &Shared) {
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .take();
+    session.transition(super::state::LifecycleEvent::Released);
     session.actor_stop.cancel();
     session.io_stop.cancel();
     *session

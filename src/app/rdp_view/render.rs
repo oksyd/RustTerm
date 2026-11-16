@@ -609,6 +609,7 @@ impl RdpView {
         let detail = match self.state {
             State::Connecting => i18n_key::RDP_NEGOTIATING_A_SECURE_REMOTE_DESKTOP_CONNECTION,
             State::WaitingCertificate => i18n_key::RDP_CONFIRM_THE_SERVER_CERTIFICATE_TO_CONTINUE,
+            State::WaitingHostKey => i18n_key::TERMINAL_WAITING_FOR_HOST_CONFIRMATION,
             State::Connected => i18n_key::RDP_WAITING_FOR_THE_FIRST_DESKTOP_FRAME,
             State::Disconnected => i18n_key::RDP_THE_REMOTE_DESKTOP_CONNECTION_IS_CLOSED,
             State::Failed => i18n_key::RDP_THE_REMOTE_DESKTOP_CONNECTION_COULD_NOT_BE_ESTABLISHED,

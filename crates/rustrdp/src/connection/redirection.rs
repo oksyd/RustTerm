@@ -7,7 +7,7 @@ use crate::{
 /// Negotiate RDSTLS using a routing token from an authenticated server handoff.
 /// Never use an account password here: the routing token precedes TLS.
 pub fn redirection_request(routing_token: &[u8]) -> Result<Vec<u8>> {
-    let token = routing_token.strip_suffix(b"\r\n").unwrap_or(routing_token);
+    let token = routing_token.trim_suffix(b"\r\n");
     if token.is_empty() || token.len() > 239 || token.iter().any(|b| b.is_ascii_control()) {
         return Err(Error::Invalid("redirection routing token"));
     }

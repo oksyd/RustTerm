@@ -18,7 +18,7 @@ pub struct ProbeRequest {
     pub profile: Profile,
     pub secret: Secret,
     pub sentinel_secret: Option<Secret>,
-    /// The target SSH options, or the database/Redis connection's SSH route.
+    /// The target SSH options, or another remote connection's SSH route.
     pub ssh: Option<SshOptions>,
 }
 
@@ -145,7 +145,7 @@ pub async fn test(
     cancel: CancellationToken,
 ) -> Result<ProbeOutcome, ProbeError> {
     let stop = cancel.child_token();
-    let _guard = CancelOnDrop(stop.clone());
+    let _guard = stop.clone().drop_guard();
     let (reply, result) = oneshot::channel();
     runtime()?.spawn(async move {
         let result = tokio::select! {
@@ -170,18 +170,6 @@ async fn run(
         sentinel_secret,
         ssh,
     } = request;
-    let expects_ssh = match &profile.connection {
-        Connection::Ssh(_) => true,
-        Connection::Redis(config) => config.ssh_profile.is_some(),
-        Connection::Elasticsearch(config) => config.ssh_profile.is_some(),
-        Connection::Mysql(config)
-        | Connection::Postgres(config)
-        | Connection::ClickHouse(config) => config.ssh_profile.is_some(),
-        _ => false,
-    };
-    if expects_ssh != ssh.is_some() {
-        return Err(ProbeError::InvalidConfig);
-    }
     match profile.connection {
         Connection::Local(_) => Err(ProbeError::Unsupported),
         Connection::Ssh(config) => {
@@ -200,9 +188,23 @@ async fn run(
             Ok(outcome)
         }
         Connection::Telnet(config) => {
+            let (config, route) = crate::connection_route::Prepared::resolve(config, ssh)
+                .map_err(|_| ProbeError::InvalidConfig)?
+                .into_parts();
             config.validate().map_err(|_| ProbeError::InvalidConfig)?;
             let host = crate::config::known_hosts::normalize_host(&config.host)
                 .map_err(|_| ProbeError::InvalidConfig)?;
+            if let crate::connection_route::Route::Ssh(ssh) = route {
+                let tunnel = crate::session::connect_tunnel(ssh, host_keys, stop.clone())
+                    .await
+                    .map_err(|(kind, message)| ProbeError::Ssh { kind, message })?;
+                let stream = tunnel
+                    .open(host, config.port)
+                    .await
+                    .map_err(|(kind, message)| ProbeError::Ssh { kind, message })?;
+                drop(stream);
+                return Ok(ProbeOutcome::new(ProbeKind::TelnetReachable));
+            }
             let socket = tokio::time::timeout(
                 Duration::from_secs(config.timeout_secs),
                 tokio::net::TcpStream::connect((host, config.port)),
@@ -214,20 +216,27 @@ async fn run(
             Ok(ProbeOutcome::new(ProbeKind::TelnetReachable))
         }
         Connection::Rdp(config) => {
-            crate::rdp::probe(config, secret, &certificate_events).await?;
+            let connection = crate::connection_route::Prepared::resolve(config, ssh)
+                .map_err(|_| ProbeError::InvalidConfig)?;
+            let connection = connection
+                .try_map_ssh(async |ssh| {
+                    crate::session::connect_tunnel(ssh, host_keys, stop)
+                        .await
+                        .map_err(|(kind, message)| ProbeError::Ssh { kind, message })
+                })
+                .await?;
+            crate::rdp::probe(connection, secret, &certificate_events).await?;
             Ok(ProbeOutcome::new(ProbeKind::RdpAuthenticated))
         }
         Connection::Redis(config) => {
             let database = config.database;
             let password =
                 (!secret.expose().is_empty() || config.credential.is_some()).then_some(secret);
-            let client = RedisClient::connect_authenticated(
-                config,
-                password,
-                sentinel_secret,
-                ssh.map(|ssh| (ssh, host_keys)),
-            )
-            .await?;
+            let connection =
+                crate::connection_route::Prepared::resolve(config, ssh.map(|ssh| (ssh, host_keys)))
+                    .map_err(|_| ProbeError::InvalidConfig)?;
+            let client =
+                RedisClient::connect_prepared(connection, password, sentinel_secret).await?;
             let result = client.command(database, vec![b"PING".to_vec()]).await;
             if result.as_ref() != Ok(&RedisValue::Bytes(b"PONG".to_vec())) {
                 client.close();
@@ -250,12 +259,12 @@ async fn run(
             Ok(outcome)
         }
         Connection::Elasticsearch(config) => {
-            let client = crate::elasticsearch::ElasticsearchClient::connect(
-                config,
-                secret,
-                ssh.map(|options| (options, host_keys)),
-            )
-            .await?;
+            let connection =
+                crate::connection_route::Prepared::resolve(config, ssh.map(|ssh| (ssh, host_keys)))
+                    .map_err(|_| ProbeError::InvalidConfig)?;
+            let client =
+                crate::elasticsearch::ElasticsearchClient::connect_prepared(connection, secret)
+                    .await?;
             let outcome = ProbeOutcome::with_server(
                 ProbeKind::ElasticsearchReady,
                 "Elasticsearch",
@@ -271,8 +280,10 @@ async fn run(
             let local = matches!(connection, Connection::Sqlite(_));
             let config = connection.database().expect("database connection");
             let engine = config.engine();
-            let client =
-                DatabaseClient::connect(config, secret, ssh.map(|ssh| (ssh, host_keys))).await?;
+            let connection =
+                crate::connection_route::Prepared::resolve(config, ssh.map(|ssh| (ssh, host_keys)))
+                    .map_err(|_| ProbeError::InvalidConfig)?;
+            let client = DatabaseClient::connect_prepared(connection, secret).await?;
             let result = client.execute("SELECT 1".into(), 1).await;
             if result.as_ref().ok().and_then(scalar) != Some("1") {
                 client.close();
@@ -300,13 +311,6 @@ async fn run(
             client.close();
             Ok(outcome)
         }
-    }
-}
-
-struct CancelOnDrop(CancellationToken);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
     }
 }
 

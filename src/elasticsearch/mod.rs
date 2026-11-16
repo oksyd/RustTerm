@@ -115,14 +115,6 @@ impl Drop for Inner {
         self.stop.cancel();
     }
 }
-struct CancelOnDrop(Option<CancellationToken>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(stop) = &self.0 {
-            stop.cancel();
-        }
-    }
-}
 
 pub fn validate_query(body: &str) -> Result<()> {
     if body.len() > MAX_QUERY_BYTES
@@ -139,25 +131,34 @@ impl ElasticsearchClient {
         secret: Secret,
         ssh: Option<(SshOptions, mpsc::Sender<HostKeyChallenge>)>,
     ) -> Result<Self> {
-        config
+        let connection = crate::connection_route::Prepared::resolve(config, ssh)
+            .map_err(|_| ElasticsearchError::InvalidConfig)?;
+        Self::connect_prepared(connection, secret).await
+    }
+    pub(crate) async fn connect_prepared(
+        connection: crate::connection_route::Prepared<
+            ElasticsearchConfig,
+            (SshOptions, mpsc::Sender<HostKeyChallenge>),
+        >,
+        secret: Secret,
+    ) -> Result<Self> {
+        connection
+            .destination()
             .validate()
             .map_err(|_| ElasticsearchError::InvalidConfig)?;
-        if config.ssh_profile.is_some() != ssh.is_some() {
-            return Err(ElasticsearchError::InvalidConfig);
-        }
         let stop = CancellationToken::new();
-        let mut guard = CancelOnDrop(Some(stop.clone()));
+        let guard = stop.clone().drop_guard();
         let result = runtime()?
             .spawn(async move {
-                let tunnel = if let Some((options, trust)) = ssh {
-                    Some(
+                let (config, route) = connection
+                    .try_map_ssh(async |(options, trust)| {
                         crate::session::connect_tunnel(options, trust, stop.child_token())
                             .await
-                            .map_err(|_| ElasticsearchError::Network)?,
-                    )
-                } else {
-                    None
-                };
+                            .map_err(|_| ElasticsearchError::Network)
+                    })
+                    .await?
+                    .into_parts();
+                let tunnel = route.into_option();
                 let authorization = authorization(&config, &secret)?;
                 let mut client = Self {
                     inner: Arc::new(Inner {
@@ -191,7 +192,7 @@ impl ElasticsearchClient {
             .map_err(|_| ElasticsearchError::Network)?;
         // The guard must remain armed on cancellation, but not after a successful handshake.
         if result.is_ok() {
-            guard.0.take();
+            guard.disarm();
         }
         result
     }
@@ -220,7 +221,7 @@ impl ElasticsearchClient {
                 permit.map_err(|_| ElasticsearchError::Cancelled)?,
         };
         let cancel = self.inner.stop.child_token();
-        let _guard = CancelOnDrop(Some(cancel.clone()));
+        let _guard = cancel.clone().drop_guard();
         let inner = self.inner.clone();
         runtime()?
             .spawn_blocking(move || {

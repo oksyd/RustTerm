@@ -27,6 +27,8 @@ A native desktop workspace for terminals, remote desktops, and databases, built 
 
 To launch a published Windows application, select **RemoteApp** in an RDP connection and enter its alias (for example, `||notepad`). The server must have RemoteApp configured. Optional arguments and a working directory are supported. Standard RemoteApp is implemented; Windows server interoperability has not yet been verified on a live deployment.
 
+Remote connections support SSH routing: SSH uses jump hosts; RDP, Telnet, Redis, Elasticsearch, MySQL, PostgreSQL, and ClickHouse can use a saved SSH connection on Ubuntu and Windows. Target names resolve from the SSH server, and TLS continues to verify the target hostname. RDP over SSH uses TCP.
+
 ClickHouse connects over HTTP/HTTPS (8123/8443), with SSH tunnels, SQL queries, and CSV export. Its table editor supports browsing; use SQL to modify data.
 
 Open **Docker** from a connected SSH terminal. The remote Linux host needs Docker CLI and permission to access its Unix socket; rootless and custom sockets are supported. No local Docker installation or exposed Docker TCP port is needed. Panel collection pauses when hidden; the active container console can continue sampling for its status bar. Container consoles follow Docker exec semantics: use `exit` to end the shell; closing a console disconnects it and may leave its process running.
@@ -49,9 +51,9 @@ For installation without `sudo`, extract the `.tar.gz` and run `./install.sh` (P
 
 An X11 or Wayland desktop, a working graphics driver, and system font libraries are required. Saving passwords requires a Secret Service; ZMODEM additionally requires `lrzsz`.
 
-**Windows:** extract the portable `.zip` and launch `rustterm.exe`. Windows packages are preview builds; runtime validation is pending. RDP audio, file/folder redirection, exclusive keyboard capture, and MySQL/PostgreSQL SSH tunnels currently require Linux.
+**Windows:** extract the portable `.zip` and launch `rustterm.exe`. Windows packages are preview builds; runtime validation is pending. RDP audio, file/folder redirection, and exclusive keyboard capture currently require Linux.
 
-Manage update checks and an optional HTTP proxy in **Settings → Updates**. Replace the portable folder to update Windows.
+Manage update checks and an optional HTTP proxy in **Settings → Updates**. Windows portable releases support in-app updates when the complete ZIP is extracted to a writable folder: download and verify the update, then restart RustTerm to apply it. The updater preserves user files and restores the previous version if replacement fails.
 
 ## User files
 

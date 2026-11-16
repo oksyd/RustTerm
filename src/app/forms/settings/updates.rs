@@ -6,7 +6,7 @@ impl SettingsForm {
     pub(super) fn updates_page(&self, cx: &Context<Self>) -> Div {
         let updates = self.updates.read(cx);
         let busy = updates.busy();
-        let installed = matches!(updates.status, Status::Installed);
+        let installed = matches!(updates.status, Status::Installed | Status::Ready);
         let mut actions = div()
             .flex()
             .flex_wrap()

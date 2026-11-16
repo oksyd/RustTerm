@@ -1,5 +1,7 @@
 //! Shared SSH authentication and pinned-host verification for terminal and
 //! direct-tcpip transports. This module never starts a shell or allocates a PTY.
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 use super::{
@@ -8,7 +10,9 @@ use super::{
     forwarding::ForwardController,
 };
 use crate::config::{HostKeyStatus, KnownHosts};
-use crate::session::{FailureKind, SessionState, state::Shared};
+#[cfg(test)]
+use crate::session::SessionState;
+use crate::session::{FailureKind, state::Shared};
 use anyhow::{Context as _, Result};
 use russh::{
     client,
@@ -58,7 +62,7 @@ pub struct AuthenticationChallenge {
 
 pub(super) type SshResult<T> = std::result::Result<T, (FailureKind, String)>;
 #[derive(Clone)]
-pub(super) enum Ui {
+pub(in crate::session) enum Ui {
     Terminal(Arc<Shared>),
     Tunnel {
         trust: mpsc::Sender<HostKeyChallenge>,
@@ -80,7 +84,7 @@ impl Verification {
     fn fail(&self, kind: FailureKind, message: impl Into<String>) {
         let message = message.into();
         if let Ui::Terminal(shared) = &self.ui {
-            shared.failed(kind, message.clone());
+            shared.transition(LifecycleEvent::failed(kind, message.clone()));
         }
         *self.failure.lock().unwrap_or_else(|e| e.into_inner()) = Some((kind, message));
     }
@@ -90,7 +94,7 @@ impl Verification {
         let accepted = match &self.ui {
             Ui::Terminal(shared) => {
                 *shared.trust.lock().unwrap_or_else(|e| e.into_inner()) = Some(reply);
-                if shared.live_state(SessionState::WaitingHostKey {
+                if shared.transition(LifecycleEvent::WaitingHostKey {
                     host: host.into(),
                     port,
                     algorithm: algorithm.into(),
@@ -252,7 +256,7 @@ impl client::Handler for HostVerifier {
             return Ok(false);
         }
         Ok(match &state.ui {
-            Ui::Terminal(shared) => shared.live_state(SessionState::Connecting),
+            Ui::Terminal(shared) => shared.transition(LifecycleEvent::Connecting),
             Ui::Tunnel { .. } | Ui::Forwarding { .. } => true,
         })
     }
@@ -300,21 +304,12 @@ pub(super) async fn stage<T, E: std::fmt::Display>(
     }
 }
 
-struct CancelOnDrop(Option<CancellationToken>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(stop) = &self.0 {
-            stop.cancel();
-        }
-    }
-}
-
 pub(super) async fn connect_authenticated(
     mut options: SshOptions,
     ui: Ui,
     stop: CancellationToken,
 ) -> SshResult<client::Handle<HostVerifier>> {
-    let mut guard = CancelOnDrop(Some(stop.clone()));
+    let guard = stop.clone().drop_guard();
     if options.jump_hosts.len() > 8 {
         return Err((
             FailureKind::Protocol,
@@ -411,7 +406,7 @@ pub(super) async fn connect_authenticated(
         _ => None,
     };
     let handle = connect_one(options, ui, stop, stream, parents, forwarding).await?;
-    guard.0 = None;
+    guard.disarm();
     Ok(handle)
 }
 
@@ -426,7 +421,7 @@ async fn connect_one(
     parents: Vec<client::Handle<HostVerifier>>,
     forwarding: Option<ForwardController>,
 ) -> SshResult<client::Handle<HostVerifier>> {
-    let mut guard = CancelOnDrop(Some(stop.clone()));
+    let guard = stop.clone().drop_guard();
     let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
     let stream: Box<dyn SshStream> = if let Some(stream) = stream {
         stream
@@ -503,7 +498,7 @@ async fn connect_one(
         }
     };
     if let Ui::Terminal(shared) = &verification.ui
-        && !shared.live_state(SessionState::WaitingAuthentication)
+        && !shared.transition(LifecycleEvent::WaitingAuthentication)
     {
         return Err((
             FailureKind::Network,
@@ -623,7 +618,7 @@ async fn connect_one(
             ));
         }
     }
-    guard.0 = None;
+    guard.disarm();
     Ok(handle)
 }
 
@@ -694,19 +689,30 @@ pub(crate) async fn connect_tunnel(
     trust: mpsc::Sender<HostKeyChallenge>,
     stop: CancellationToken,
 ) -> SshResult<TunnelConnector> {
+    let ui = Ui::Tunnel {
+        trust,
+        closed: stop.child_token(),
+        server_identification: Arc::new(OnceLock::new()),
+    };
+    connect_tunnel_ui(options, ui, stop).await
+}
+
+pub(in crate::session) async fn connect_tunnel_ui(
+    options: SshOptions,
+    ui: Ui,
+    stop: CancellationToken,
+) -> SshResult<TunnelConnector> {
     let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
-    let closed = stop.child_token();
-    let server_identification = Arc::new(OnceLock::new());
-    let mut handle = connect_authenticated(
-        options,
+    let (closed, server_identification) = match &ui {
         Ui::Tunnel {
-            trust,
-            closed: closed.clone(),
-            server_identification: server_identification.clone(),
-        },
-        stop.clone(),
-    )
-    .await?;
+            closed,
+            server_identification,
+            ..
+        } => (closed.clone(), server_identification.clone()),
+        Ui::Terminal(shared) => (shared.io_stop.clone(), Arc::new(OnceLock::new())),
+        Ui::Forwarding { closed, .. } => (closed.clone(), Arc::new(OnceLock::new())),
+    };
+    let mut handle = connect_authenticated(options, ui, stop.clone()).await?;
     let (requests, receiver) = mpsc::channel::<TcpRequest>(32);
     let connection = TunnelConnector(Arc::new(TunnelConnection {
         requests,
@@ -714,7 +720,7 @@ pub(crate) async fn connect_tunnel(
         server_identification,
     }));
     tokio::spawn(async move {
-        let _guard = CancelOnDrop(Some(stop.clone()));
+        let _guard = stop.clone().drop_guard();
         broker::run_tunnel(&handle, receiver, &closed, timeout).await;
         stop.cancel();
         let _ = tokio::time::timeout(crate::session::transport::IO_TIMEOUT, &mut handle).await;
@@ -1165,7 +1171,7 @@ mod tests {
         }
         let path = directory.path().join("known-hosts.toml");
         let shared = Shared::new(&Terminal::new(10, 2, 0));
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         let terminal_revision = *shared.revision.borrow();
 
         for (trusted, failure) in [
@@ -1222,7 +1228,7 @@ mod tests {
     #[tokio::test]
     async fn forwarding_authentication_preserves_server_context_and_isolates_cancellation() {
         let shared = Shared::new(&Terminal::new(10, 2, 0));
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         let terminal_revision = *shared.revision.borrow();
         for outcome in ["reply", "dismiss", "cancel"] {
             let stop = shared.io_stop.child_token();
@@ -1336,7 +1342,7 @@ mod tests {
     async fn ssh_disconnect_failure_survives_actor_cleanup() {
         let terminal = Terminal::new(10, 2, 0);
         let shared = Shared::new(&terminal);
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         let mut verifier = terminal_verifier(&shared);
         // russh invokes this hook before releasing channel readers. The actor
         // then receives their EOF and cancels io_stop before joining the monitor.
@@ -1362,7 +1368,7 @@ mod tests {
         for (user_cancelled, exit_code) in [(false, Some(7)), (true, None)] {
             let terminal = Terminal::new(10, 2, 0);
             let shared = Shared::new(&terminal);
-            shared.state(SessionState::Connected);
+            shared.transition(LifecycleEvent::Connected);
             let mut verifier = terminal_verifier(&shared);
             let (commands, _receive) = mpsc::channel(1);
             let session = Session {
@@ -1393,7 +1399,7 @@ mod tests {
     async fn ssh_disconnect_preserves_shell_signal_reason() {
         let terminal = Terminal::new(10, 2, 0);
         let shared = Shared::new(&terminal);
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         *shared.remote_failure.lock().unwrap() = Some((
             FailureKind::RemoteClosed,
             "shell terminated by SIGTERM".into(),

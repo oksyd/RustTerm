@@ -1,21 +1,50 @@
-use super::transport::TunnelBridge;
-use super::{Collector, DatabaseError, Result, ResultSet, classify};
+use super::{
+    Collector, DatabaseError, Result, ResultSet,
+    transport::{self, Forward, Route},
+};
 use crate::{
-    config::{Secret, SqlConfig, SqlEngine},
+    config::{Secret, SqlConfig},
     session::TunnelConnector,
 };
 use futures_util::TryStreamExt;
-use sqlx::{
-    Column, ConnectOptions, Connection as _, Decode, Either, MySql, Row, TypeInfo, ValueRef,
-    mysql::{MySqlConnectOptions, MySqlSslMode},
+use mysql_async::{
+    Conn, Opts, OptsBuilder, Row, SslOpts, Value, consts::ColumnType, prelude::Queryable,
 };
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct Connection {
-    connection: sqlx::MySqlConnection,
-    options: MySqlConnectOptions,
-    _bridge: Option<TunnelBridge>,
+#[derive(Clone)]
+pub(super) struct Options {
+    pub(super) driver: Opts,
+    route: Route,
 }
+
+pub(super) struct Connection {
+    connection: Option<Conn>,
+    options: Options,
+    _forward: Option<Forward>,
+}
+
+impl Options {
+    pub(super) async fn connect(&self) -> Result<Connection> {
+        self.connect_forwarded(self.route.forward().await?).await
+    }
+
+    pub(super) async fn connect_forwarded(&self, forward: Option<Forward>) -> Result<Connection> {
+        let mut options = OptsBuilder::from_opts(self.driver.clone());
+        if let Some(forward) = &forward {
+            options = options
+                .tcp_port(forward.address.port())
+                .resolved_ips(Some(vec![forward.address.ip()]));
+        }
+        let connection = Conn::new(options).await.map_err(classify)?;
+        Ok(Connection {
+            connection: Some(connection),
+            options: self.clone(),
+            _forward: forward,
+        })
+    }
+}
+
 impl Connection {
     pub async fn open(
         config: SqlConfig,
@@ -23,120 +52,168 @@ impl Connection {
         tunnel: Option<TunnelConnector>,
         stop: CancellationToken,
     ) -> Result<Self> {
+        Self::options(config, secret, tunnel, stop)?.connect().await
+    }
+
+    pub(super) fn options(
+        config: SqlConfig,
+        secret: Secret,
+        tunnel: Option<TunnelConnector>,
+        stop: CancellationToken,
+    ) -> Result<Options> {
         let host = crate::config::known_hosts::normalize_host(&config.host)
             .map_err(|_| DatabaseError::InvalidConfig)?;
-        let bridge = match tunnel {
-            Some(tunnel) => {
-                Some(TunnelBridge::open(SqlEngine::Mysql, &config, tunnel, stop).await?)
-            }
-            None => None,
-        };
-        let mut options = MySqlConnectOptions::new()
-            .host(&host)
-            .port(config.port)
-            .username(&config.username)
-            .ssl_mode(if config.tls {
-                MySqlSslMode::VerifyIdentity
-            } else {
-                MySqlSslMode::Disabled
-            })
-            .statement_cache_capacity(0)
-            .charset("utf8mb4")
-            .timezone(None)
-            .pipes_as_concat(false)
-            .no_engine_substitution(false)
-            .enable_cleartext_plugin(false)
-            .disable_statement_logging();
-        // SQLx treats Some("") as a password to hash for caching_sha2_password.
-        // Passwordless accounts must send an empty authentication response.
-        if !secret.expose().is_empty() {
-            options = options.password(secret.expose());
-        }
+        let mut options = OptsBuilder::default()
+            .ip_or_hostname(&host)
+            .tcp_port(config.port)
+            .user(Some(config.username))
+            .pass(Some(secret.expose().to_owned()))
+            .client_found_rows(true)
+            .prefer_socket(false)
+            .stmt_cache_size(Some(0))
+            .setup(vec!["SET NAMES utf8mb4"]);
         if !config.database.is_empty() {
-            options = options.database(&config.database);
+            options = options.db_name(Some(config.database));
         }
-        if let Some(bridge) = &bridge {
-            options = options.socket(bridge.socket());
+        if config.tls {
+            options = options.ssl_opts(Some(
+                SslOpts::default()
+                    .with_disable_built_in_roots(true)
+                    .with_root_certs(
+                        transport::native_roots()
+                            .into_iter()
+                            .map(|cert| cert.to_vec().into())
+                            .collect(),
+                    ),
+            ));
         }
-        let connection = sqlx::MySqlConnection::connect_with(&options)
-            .await
-            .map_err(classify)?;
-        Ok(Self {
-            connection,
-            options,
-            _bridge: bridge,
+        Ok(Options {
+            driver: options.into(),
+            route: Route::new(tunnel, host, config.port, stop),
         })
     }
-    pub(super) fn monitor_options(&self) -> MySqlConnectOptions {
+
+    pub(super) fn monitor_options(&self) -> Options {
         self.options.clone()
     }
-    pub(super) async fn open_monitor(options: MySqlConnectOptions) -> Result<Self> {
-        // A tunneled connection keeps the original verified local bridge socket.
-        // It must never fall back to a direct TCP connection.
-        let connection = sqlx::MySqlConnection::connect_with(&options)
-            .await
-            .map_err(classify)?;
-        Ok(Self {
-            connection,
-            options,
-            _bridge: None,
-        })
+
+    pub(super) async fn open_monitor(options: Options) -> Result<Self> {
+        options.connect().await
     }
+
     pub(super) fn cancellation(&self, marker: String) -> super::CancelHandle {
         super::CancelHandle::Mysql(self.options.clone(), marker)
     }
+
     pub(super) async fn synchronize(&mut self) -> Result<()> {
-        self.connection.flush().await.map_err(classify)
+        self.connection
+            .as_mut()
+            .expect("open connection")
+            .ping()
+            .await
+            .map_err(classify)
     }
+
+    pub(super) async fn close(mut self) {
+        if let Some(connection) = self.connection.take() {
+            disconnect(connection).await;
+        }
+    }
+
     pub async fn execute(&mut self, sql: &str, limit: usize) -> Result<Vec<ResultSet>> {
-        // The editor intentionally accepts SQL. Generated metadata queries escape identifiers and values.
-        let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).fetch_many(&mut self.connection);
+        let mut query = self
+            .connection
+            .as_mut()
+            .expect("open connection")
+            .query_iter(sql)
+            .await
+            .map_err(classify)?;
         let mut output = Collector::new(limit);
-        while let Some(message) = stream.try_next().await.map_err(classify)? {
-            match message {
-                Either::Left(done) => output.complete(done.rows_affected())?,
-                Either::Right(row) => {
-                    if !output.retaining_rows() {
-                        continue;
-                    }
-                    if output.needs_columns() {
-                        output.columns(
-                            row.columns()
-                                .iter()
-                                .map(|column| column.name().to_owned())
-                                .collect(),
-                        )?;
-                    }
-                    let values = (0..row.len())
-                        .map(|index| {
-                            let value = row.try_get_raw(index).map_err(classify)?;
-                            if value.is_null() {
-                                return Ok(None);
-                            }
-                            let bytes = <&[u8] as Decode<MySql>>::decode(value)
-                                .map_err(|_| DatabaseError::Protocol)?;
-                            let binary = matches!(
-                                row.columns()[index].type_info().name(),
-                                "BIT"
-                                    | "BINARY"
-                                    | "VARBINARY"
-                                    | "TINYBLOB"
-                                    | "BLOB"
-                                    | "MEDIUMBLOB"
-                                    | "LONGBLOB"
-                                    | "GEOMETRY"
-                            );
-                            Ok(Some(if binary {
-                                format!("0x{}", super::hex(bytes))
-                            } else {
-                                super::display_bytes(bytes)
-                            }))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    output.row(values);
+        while let Some(mut set) = query.stream::<Row>().await.map_err(classify)? {
+            output.columns(
+                set.columns_ref()
+                    .iter()
+                    .map(|column| column.name_str().into_owned())
+                    .collect(),
+            )?;
+            while let Some(row) = set.try_next().await.map_err(classify)? {
+                if !output.retaining_rows() {
+                    continue;
                 }
+                let values = row
+                    .columns_ref()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, column)| {
+                        display_value(column, row.as_ref(index).ok_or(DatabaseError::Protocol)?)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                output.row(values);
             }
+            output.complete(set.affected_rows())?;
         }
         Ok(output.finish())
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(disconnect(connection));
+        }
+    }
+}
+
+async fn disconnect(connection: Conn) {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), connection.disconnect()).await;
+}
+
+fn display_value(column: &mysql_async::Column, value: &Value) -> Result<Option<String>> {
+    match value {
+        Value::NULL => Ok(None),
+        Value::Bytes(bytes) => Ok(Some(if binary_column(column) {
+            format!("0x{}", super::hex(bytes))
+        } else {
+            super::display_bytes(bytes)
+        })),
+        _ => Err(DatabaseError::Protocol),
+    }
+}
+
+fn binary_column(column: &mysql_async::Column) -> bool {
+    matches!(
+        column.column_type(),
+        ColumnType::MYSQL_TYPE_BIT | ColumnType::MYSQL_TYPE_GEOMETRY
+    ) || (column
+        .flags()
+        .contains(mysql_async::consts::ColumnFlags::BINARY_FLAG)
+        && matches!(
+            column.column_type(),
+            ColumnType::MYSQL_TYPE_STRING
+                | ColumnType::MYSQL_TYPE_VAR_STRING
+                | ColumnType::MYSQL_TYPE_VARCHAR
+                | ColumnType::MYSQL_TYPE_TINY_BLOB
+                | ColumnType::MYSQL_TYPE_BLOB
+                | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                | ColumnType::MYSQL_TYPE_LONG_BLOB
+        ))
+}
+
+fn classify(error: mysql_async::Error) -> DatabaseError {
+    use mysql_async::{DriverError, Error, IoError};
+    if transport::is_tls_error(&error) {
+        return DatabaseError::Tls;
+    }
+    match error {
+        Error::Server(error) if error.state.starts_with("28") => DatabaseError::Authentication,
+        Error::Server(error) => super::server_error(error.state, &error.message),
+        Error::Io(IoError::Tls(_)) | Error::Driver(DriverError::NoClientSslFlagFromServer) => {
+            DatabaseError::Tls
+        }
+        Error::Io(_) | Error::Driver(DriverError::ConnectionClosed) => DatabaseError::Disconnected,
+        Error::Url(_) => DatabaseError::InvalidConfig,
+        _ => DatabaseError::Protocol,
     }
 }

@@ -1,4 +1,4 @@
-//! Database routing selects an existing SSH identity rather than copying credentials.
+//! Remote routing selects an existing SSH identity rather than copying credentials.
 use super::super::{column, hint, row};
 use super::ProfileForm;
 use crate::app::ui::{self, Icon};
@@ -92,7 +92,7 @@ impl ProfileForm {
         };
         let mut picker = column().child(
             div()
-                .id("database-tunnel")
+                .id("ssh-tunnel")
                 .track_focus(&self.tunnel_focus)
                 .tab_index(0)
                 .flex()
@@ -140,7 +140,7 @@ impl ProfileForm {
                 );
             picker = picker.child(
                 div()
-                    .id("database-tunnel-options")
+                    .id("ssh-tunnel-options")
                     .max_h(px(180.))
                     .overflow_y_scroll()
                     .map(ui::preserve_scroll_axes)
@@ -184,9 +184,7 @@ impl ProfileForm {
         column()
             .child(row(i18n_key::REDIS_SSH_TUNNEL, picker))
             .when(self.ssh_profile.is_some(), |body| {
-                body.child(hint(
-                    i18n_key::DATABASE_THE_DATABASE_HOST_AND_PORT_ARE_REACHED_FROM_THE_SSH,
-                ))
+                body.child(hint(i18n_key::CONNECTIONS_SSH_ROUTE_HELP))
             })
             .when(self.ssh_profiles.is_empty(), |body| {
                 body.child(hint(

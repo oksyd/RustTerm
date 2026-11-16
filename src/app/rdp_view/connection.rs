@@ -5,6 +5,39 @@ use rustterm::rdp::CertificateDecision;
 use std::time::Duration;
 
 impl RdpView {
+    pub(super) fn connect_after_layout(
+        &mut self,
+        secret: Secret,
+        ssh: Option<rustterm::session::SshOptions>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.config.uses_dynamic_resolution() {
+            self.connect(secret, ssh, window, cx);
+            return;
+        }
+        cx.on_next_frame(window, move |this, window, cx| {
+            if this.closed || this.state != State::Connecting {
+                return;
+            }
+            if this.visible && resize_dimensions(this.layout_size, window.scale_factor()).is_none()
+            {
+                // Frame callbacks precede layout. Allow one actual layout pass
+                // before the handshake; background or zero-sized panes retain
+                // their configured fallback and synchronize when shown.
+                cx.on_next_frame(window, move |this, window, cx| {
+                    this.connect(secret, ssh, window, cx);
+                });
+                // This callback runs outside drawing. Animation requests need
+                // a current rendered view; refreshing the window does not.
+                window.refresh();
+            } else {
+                this.connect(secret, ssh, window, cx);
+            }
+        });
+        window.refresh();
+    }
+
     fn record_error(&self, error: &rustterm::rdp::RdpError) {
         if let Some(code) = error.server_code() {
             self.window_state.record_values(
@@ -20,7 +53,16 @@ impl RdpView {
         }
     }
 
-    pub(super) fn connect(&mut self, secret: Secret, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn connect(
+        &mut self,
+        secret: Secret,
+        ssh: Option<rustterm::session::SshOptions>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closed || self.state != State::Connecting {
+            return;
+        }
         self.cursor.clear(window);
         self.cursor.update(None);
         self.pointer_task = None;
@@ -32,12 +74,25 @@ impl RdpView {
         self.microphone_enabled = self.config.audio_input;
         self.clipboard = clipboard::ClipboardState::default();
         // Resolve automatic DPI for this session without changing the saved profile.
-        let mut config = self.config.clone();
-        config.desktop_scale = Some(self.desktop_scale);
-        let handle = match RdpClient::connect_with_cache_directory(
+        self.device_scale = window.scale_factor();
+        let config = connection_config(&self.config, self.layout_size, self.device_scale);
+        self.desktop_scale = config.desktop_scale.expect("session DPI is resolved");
+        if config.uses_dynamic_resolution() {
+            self.desktop_size = (config.width, config.height);
+        }
+        self.window_state.record_values(
+            "rdp-initial-desktop",
+            [
+                self.index as u64,
+                u64::from(config.width),
+                u64::from(config.height),
+            ],
+        );
+        let handle = match RdpClient::connect_with_ssh(
             config,
             secret,
             Some(self.window_state.cache_dir.to_path_buf()),
+            ssh,
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -99,6 +154,11 @@ impl RdpView {
                         if let Some((size, depth)) = desktop {
                             if this.desktop_size != size {
                                 this.desktop_size = size;
+                                this.window_state.record_values(
+                                    "rdp-desktop-resized",
+                                    [this.index as u64, u64::from(size.0), u64::from(size.1)],
+                                );
+                                this.request_resize(cx);
                                 activity = true;
                             }
                             this.negotiated_color_depth = Some(depth);
@@ -233,6 +293,79 @@ impl RdpView {
                         fingerprint,
                     });
                 }
+            }
+            RdpEvent::SshHostKey(challenge) => {
+                self.state = State::WaitingHostKey;
+                let prompts = self.window_state.prompts.clone();
+                let target = self.config.host.clone();
+                let target_port = self.config.port;
+                cx.spawn_in(window, async move |this, cx| {
+                    let permit = loop {
+                        if challenge.reply.is_closed() {
+                            return;
+                        }
+                        let current = this
+                            .update(cx, |this, _| {
+                                (
+                                    !this.closed && this.state == State::WaitingHostKey,
+                                    this.surface_visible(),
+                                )
+                            })
+                            .ok();
+                        match current {
+                            Some((true, true)) => {
+                                if let Some(permit) = prompts.acquire() {
+                                    break permit;
+                                }
+                            }
+                            Some((true, false)) => {}
+                            _ => return,
+                        }
+                        Timer::after(Duration::from_millis(100)).await;
+                    };
+                    let detail = rustterm::trf!(
+                        i18n_key::CONNECTIONS_SSH_FINGERPRINT_TUNNEL,
+                        host = challenge.host,
+                        port = challenge.port,
+                        algorithm = challenge.algorithm,
+                        fingerprint = challenge.fingerprint,
+                        target = target,
+                        target_port = target_port
+                    );
+                    let response = cx.update(|window, cx| {
+                        window.prompt(
+                            PromptLevel::Warning,
+                            tr(i18n_key::REDIS_VERIFY_THE_SSH_TUNNEL_HOST_KEY),
+                            Some(&detail),
+                            &[
+                                tr(i18n_key::COMMON_CANCEL),
+                                tr(i18n_key::TERMINAL_TRUST_AND_SAVE),
+                            ],
+                            cx,
+                        )
+                    });
+                    let trusted = match response {
+                        Ok(response) => response.await == Ok(1),
+                        Err(_) => false,
+                    };
+                    let current = this
+                        .update(cx, |this, cx| {
+                            let valid = permit.is_valid()
+                                && !this.closed
+                                && !this.window_state.is_locked()
+                                && this.state == State::WaitingHostKey;
+                            if valid {
+                                this.state = State::Connecting;
+                                cx.emit(PaneEvent::Activity);
+                                cx.notify();
+                            }
+                            valid
+                        })
+                        .unwrap_or(false);
+                    let _ = challenge.reply.send(trusted && current);
+                    drop(permit);
+                })
+                .detach();
             }
             RdpEvent::CertificateChallenge {
                 host,
@@ -439,5 +572,76 @@ impl RdpView {
         }
         cx.emit(PaneEvent::Activity);
         cx.notify();
+    }
+}
+
+fn connection_config(saved: &RdpConfig, layout: (f32, f32), device_scale: f32) -> RdpConfig {
+    let mut config = saved.clone();
+    config.desktop_scale = Some(
+        saved
+            .desktop_scale
+            .unwrap_or_else(|| automatic_desktop_scale(device_scale)),
+    );
+    if config.uses_dynamic_resolution()
+        && let Some((width, height)) = resize_dimensions(layout, device_scale)
+    {
+        config.width = width;
+        config.height = height;
+    }
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_handshake_uses_the_available_pane_and_keeps_saved_preferences() {
+        let saved = RdpConfig::default();
+        let before = saved.clone();
+        let config = connection_config(&saved, (1441., 900. + ui::PANE_HEADER_HEIGHT), 1.25);
+        assert_eq!((config.width, config.height), (1800, 1125));
+        assert_eq!(config.desktop_scale, Some(125));
+        assert_eq!(saved, before);
+    }
+
+    #[test]
+    fn fixed_remote_app_and_multi_monitor_connections_keep_their_initial_size() {
+        let fixed = RdpConfig {
+            width: 1920,
+            height: 1080,
+            dynamic_resolution: false,
+            ..Default::default()
+        };
+        let multi = RdpConfig {
+            monitor_count: 2,
+            dynamic_resolution: true,
+            ..fixed.clone()
+        };
+        let application = RdpConfig {
+            dynamic_resolution: true,
+            remote_app: Some(rustterm::config::RdpRemoteApp {
+                program: "||notepad".into(),
+                ..Default::default()
+            }),
+            ..fixed.clone()
+        };
+        for saved in [fixed, multi, application] {
+            let config = connection_config(&saved, (800., 600.), 2.);
+            assert_eq!((config.width, config.height), (1920, 1080));
+        }
+    }
+
+    #[test]
+    fn unmeasured_panes_keep_the_fallback_and_explicit_desktop_scale() {
+        let saved = RdpConfig {
+            desktop_scale: Some(100),
+            ..Default::default()
+        };
+        for layout in [(0., 0.), (800., ui::PANE_HEADER_HEIGHT)] {
+            let config = connection_config(&saved, layout, 2.);
+            assert_eq!((config.width, config.height), (saved.width, saved.height));
+            assert_eq!(config.desktop_scale, Some(100));
+        }
     }
 }

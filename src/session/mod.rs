@@ -2,6 +2,8 @@
 //! Hiding only suppresses snapshots; disconnecting freezes a readable archive;
 //! closing releases the actor and its retained history.
 
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 mod actor;
@@ -17,6 +19,7 @@ mod resources;
 mod sftp;
 mod ssh;
 mod state;
+pub(crate) mod stream;
 mod telnet;
 mod transport;
 mod zmodem;
@@ -336,7 +339,16 @@ impl Session {
         Ok(handle)
     }
     pub fn spawn_telnet(
+        options: TelnetOptions,
+        columns: u16,
+        rows: u16,
+        history: usize,
+    ) -> Result<Self> {
+        Self::spawn_telnet_with_ssh(options, None, columns, rows, history)
+    }
+    pub fn spawn_telnet_with_ssh(
         mut options: TelnetOptions,
+        ssh: Option<SshOptions>,
         columns: u16,
         rows: u16,
         history: usize,
@@ -351,6 +363,7 @@ impl Session {
         handle.shared.local_echo.store(true, Ordering::Release);
         runtime.spawn(telnet::run(
             options,
+            ssh,
             terminal,
             columns,
             rows,
@@ -682,10 +695,10 @@ impl Session {
     /// Disconnect transport and retain a frozen, searchable, selectable terminal.
     pub fn disconnect(&self) {
         if !self.shared.io_stop.is_cancelled() {
-            // Cancellation precedes the state lock so a late handshake callback
-            // cannot publish an active state after Closing/Disconnected.
+            // Record intent before waking workers; late handshake events cannot
+            // revive the connection, and accepted input loss remains reportable.
+            self.shared.transition(LifecycleEvent::Closing);
             self.shared.io_stop.cancel();
-            self.shared.closing();
             self.shared
                 .trust
                 .lock()
@@ -695,8 +708,11 @@ impl Session {
     }
     /// Release both transport and archive. This operation never joins on the UI.
     pub fn close(&self) {
-        self.disconnect();
+        // Release is part of the lifecycle, so late worker failures cannot
+        // overwrite an intentional close even before cancellation is observed.
+        self.shared.transition(LifecycleEvent::Released);
         self.shared.actor_stop.cancel();
+        self.disconnect();
         budget::rebalance();
     }
 }
@@ -748,10 +764,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn closing_does_not_report_input_loss_but_disconnect_keeps_the_warning() {
+        use std::{
+            future::Future,
+            pin::pin,
+            task::{Context, Wake, Waker},
+        };
+        struct InputLossOnCancel(Arc<Shared>);
+        impl Wake for InputLossOnCancel {
+            fn wake(self: Arc<Self>) {
+                // Run the worker's notification synchronously when cancellation
+                // wakes it, exercising the close race without scheduling or sleeps.
+                self.0.report_input_loss();
+            }
+        }
+        for close in [true, false] {
+            let shared = Shared::new(&Terminal::new(80, 24, 10));
+            shared.transition(LifecycleEvent::Connected);
+            let (commands, _receiver) = mpsc::channel(1);
+            let session = Session {
+                commands,
+                shared: shared.clone(),
+            };
+            session.send(Command::Input(b"pending".to_vec())).unwrap();
+            let waker = Waker::from(Arc::new(InputLossOnCancel(shared.clone())));
+            let mut cancellation = pin!(shared.io_stop.cancelled());
+            assert!(
+                cancellation
+                    .as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            if close {
+                session.close();
+                assert_eq!(session.state(), SessionState::Closing);
+                assert!(!shared.input_loss_reported());
+            } else {
+                session.disconnect();
+                assert!(matches!(
+                    session.state(),
+                    SessionState::Failed {
+                        kind: FailureKind::Write,
+                        ..
+                    }
+                ));
+                assert!(shared.input_loss_reported());
+            }
+        }
+    }
+
+    #[test]
     fn rejected_input_is_not_counted_as_an_accepted_submission() {
         let terminal = Terminal::new(80, 24, 10);
         let shared = Shared::new(&terminal);
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         let (commands, _receiver) = mpsc::channel(1);
         let session = Session {
             commands,

@@ -97,13 +97,13 @@ class ReleaseTests(unittest.TestCase):
         deb_fixture(self.directory)
 
     def test_tag_must_match_manifest_and_full_toolchain(self):
-        package = {'version': VERSION, 'rust-version': '1.99.1'}
+        package = {'version': VERSION, 'rust-version': '1.100.0'}
         self.assertEqual(artifacts.version_info(VERSION, package)['prerelease'], 'false')
         for tag in ['v1.2.3', '1.2.4', '01.2.3', '1.2.3\n']:
             with self.subTest(tag=tag), self.assertRaises(ValueError):
                 artifacts.version_info(tag, package)
         with self.assertRaises(ValueError):
-            artifacts.version_info(VERSION, dict(package, **{'rust-version': '1.99'}))
+            artifacts.version_info(VERSION, dict(package, **{'rust-version': '1.100'}))
 
     def test_ignored_files_cannot_be_published_from_git(self):
         with patch.object(artifacts, 'version_info', return_value={'version': VERSION}), \
@@ -111,6 +111,40 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'still tracked'):
                 artifacts.metadata(VERSION)
             git.assert_called_once()
+
+    def test_cargo_allowlist_excludes_nested_metadata_and_generated_files(self):
+        include = artifacts.package_info()['include']
+        source = self.directory / 'source'
+        source.mkdir()
+        (source / 'Cargo.toml').write_text(
+            '[package]\nname = "package-fixture"\nversion = "0.1.0"\nedition = "2024"\n'
+            f'include = {json.dumps(include)}\n', encoding='utf-8')
+        public = {
+            'README.md', 'LICENSE', 'build.rs', 'src/main.rs',
+            'src/update/installer/install.py', 'src/terminal/integration/remote.bash',
+            'src/terminal/integration/remote.zsh', 'src/terminal/integration/remote.fish',
+            'src/session/resources/collect.sh', 'tests/pty.rs',
+            'tests/fixtures/elasticsearch/ca.pem', 'assets/windows.rc',
+            'assets/brand/rustterm.ico', 'assets/icons/terminal.svg',
+            'assets/locales/languages.json', 'assets/locales/en/common.ftl',
+        }
+        private = {
+            '.private/README.md', '.private/archive/README.md', '.private/LICENSE',
+            '.private/build.rs', '.private/Cargo.lock',
+            'src/update/installer/__pycache__/install.cpython-314.pyc',
+            'src/update/installer/install.py.bak', 'src/diagnostics.log',
+            'tests/__pycache__/helper.pyc',
+        }
+        for relative in public | private:
+            path = source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('fixture\n', encoding='utf-8')
+        result = subprocess.run(
+            ['cargo', 'package', '--list', '--offline'], cwd=source,
+            capture_output=True, text=True, timeout=30, check=True)
+        packaged = set(result.stdout.splitlines())
+        self.assertFalse(private & packaged)
+        self.assertTrue(public <= packaged, public - packaged)
 
     def test_release_flags_handle_spaces_and_strip_build_paths(self):
         checkout = self.directory / 'checkout with spaces'
@@ -198,10 +232,10 @@ class ReleaseTests(unittest.TestCase):
 
     def test_prerelease_and_build_metadata(self):
         for version, expected in [('1.2.3-rc.1', 'true'), ('1.2.3+build.2', 'false')]:
-            package = {'version': version, 'rust-version': '1.99.1'}
+            package = {'version': version, 'rust-version': '1.100.0'}
             self.assertEqual(artifacts.version_info(version, package)['prerelease'], expected)
         with self.assertRaises(ValueError):
-            artifacts.version_info('1.2.3-01', {'version': '1.2.3-01', 'rust-version': '1.99.1'})
+            artifacts.version_info('1.2.3-01', {'version': '1.2.3-01', 'rust-version': '1.100.0'})
 
     def test_complete_release_generates_checksums(self):
         self.pair()
@@ -310,6 +344,10 @@ class ReleaseTests(unittest.TestCase):
             artifacts.verify_release(self.directory, VERSION)
 
     def test_windows_packager_builds_portable_zip_without_running_executable(self):
+        archive = self.package_windows_fixture()
+        artifacts.verify_archive(archive, artifacts.package_info()['version'], 'windows-x86_64')
+
+    def package_windows_fixture(self):
         # A PE header is sufficient: packaging must not gate publication on GUI runtime checks.
         binary = self.directory / 'rustterm.exe'
         header = bytearray(128)
@@ -331,7 +369,17 @@ class ReleaseTests(unittest.TestCase):
             self.assertIn('+crt-static', build.call_args.kwargs['env']['CARGO_ENCODED_RUSTFLAGS'])
         version = artifacts.package_info()['version']
         archive = options.output / f'rustterm-{version}-windows-x86_64.zip'
-        artifacts.verify_archive(archive, version, 'windows-x86_64')
+        return archive
+
+    def test_windows_package_layout_is_taken_from_manifest_metadata(self):
+        info = artifacts.package_info()
+        info['metadata']['rustterm']['windows']['files']['NOTICE.txt'] = 'README.md'
+        with patch.object(artifacts, 'package_info', return_value=info):
+            archive = self.package_windows_fixture()
+            artifacts.verify_archive(archive, info['version'], 'windows-x86_64')
+        with zipfile.ZipFile(archive) as package:
+            self.assertEqual(package.read(f"rustterm-{info['version']}-windows-x86_64/NOTICE.txt"),
+                             (artifacts.ROOT / 'README.md').read_bytes())
 
     def test_uploaded_digest_and_asset_set_are_verified(self):
         self.pair()

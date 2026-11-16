@@ -328,7 +328,7 @@ rdp-the-clipboard-changed-while-reading-files-copy-and-paste-again = 读取期�
 
 rdp-the-clipboard-contains-an-invalid-file-list = 剪贴板内容无效或不受支持
 
-rdp-the-clipboard-file-list-is-too-large-select-fewer-files = 剪贴板中的文件列表过大，请减少所选文件
+rdp-the-clipboard-file-list-is-too-large-select-fewer-files = 剪贴板内容过大，请复制较小的图片或减少所选文件
 
 rdp-the-desktop-did-not-grant-exclusive-keyboard-control = 桌面系统未授予独占键盘控制。
 

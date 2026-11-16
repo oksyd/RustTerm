@@ -152,6 +152,11 @@ impl Drop for InputWorker {
 
 #[cfg(test)]
 pub(super) fn test_session() -> rustrdp::Session {
+    test_session_with_tail().0
+}
+
+#[cfg(test)]
+pub(super) fn test_session_with_tail() -> (rustrdp::Session, &'static [u8]) {
     let config = rustrdp::ClientConfig {
         username: "offline-example".into(),
         width: 320,
@@ -174,7 +179,7 @@ pub(super) fn test_session() -> rustrdp::Session {
             session = connector.advance(packet).unwrap().session;
         }
         if session.as_ref().is_some_and(rustrdp::Session::is_active) {
-            return session.unwrap();
+            return (session.unwrap(), bytes);
         }
     }
     panic!("offline fixture did not activate a desktop");

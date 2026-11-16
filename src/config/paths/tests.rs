@@ -15,6 +15,7 @@ fn with_workspace() -> AppConfig {
     config.workspace = WorkspaceSnapshot {
         layout: SavedWorkspace {
             tabs: vec![SavedTab {
+                pinned: false,
                 title: "Local".into(),
                 layout: SavedLayout::Pane { index: 0 },
             }],

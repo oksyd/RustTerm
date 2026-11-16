@@ -289,6 +289,9 @@ impl Workspace {
                             .child(tr(label).to_owned()),
                     )
                     .when(submenu, |d| d.child(icon(Icon::ChevronRight).size(px(12.))))
+                    .when(matches!(action, MenuAction::ActivateTab(id) if self.tabs.iter().any(|tab| tab.id == id && tab.pinned)), |d| {
+                        d.child(icon(Icon::Pin).size(px(12.)).text_color(rgb(ui::colors().muted)))
+                    })
                     .when(!submenu && !shortcut.is_empty(), |d| {
                         d.child(
                             div()

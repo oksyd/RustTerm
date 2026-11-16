@@ -12,7 +12,10 @@ enum Origin {
     #[default]
     Unobserved,
     Local,
-    Remote(ClipboardRead),
+    Remote {
+        local: ClipboardRead,
+        sequence: Option<u32>,
+    },
     RemoteFiles(CancellationToken),
     RemoteContent {
         ownership: CancellationToken,
@@ -20,6 +23,7 @@ enum Origin {
     },
     Files {
         selected: Option<ClipboardRead>,
+        sequence: Option<u32>,
     },
 }
 
@@ -100,8 +104,36 @@ impl ClipboardState {
         self.feedback = Some(Feedback::Waiting);
     }
 
+    pub(super) fn local_image(&mut self, sequence: Option<u32>) {
+        if sequence.is_some()
+            && matches!(&self.origin,
+            Origin::Remote { sequence: previous, .. } | Origin::Files { sequence: previous, .. }
+                if *previous == sequence)
+        {
+            return; // No new local copy since the remote gesture or file selection.
+        }
+        if matches!(&self.origin, Origin::RemoteContent { ownership, .. } if !ownership.is_cancelled())
+        {
+            return; // Our own native export still belongs to the remote copy.
+        }
+        // An image and an empty clipboard both have no plain text. Observing
+        // native image data supersedes any earlier text-based ownership guess.
+        self.origin = Origin::Local;
+        self.export = None;
+    }
+
+    pub(super) fn image_text(&self) -> Option<String> {
+        match &self.origin {
+            Origin::RemoteContent { ownership, text } if !ownership.is_cancelled() => text.clone(),
+            _ => None,
+        }
+    }
+
     pub(super) fn publish_files(&mut self, selected: Option<ClipboardRead>) {
-        self.origin = Origin::Files { selected };
+        self.origin = Origin::Files {
+            selected,
+            sequence: None,
+        };
         self.files_ready = false;
         self.export = None;
         self.feedback = Some(Feedback::Waiting);
@@ -112,11 +144,17 @@ impl ClipboardState {
     }
 
     pub(super) fn has_selected_files(&self) -> bool {
-        matches!(self.origin, Origin::Files { selected: Some(_) })
+        matches!(
+            self.origin,
+            Origin::Files {
+                selected: Some(_),
+                ..
+            }
+        )
     }
 
     pub(super) fn prefers_files(&self, local: &ClipboardRead) -> bool {
-        matches!(&self.origin, Origin::Files { selected: Some(snapshot) }
+        matches!(&self.origin, Origin::Files { selected: Some(snapshot), .. }
             if snapshot.is_ok() && snapshot == local)
     }
 
@@ -132,7 +170,22 @@ impl ClipboardState {
     }
 
     pub(super) fn remote_copy(&mut self, local: ClipboardRead) {
-        self.origin = Origin::Remote(local);
+        self.origin = Origin::Remote {
+            local,
+            sequence: None,
+        };
+    }
+
+    pub(super) fn remember_native_copy(&mut self, sequence: Option<u32>) {
+        match &mut self.origin {
+            Origin::Remote {
+                sequence: previous, ..
+            }
+            | Origin::Files {
+                sequence: previous, ..
+            } => *previous = sequence,
+            _ => {}
+        }
     }
 
     pub(super) fn begin_control(&mut self) {
@@ -140,13 +193,13 @@ impl ClipboardState {
         // A new interaction with this desktop must use the current host text,
         // rather than inheriting a previous remote-copy gesture. Remote files
         // have their own native ownership token and keep that authority.
-        if matches!(self.origin, Origin::Remote(_)) {
+        if matches!(self.origin, Origin::Remote { .. }) {
             self.origin = Origin::Unobserved;
         }
     }
 
     pub(super) fn expect_remote_copy(&mut self, local: ClipboardRead) {
-        self.origin = Origin::Remote(local.clone());
+        self.remote_copy(local.clone());
         self.export = Some(Export {
             local,
             stage: ExportStage::AwaitingOffer,
@@ -226,7 +279,9 @@ impl ClipboardState {
 
     pub(super) fn prefers_remote(&self, local: &ClipboardRead) -> bool {
         match &self.origin {
-            Origin::Remote(snapshot) => snapshot.is_ok() && snapshot == local,
+            Origin::Remote {
+                local: snapshot, ..
+            } => snapshot.is_ok() && snapshot == local,
             Origin::RemoteFiles(ownership) => !ownership.is_cancelled() && *local == Ok(None),
             Origin::RemoteContent { ownership, text } => {
                 !ownership.is_cancelled() && local.as_ref().is_ok_and(|local| local == text)
@@ -314,6 +369,55 @@ mod tests {
     use super::*;
     use rustterm::rdp::RdpEvent;
     use tokio::sync::mpsc;
+
+    #[test]
+    fn existing_local_images_do_not_interrupt_remote_copy_or_selected_files() {
+        let mut clipboard = ClipboardState::default();
+        clipboard.expect_remote_copy(Ok(None));
+        clipboard.remember_native_copy(Some(41));
+        clipboard.local_image(Some(41));
+        assert!(clipboard.prefers_remote(&Ok(None))); // Ctrl+C then immediate Ctrl+V remotely.
+        clipboard.local_image(Some(42));
+        assert!(!clipboard.prefers_remote(&Ok(None))); // A new host copy takes priority.
+
+        clipboard.publish_files(Some(Ok(None)));
+        clipboard.remember_native_copy(Some(43));
+        clipboard.local_image(Some(43));
+        assert!(clipboard.prefers_files(&Ok(None)));
+        clipboard.local_image(Some(44));
+        assert!(!clipboard.prefers_files(&Ok(None)));
+
+        clipboard.remote_content(CancellationToken::new(), Some("image caption".into()));
+        clipboard.local_image(Some(45));
+        assert!(clipboard.prefers_remote(&Ok(clipboard.image_text())));
+    }
+
+    #[test]
+    fn copying_a_local_image_supersedes_remote_and_selected_file_offers() {
+        let mut clipboard = ClipboardState::default();
+        clipboard.expect_remote_copy(Ok(None));
+        assert!(clipboard.prefers_remote(&Ok(None)));
+        clipboard.local_image(None);
+        assert!(!clipboard.prefers_remote(&Ok(None)));
+        assert!(!clipboard.has_export());
+
+        clipboard.publish_files(Some(Ok(None)));
+        assert!(clipboard.prefers_files(&Ok(None)));
+        clipboard.local_image(None);
+        assert!(!clipboard.prefers_files(&Ok(None)));
+        assert!(!clipboard.has_selected_files());
+
+        clipboard.remote_files(CancellationToken::new());
+        clipboard.local_image(None);
+        assert!(!clipboard.prefers_remote(&Ok(None)));
+        let ownership = CancellationToken::new();
+        clipboard.remote_content(ownership.clone(), None);
+        clipboard.local_image(None);
+        assert!(clipboard.prefers_remote(&Ok(None)));
+        ownership.cancel();
+        clipboard.local_image(None);
+        assert!(!clipboard.prefers_remote(&Ok(None)));
+    }
 
     #[test]
     fn replacing_remote_files_with_local_files_revokes_remote_paste_preference() {

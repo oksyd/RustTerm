@@ -3,10 +3,11 @@
 use rustterm::i18n::messages as i18n_key;
 mod content;
 pub(super) mod export;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(target_os = "linux")]
 pub(super) use content::from_mime;
-pub(super) use content::to_mime;
 
 pub(super) enum SelectionData {
     Files(Vec<PathBuf>),
@@ -68,6 +69,29 @@ impl ReadError {
     }
 }
 
+/// Query formats only; copying and decoding image data belongs on the worker.
+pub(super) fn image_available() -> bool {
+    #[cfg(windows)]
+    {
+        windows::image_available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub(super) fn sequence() -> Option<u32> {
+    #[cfg(windows)]
+    {
+        Some(windows::clipboard_sequence())
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Call on a background executor. No selection data is cached between paste gestures.
 /// Xwayland can provide the same X11 clipboard bridge in a Wayland session.
 pub(super) fn read(
@@ -81,7 +105,12 @@ pub(super) fn read(
     {
         x11::read(cancel, files)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        let _ = files;
+        windows::read(cancel)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = files;
         Err(ReadError::Unavailable)

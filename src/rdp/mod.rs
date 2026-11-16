@@ -54,6 +54,11 @@ const COMMAND_BYTE_LIMIT: usize = MAX_CLIPBOARD_CONTENT_BYTES + 2 * MAX_CLIPBOAR
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RdpError {
+    #[error("{message}")]
+    Ssh {
+        kind: crate::session::FailureKind,
+        message: String,
+    },
     #[error("{}", crate::i18n::tr(i18n_key::RDP_INVALID_RDP_CONNECTION_SETTINGS))]
     InvalidConfig,
     #[error(
@@ -164,6 +169,7 @@ pub type Result<T> = std::result::Result<T, RdpError>;
 impl RdpError {
     pub fn diagnostic_code(&self) -> &'static str {
         match self {
+            Self::Ssh { .. } => "rdp-error-ssh",
             Self::InvalidConfig => "rdp-error-invalid-config",
             Self::Connection => "rdp-error-connection",
             Self::Network { failure, .. } => failure.code(),
@@ -312,6 +318,7 @@ pub enum CertificateDecision {
 }
 
 pub enum RdpEvent {
+    SshHostKey(crate::session::HostKeyChallenge),
     RemoteApp(rustrdp::remote_app::RemoteAppEvent),
     Connecting,
     Connected,
@@ -676,10 +683,22 @@ impl RdpClient {
 
     /// Use the application's selected cache root. None disables clipboard file staging.
     pub fn connect_with_cache_directory(
-        mut config: RdpConfig,
+        config: RdpConfig,
         password: Secret,
         cache_directory: Option<std::path::PathBuf>,
     ) -> Result<RdpHandle> {
+        Self::connect_with_ssh(config, password, cache_directory, None)
+    }
+
+    pub fn connect_with_ssh(
+        config: RdpConfig,
+        password: Secret,
+        cache_directory: Option<std::path::PathBuf>,
+        ssh: Option<crate::session::SshOptions>,
+    ) -> Result<RdpHandle> {
+        let connection = crate::connection_route::Prepared::resolve(config, ssh)
+            .map_err(|_| RdpError::InvalidConfig)?;
+        let (mut config, route) = connection.into_parts();
         config.validate().map_err(|_| RdpError::InvalidConfig)?;
         config.host = crate::config::known_hosts::normalize_host(&config.host)
             .map_err(|_| RdpError::InvalidConfig)?;
@@ -714,7 +733,8 @@ impl RdpClient {
                 capture_transmission: capture_transmission.clone(),
             }),
         };
-        let redirection = protocol::RedirectionState {
+        let mut redirection = protocol::RedirectionState {
+            tunnel: None,
             pointer: pointer_tx,
             cache_directory,
             presentation,
@@ -728,7 +748,12 @@ impl RdpClient {
             let result = tokio::select! {
                 biased;
                 _ = stop.cancelled() => Ok(()),
-                result = protocol::run(config, password, commands, &events_tx, frames_tx, presented, redirection) => result,
+                result = async {
+                    if let crate::connection_route::Route::Ssh(ssh) = route {
+                        redirection.tunnel = Some(open_ssh_tunnel(ssh, &events_tx, stop.clone()).await?);
+                    }
+                    protocol::run(config, password, commands, &events_tx, frames_tx, presented, redirection).await
+                } => result,
             };
             // Cancellation drops the socket even during TLS/NLA, writes, or a trust prompt.
             let event = match result {
@@ -749,14 +774,16 @@ impl RdpClient {
 /// Verifies TLS and NLA without joining channels or activating a remote desktop.
 /// Certificate decisions use the same trust gate as an interactive connection.
 pub(crate) async fn probe(
-    mut config: RdpConfig,
+    connection: crate::connection_route::Prepared<RdpConfig, crate::session::TunnelConnector>,
     password: Secret,
     events: &mpsc::Sender<RdpEvent>,
 ) -> Result<()> {
+    let (mut config, route) = connection.into_parts();
+    let tunnel = route.into_option();
     config.validate().map_err(|_| RdpError::InvalidConfig)?;
     config.host = crate::config::known_hosts::normalize_host(&config.host)
         .map_err(|_| RdpError::InvalidConfig)?;
-    protocol::probe(config, password, events).await
+    protocol::probe(config, password, events, tunnel).await
 }
 
 fn check_dimensions(width: u16, height: u16) -> Result<()> {
@@ -781,6 +808,22 @@ fn create_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .thread_name("rustterm-rdp")
         .enable_all()
         .build()
+}
+
+async fn open_ssh_tunnel(
+    options: crate::session::SshOptions,
+    events: &mpsc::Sender<RdpEvent>,
+    stop: CancellationToken,
+) -> Result<crate::session::TunnelConnector> {
+    let (trust, mut requests) = mpsc::channel(1);
+    let connection = crate::session::connect_tunnel(options, trust, stop);
+    tokio::pin!(connection);
+    loop {
+        tokio::select! {
+            result = &mut connection => return result.map_err(|(kind, message)| RdpError::Ssh { kind, message }),
+            Some(challenge) = requests.recv() => events.send(RdpEvent::SshHostKey(challenge)).await.map_err(|_| RdpError::Disconnected)?,
+        }
+    }
 }
 
 #[cfg(test)]

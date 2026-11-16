@@ -734,3 +734,17 @@ connections-advanced-tab = Advanced
 connections-launch-options = Optional launch parameters
 connections-configured = Configured
 connections-query-timeout-summary = Query timeout: { $seconds } s
+
+connections-invalid-ssh-route = The SSH tunnel must reference an existing SSH connection.
+
+connections-ssh-fingerprint-tunnel =
+    SSH host: { $host }:{ $port }
+    Algorithm: { $algorithm }
+    SHA-256 fingerprint: { $fingerprint }
+
+    This SSH connection will carry traffic to { $target }:{ $target_port }. Verify the fingerprint through a trusted channel before saving.
+
+
+connections-ssh-route-help = The SSH server reaches the target host and port. TLS still verifies the target hostname.
+connections-ssh-route-unavailable = The SSH connection for this tunnel is unavailable. Edit the tunnel settings before reconnecting.
+connections-ssh-route-in-use = This SSH connection is used by other connections. Change their tunnel settings before deleting it.

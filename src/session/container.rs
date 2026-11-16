@@ -1,5 +1,7 @@
+use crate::session::state::LifecycleEvent;
+
 use super::{
-    ActorCommand, FailureKind, SessionState, actor,
+    ActorCommand, FailureKind, actor,
     state::Shared,
     transport::{
         OUTPUT_CAPACITY, Output, Transport, WRITE_CAPACITY, WRITE_STALL_TIMEOUT, WriteCommand,
@@ -118,7 +120,7 @@ pub(super) async fn run(
                     tokio::select! { _=resize_shared.io_stop.cancelled()=>break, result=sizes.changed()=>if result.is_err() { break; } }
                 }
             });
-            shared.live_state(SessionState::Connected);
+            shared.transition(LifecycleEvent::Connected);
             Some(Transport {
                 output,
                 input,
@@ -129,9 +131,12 @@ pub(super) async fn run(
         }
         Err(error) => {
             if shared.io_stop.is_cancelled() {
-                shared.state(SessionState::Disconnected { exit_code: None });
+                shared.transition(LifecycleEvent::Disconnected { exit_code: None });
             } else {
-                shared.failed(FailureKind::Protocol, error.to_string());
+                shared.transition(LifecycleEvent::failed(
+                    FailureKind::Protocol,
+                    error.to_string(),
+                ));
             }
             None
         }

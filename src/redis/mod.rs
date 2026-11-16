@@ -312,22 +312,13 @@ struct Request {
     deadline: Instant,
     reply: oneshot::Sender<Result<Response>>,
 }
-enum Route {
-    Direct,
-    Ssh {
-        options: Box<crate::session::SshOptions>,
-        trust: mpsc::Sender<crate::session::HostKeyChallenge>,
-    },
-}
-
-struct CancelOnDrop(Option<CancellationToken>);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        if let Some(stop) = &self.0 {
-            stop.cancel();
-        }
-    }
-}
+type Prepared = crate::connection_route::Prepared<
+    RedisConfig,
+    (
+        crate::session::SshOptions,
+        mpsc::Sender<crate::session::HostKeyChallenge>,
+    ),
+>;
 
 fn runtime() -> Result<&'static Runtime> {
     static RUNTIME: OnceLock<std::result::Result<Runtime, std::io::Error>> = OnceLock::new();
@@ -381,11 +372,8 @@ impl RedisClient {
         }
     }
     pub async fn connect(config: RedisConfig, secret: Option<Secret>) -> Result<Self> {
-        // A missing launch resolver must never silently bypass a configured tunnel.
-        if config.ssh_profile.is_some() {
-            return Err(RedisError::InvalidConfig);
-        }
-        Self::connect_route(config, secret, None, Route::Direct).await
+        let connection = Prepared::resolve(config, None).map_err(|_| RedisError::InvalidConfig)?;
+        Self::connect_prepared(connection, secret, None).await
     }
     pub async fn connect_via_ssh(
         config: RedisConfig,
@@ -393,16 +381,7 @@ impl RedisClient {
         ssh: crate::session::SshOptions,
         trust: mpsc::Sender<crate::session::HostKeyChallenge>,
     ) -> Result<Self> {
-        Self::connect_route(
-            config,
-            secret,
-            None,
-            Route::Ssh {
-                options: Box::new(ssh),
-                trust,
-            },
-        )
-        .await
+        Self::connect_prepared(Prepared::via_ssh(config, (ssh, trust)), secret, None).await
     }
     pub async fn connect_authenticated(
         config: RedisConfig,
@@ -413,24 +392,15 @@ impl RedisClient {
             mpsc::Sender<crate::session::HostKeyChallenge>,
         )>,
     ) -> Result<Self> {
-        let route = match ssh {
-            Some((options, trust)) => Route::Ssh {
-                options: Box::new(options),
-                trust,
-            },
-            None => Route::Direct,
-        };
-        if config.ssh_profile.is_some() && matches!(route, Route::Direct) {
-            return Err(RedisError::InvalidConfig);
-        }
-        Self::connect_route(config, secret, sentinel_secret, route).await
+        let connection = Prepared::resolve(config, ssh).map_err(|_| RedisError::InvalidConfig)?;
+        Self::connect_prepared(connection, secret, sentinel_secret).await
     }
-    async fn connect_route(
-        config: RedisConfig,
+    pub(crate) async fn connect_prepared(
+        connection: Prepared,
         secret: Option<Secret>,
         sentinel_secret: Option<Secret>,
-        route: Route,
     ) -> Result<Self> {
+        let (config, route) = connection.into_parts();
         config.validate().map_err(|_| RedisError::InvalidConfig)?;
         if [secret.as_ref(), sentinel_secret.as_ref()]
             .into_iter()
@@ -441,16 +411,16 @@ impl RedisClient {
         }
         let timeout = Duration::from_secs(config.timeout_secs);
         let stop = CancellationToken::new();
-        let mut cancel = CancelOnDrop(Some(stop.clone()));
+        let cancel = stop.clone().drop_guard();
         let (queue, receive) = mpsc::channel(QUEUE_CAPACITY);
         let (send, connected) = oneshot::channel();
         let worker_stop = stop.clone();
         runtime()?.spawn(async move {
             let open = async {
                 let tunnel = match route {
-                    Route::Direct => None,
-                    Route::Ssh { options, trust } => Some(
-                        crate::session::connect_tunnel(*options, trust, worker_stop.child_token())
+                    crate::connection_route::Route::Direct => None,
+                    crate::connection_route::Route::Ssh((options, trust)) => Some(
+                        crate::session::connect_tunnel(options, trust, worker_stop.child_token())
                             .await
                             .map_err(|(kind, _)| ssh_error(kind))?,
                     ),
@@ -480,7 +450,7 @@ impl RedisClient {
             }
         });
         connected.await.map_err(|_| RedisError::Disconnected)??;
-        cancel.0 = None;
+        cancel.disarm();
         Ok(Self(Arc::new(Inner {
             queue,
             stop,
@@ -563,9 +533,9 @@ impl RedisClient {
                 mpsc::error::TrySendError::Closed(_) => RedisError::Disconnected,
             })?;
         // Cancelling the caller closes the underlying socket, including an in-flight write.
-        let mut cancel = CancelOnDrop(Some(self.0.stop.clone()));
+        let cancel = self.0.stop.clone().drop_guard();
         let result = response.await.map_err(|_| RedisError::Disconnected)?;
-        cancel.0 = None;
+        cancel.disarm();
         result
     }
 }

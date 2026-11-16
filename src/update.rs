@@ -1,7 +1,12 @@
 //! Release updates use authenticated HTTPS, bounded downloads, verified archives,
-//! and either APT or the transactional user-prefix installer.
+//! and transactional installation for Linux packages and Windows portable ZIPs.
 mod debian;
 mod install;
+mod portable;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{cleanup_completed_updates, recover_interrupted_update, run_update_helper};
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 
@@ -292,11 +297,16 @@ pub fn download_and_install(
 ) -> Result<()> {
     installation.validate()?;
     ensure!(
-        release.archive.name.ends_with(if installation.is_debian() {
-            ".deb"
-        } else {
-            ".tar.gz"
-        }),
+        release
+            .archive
+            .name
+            .ends_with(if installation.is_portable() {
+                ".zip"
+            } else if installation.is_debian() {
+                ".deb"
+            } else {
+                ".tar.gz"
+            }),
         "The update package does not match the installation method"
     );
     let agent = client(proxy, Duration::from_secs(20 * 60))?;
@@ -318,7 +328,9 @@ pub fn download_and_install(
     let staging = tempfile::Builder::new()
         .prefix("rustterm-update-")
         .tempdir()?;
-    let archive_path = staging.path().join(if installation.is_debian() {
+    let archive_path = staging.path().join(if installation.is_portable() {
+        "release.zip"
+    } else if installation.is_debian() {
         "rustterm-update.deb"
     } else {
         "release.tar.gz"
@@ -337,7 +349,9 @@ pub fn download_and_install(
     drop(archive);
     progress(Progress::Verifying);
     cancelled(cancel)?;
-    let package = if installation.is_debian() {
+    let package = if installation.is_portable() {
+        portable::unpack(&archive_path, staging.path(), release)?
+    } else if installation.is_debian() {
         debian::verify_package(&archive_path, &release.version)?;
         archive_path
     } else {
@@ -347,7 +361,9 @@ pub fn download_and_install(
     installation.validate()?;
     let _installing = cancel.begin_install()?;
     progress(Progress::Installing);
-    if installation.is_debian() {
+    if installation.is_portable() {
+        installation.prepare_portable(&package, &release.version)?;
+    } else if installation.is_debian() {
         debian::install(&package, &release.version, proxy)?;
     } else {
         installation.install(&package)?;

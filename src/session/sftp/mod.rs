@@ -297,7 +297,7 @@ impl SftpClient {
         }
         let cancel = self.0.stop.child_token();
         // A dropped UI request cancels its worker, which still awaits cleanup.
-        let _cancel_on_drop = CancelOnDrop(cancel.clone());
+        let _cancel_on_drop = cancel.clone().drop_guard();
         let inner = self.0.clone();
         let (send, receive) = oneshot::channel();
         super::runtime()
@@ -432,13 +432,6 @@ async fn bounded<T, E: Into<SftpError>>(
         biased;
         _ = cancel.cancelled() => Err(SftpError::Cancelled),
         result = tokio::time::timeout(timeout, future) => result.map_err(|_| SftpError::Timeout)?.map_err(Into::into),
-    }
-}
-
-struct CancelOnDrop(CancellationToken);
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel();
     }
 }
 

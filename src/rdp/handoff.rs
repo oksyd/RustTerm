@@ -51,7 +51,7 @@ impl Handoff {
             return Err(RdpError::Protocol("empty handoff token"));
         }
         let encoded = field(&mut data, 32768)?;
-        let encoded_certificate = unicode_body(encoded.strip_suffix(&[0, 0]).unwrap_or(encoded))?;
+        let encoded_certificate = unicode_body(encoded.trim_suffix(&[0, 0]))?;
         let certificate_container = STANDARD
             .decode(encoded_certificate)
             .map_err(|_| RdpError::Protocol("redirection certificate encoding"))?;

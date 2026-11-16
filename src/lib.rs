@@ -6,6 +6,7 @@
 pub mod app_lock;
 pub mod config;
 pub mod connection_probe;
+mod connection_route;
 pub mod database;
 pub mod docker;
 pub mod elasticsearch;

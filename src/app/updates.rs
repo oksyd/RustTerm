@@ -17,6 +17,7 @@ pub enum Status {
     Verifying,
     Installing,
     Installed,
+    Ready,
 }
 
 pub struct Updates {
@@ -40,7 +41,7 @@ impl Updates {
                     .update(cx, |this, cx| {
                         if this.automatic
                             && !this.busy()
-                            && !matches!(this.status, Status::Installed)
+                            && !matches!(this.status, Status::Installed | Status::Ready)
                         {
                             this.check(this.proxy.clone(), cx);
                         }
@@ -127,11 +128,12 @@ impl Updates {
             Status::Verifying => key::UPDATES_VERIFYING.into(),
             Status::Installing => key::UPDATES_INSTALLING.into(),
             Status::Installed => rustterm::msg!(key::UPDATES_INSTALLED, version = version),
+            Status::Ready => rustterm::msg!(key::UPDATES_READY, version = version),
         }
     }
 
     pub fn check(&mut self, proxy: String, cx: &mut Context<Self>) {
-        if self.busy() || matches!(self.status, Status::Installed) {
+        if self.busy() || matches!(self.status, Status::Installed | Status::Ready) {
             return;
         }
         self.status = Status::Checking;
@@ -168,7 +170,7 @@ impl Updates {
     }
 
     pub fn install(&mut self, proxy: String, cx: &mut Context<Self>) {
-        if self.busy() || matches!(self.status, Status::Installed) {
+        if self.busy() || matches!(self.status, Status::Installed | Status::Ready) {
             return;
         }
         let (Some(release), Some(installation)) = (self.release.clone(), self.installation.clone())
@@ -196,7 +198,7 @@ impl Updates {
                     result = &mut worker => {
                         let _ = this.update(cx, |this, cx| {
                             match result {
-                                Ok(()) => this.status = Status::Installed,
+                                Ok(()) => this.status = if this.installation.as_ref().is_some_and(Installation::is_portable) { Status::Ready } else { Status::Installed },
                                 Err(error) => {
                                     this.status = Status::Available;
                                     this.error = Some(if this.cancel.is_cancelled() {

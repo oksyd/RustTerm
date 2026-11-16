@@ -36,6 +36,7 @@ struct Catalog {
 }
 
 fn main() {
+    release_layout().expect("Windows release layout validation failed");
     if let Err(error) = build() {
         panic!("i18n catalog validation failed: {error}");
     }
@@ -51,6 +52,46 @@ fn main() {
     )
     .manifest_required()
     .expect("Windows application icon resource compilation failed");
+}
+
+fn release_layout() -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Layout {
+        binary: String,
+        manifest: String,
+        files: BTreeMap<String, String>,
+    }
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    let manifest: toml::Value = toml::from_str(&fs::read_to_string("Cargo.toml")?)?;
+    let layout: Layout = manifest["package"]["metadata"]["rustterm"]["windows"]
+        .clone()
+        .try_into()?;
+    let files: Vec<_> = layout
+        .files
+        .keys()
+        .chain([&layout.binary, &layout.manifest])
+        .collect();
+    let mut unique = BTreeSet::new();
+    for name in &files {
+        if name.is_empty()
+            || name.starts_with('.')
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+            || !unique.insert(name.to_ascii_lowercase())
+        {
+            return Err(format!("invalid or duplicate release filename: {name}").into());
+        }
+    }
+    fs::write(
+        PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("windows_release.rs"),
+        format!(
+            "pub(super) const BINARY: &str = {:?};\npub(super) const MANIFEST: &str = {:?};\npub(super) const FILES: &[&str] = &{files:?};\n",
+            layout.binary, layout.manifest,
+        ),
+    )?;
+    Ok(())
 }
 
 fn build() -> Result<()> {

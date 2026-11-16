@@ -15,6 +15,7 @@ updates-downloading = 正在下载… { $percent }%
 updates-verifying = 正在校验更新…
 updates-installing = 正在安装更新…
 updates-installed = 版本 { $version } 已安装，重启 RustTerm 后生效。
+updates-ready = 版本 { $version } 已下载并校验，重启 RustTerm 完成更新。
 updates-restart = 重启 RustTerm
 updates-cancel = 取消下载
 updates-cancelling = 正在取消下载…
@@ -31,4 +32,4 @@ updates-busy-exit = 正在安装更新，请等待安装完成后再退出。
 updates-save-before-restart = 请先保存或放弃设置修改，再重启应用。
 updates-restart-help = 重启将关闭运行中的会话，并使用正常退出时的确认流程。
 
-updates-windows-portable = Windows 便携版请从发布页面下载新 ZIP，关闭 RustTerm 后替换解压目录。
+updates-windows-portable = 将官方 Windows ZIP 完整解压到可写目录，即可使用应用内更新；重启 RustTerm 时完成替换。

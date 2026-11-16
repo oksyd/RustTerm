@@ -1,5 +1,8 @@
 //! ZMODEM admission and transport ownership. The terminal actor remains the only
 //! consumer of remote bytes and the only producer of PTY/SSH writes.
+#[cfg(test)]
+use crate::session::state::LifecycleEvent;
+
 use crate::i18n::messages as i18n_key;
 
 use super::{
@@ -413,14 +416,14 @@ impl Transfer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Command, SendError, Session, SessionState};
+    use crate::session::{Command, SendError, Session};
     use crate::terminal::Terminal;
     const HEADER: &[u8] = b"**\x18B00000000000000\r\n\x11";
 
     fn transfer() -> (Transfer, Session, mpsc::Receiver<WriteCommand>) {
         let terminal = Terminal::new(80, 24, 0);
         let shared = Shared::new(&terminal);
-        shared.state(SessionState::Connected);
+        shared.transition(LifecycleEvent::Connected);
         let (commands, _) = mpsc::channel(8);
         let session = Session {
             commands,

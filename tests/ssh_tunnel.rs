@@ -1,5 +1,5 @@
 //! A real in-process russh server with a minimal RESP fixture behind direct-tcpip.
-//! No external server, PTY, local forwarding listener or GUI is started.
+//! No external server, PTY or GUI is started.
 use russh::{
     Channel, ChannelId,
     keys::{Algorithm, PrivateKey, PublicKey, ssh_key::LineEnding},
@@ -22,6 +22,7 @@ use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
 
 #[derive(Default)]
 struct Events {
+    routes: Mutex<std::collections::HashMap<(String, u32), std::net::SocketAddr>>,
     authentications: AtomicUsize,
     shell_channels: AtomicUsize,
     connections: AtomicUsize,
@@ -81,7 +82,7 @@ impl server::Handler for Handler {
     }
     async fn channel_open_direct_tcpip(
         &mut self,
-        _channel: Channel<server::Msg>,
+        channel: Channel<server::Msg>,
         host: &str,
         port: u32,
         _originator: &str,
@@ -95,7 +96,23 @@ impl server::Handler for Handler {
             .unwrap()
             .push((host.into(), port));
         if !self.reject_forward {
-            reply.accept().await;
+            let target = self
+                .events
+                .routes
+                .lock()
+                .unwrap()
+                .get(&(host.to_owned(), port))
+                .copied();
+            if let Some(target) = target {
+                let mut remote = tokio::net::TcpStream::connect(target).await?;
+                reply.accept().await;
+                tokio::spawn(async move {
+                    let mut channel = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut channel, &mut remote).await;
+                });
+            } else {
+                reply.accept().await;
+            }
         }
         Ok(())
     }
@@ -620,3 +637,9 @@ async fn clickhouse_uses_ssh_dns_and_sensitive_auth_without_a_shell() {
     client.close();
     disconnected(&fixture.events).await;
 }
+
+#[path = "ssh_tunnel/protocols.rs"]
+mod protocols;
+
+#[path = "database/wire.rs"]
+mod sql_wire;

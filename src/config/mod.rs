@@ -239,7 +239,7 @@ impl AppConfig {
             .any(|profile| profile.connection.credential_ref() == Some(reference))
     }
 
-    /// Referenced SSH profiles must remain available until their database routes are changed.
+    /// Referenced SSH profiles must remain available until their connection routes are changed.
     pub fn uses_ssh_profile(&self, id: Uuid) -> bool {
         self.profiles
             .iter()
@@ -287,41 +287,24 @@ impl AppConfig {
                     i18n_key::CONNECTIONS_A_PROFILE_REFERENCES_A_GROUP_THAT_DOES_NOT_EXIST,
                 ));
             }
+            if profile
+                .connection
+                .ssh_profile()
+                .is_some_and(|id| id == profile.id || !ssh_ids.contains(&id))
+            {
+                return Err(invalid(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE));
+            }
             match &profile.connection {
-                Connection::Local(local) => local.validate()?,
-                Connection::Ssh(ssh) => ssh.validate()?,
-                Connection::Telnet(telnet) => telnet.validate()?,
-                Connection::Rdp(rdp) => rdp.validate()?,
-                Connection::Sqlite(sqlite) => sqlite.validate()?,
-                Connection::Elasticsearch(config) => {
-                    config.validate()?;
-                    if config
-                        .ssh_profile
-                        .is_some_and(|id| id == profile.id || !ssh_ids.contains(&id))
-                    {
-                        return Err(invalid(i18n_key::DATABASE_A_DATABASE_SSH_TUNNEL_MUST_REFERENCE_AN_EXISTING_SSH_PROFILE));
-                    }
-                }
-                Connection::Mysql(sql)
-                | Connection::Postgres(sql)
-                | Connection::ClickHouse(sql) => {
-                    sql.validate()?;
-                    if sql
-                        .ssh_profile
-                        .is_some_and(|id| id == profile.id || !ssh_ids.contains(&id))
-                    {
-                        return Err(invalid(i18n_key::DATABASE_A_DATABASE_SSH_TUNNEL_MUST_REFERENCE_AN_EXISTING_SSH_PROFILE));
-                    }
-                }
-                Connection::Redis(redis) => {
-                    redis.validate()?;
-                    if redis
-                        .ssh_profile
-                        .is_some_and(|id| id == profile.id || !ssh_ids.contains(&id))
-                    {
-                        return Err(invalid(i18n_key::REDIS_A_REDIS_SSH_TUNNEL_MUST_REFERENCE_AN_EXISTING_SSH_PROFILE));
-                    }
-                }
+                Connection::Local(config) => config.validate()?,
+                Connection::Ssh(config) => config.validate()?,
+                Connection::Telnet(config) => config.validate()?,
+                Connection::Rdp(config) => config.validate()?,
+                Connection::Sqlite(config) => config.validate()?,
+                Connection::Elasticsearch(config) => config.validate()?,
+                Connection::Mysql(config)
+                | Connection::Postgres(config)
+                | Connection::ClickHouse(config) => config.validate()?,
+                Connection::Redis(config) => config.validate()?,
             }
         }
         self.workspace.validate()?;

@@ -245,6 +245,7 @@ impl Workspace {
         self.tabs.push(super::Tab {
             id: tab_id,
             title,
+            pinned: false,
             layout: crate::app::layout::PaneNode::Leaf(id),
             focused: id,
         });

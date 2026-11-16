@@ -5,9 +5,88 @@ fn tab(id: usize, pane: usize) -> Tab {
     Tab {
         id,
         title: "same name".into(),
+        pinned: false,
         layout: PaneNode::Leaf(pane),
         focused: pane,
     }
+}
+
+#[test]
+fn pinned_tabs_survive_bulk_close_but_can_be_closed_explicitly() {
+    let mut tabs = vec![tab(10, 1), tab(20, 2), tab(30, 3)];
+    tabs[0].pinned = true;
+    tabs[2].pinned = true;
+    let profiles = HashMap::new();
+    assert!(
+        close_targets(
+            Target::Tab(20),
+            MenuAction::CloseOtherTabs,
+            &tabs,
+            &profiles
+        )
+        .is_empty()
+    );
+    assert!(
+        close_targets(
+            Target::Tab(20),
+            MenuAction::CloseTabsToRight,
+            &tabs,
+            &profiles
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        close_targets(
+            Target::Tab(10),
+            MenuAction::CloseOtherTabs,
+            &tabs,
+            &profiles
+        ),
+        [2]
+    );
+    assert_eq!(
+        close_targets(Target::Tab(10), MenuAction::CloseTab, &tabs, &profiles),
+        [1]
+    );
+}
+
+#[test]
+fn pin_menu_matches_the_target_and_groups_never_offer_individual_pin_actions() {
+    for pinned in [false, true] {
+        let menu = TabMenu {
+            target: Target::Tab(10),
+            new_session: false,
+            pinned,
+        };
+        assert_eq!(menu.items()[0].action, MenuAction::SetTabPinned(!pinned));
+        let menu = TabMenu {
+            target: Target::Group(Uuid::new_v4()),
+            ..menu
+        };
+        assert!(
+            !menu
+                .items()
+                .iter()
+                .any(|item| matches!(item.action, MenuAction::SetTabPinned(_)))
+        );
+    }
+}
+
+#[test]
+fn closing_an_ssh_group_excludes_a_pinned_session_of_the_same_connection() {
+    let ssh = Profile::ssh("server", Default::default());
+    let mut tabs = vec![tab(10, 1), tab(20, 2), tab(30, 3)];
+    tabs[0].pinned = true;
+    let profiles = HashMap::from([(1, ssh.clone()), (2, ssh.clone()), (3, ssh.clone())]);
+    assert_eq!(
+        close_targets(
+            Target::Group(ssh.id),
+            MenuAction::CloseTabGroup,
+            &tabs,
+            &profiles
+        ),
+        [2, 3]
+    );
 }
 
 #[test]
@@ -84,6 +163,7 @@ fn unsupported_sessions_omit_new_session_and_tab_close_has_no_pane_shortcut() {
         let menu = TabMenu {
             target,
             new_session: false,
+            pinned: false,
         };
         assert!(
             !menu
@@ -97,6 +177,6 @@ fn unsupported_sessions_omit_new_session_and_tab_close_has_no_pane_shortcut() {
             ..menu
         };
         assert_eq!(menu.items()[0].action, MenuAction::NewTabSession);
-        assert!(menu.items().len() <= 4);
+        assert!(menu.items().len() <= 5);
     }
 }

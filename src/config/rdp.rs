@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[serde(default, deny_unknown_fields)]
 pub struct RdpConfig {
     pub host: String,
+    pub ssh_profile: Option<super::Uuid>,
     pub port: u16,
     pub username: String,
     pub domain: Option<String>,
@@ -49,6 +50,7 @@ impl Default for RdpConfig {
     fn default() -> Self {
         Self {
             host: "localhost".into(),
+            ssh_profile: None,
             port: 3389,
             username: String::new(),
             domain: None,
@@ -150,7 +152,7 @@ impl RdpConfig {
     }
 
     pub fn same_server(&self, other: &Self) -> bool {
-        self.host == other.host && self.port == other.port
+        self.host == other.host && self.port == other.port && self.ssh_profile == other.ssh_profile
     }
 
     /// Presentation preferences and rotating vault references do not change identity.
@@ -159,6 +161,9 @@ impl RdpConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.ssh_profile.is_some_and(|id| id.is_nil()) {
+            return Err(invalid(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE));
+        }
         if let Some(app) = &self.remote_app {
             app.validate()?;
         }

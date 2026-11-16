@@ -63,7 +63,7 @@ impl Workspace {
             |this, _, _: &RestartForUpdate, window, cx| {
                 if !matches!(
                     this.updates.read(cx).status,
-                    crate::app::updates::Status::Installed
+                    crate::app::updates::Status::Installed | crate::app::updates::Status::Ready
                 ) {
                     return;
                 }
@@ -90,12 +90,17 @@ impl Workspace {
             Some(Modal::Settings(form)) => form.read(cx).inputs(cx),
             Some(Modal::Group { fields, .. }) => fields.inputs(),
             Some(Modal::Auth {
+                profile,
                 secret,
                 sentinel_secret,
                 tunnel,
                 ..
             }) => {
-                let mut inputs = vec![secret.clone()];
+                let mut inputs = if matches!(profile.connection, Connection::Telnet(_)) {
+                    Vec::new()
+                } else {
+                    vec![secret.clone()]
+                };
                 inputs.extend(sentinel_secret.iter().cloned());
                 if let Some(tunnel) = tunnel {
                     inputs.push(tunnel.secret.clone());
@@ -612,7 +617,7 @@ impl Workspace {
     }
 }
 
-/// A gateway identity change changes the destination behind a database address such
+/// A gateway identity change changes the destination behind a remote address such
 /// as localhost. Clear dependent secrets in the same durable config transaction.
 fn apply_profile(config: &mut AppConfig, profile: Profile) {
     let changed_route = config.profiles.iter().find(|previous| previous.id == profile.id)
@@ -622,6 +627,10 @@ fn apply_profile(config: &mut AppConfig, profile: Profile) {
         for dependent in &mut config.profiles {
             if dependent.connection.ssh_profile() == Some(profile.id) {
                 match &mut dependent.connection {
+                    Connection::Rdp(config) => {
+                        config.credential = None;
+                        config.certificate_sha256 = None;
+                    }
                     Connection::Redis(config) => config.credential = None,
                     Connection::Elasticsearch(config) => config.credential = None,
                     Connection::Mysql(config)
@@ -642,9 +651,7 @@ fn apply_profile(config: &mut AppConfig, profile: Profile) {
 impl Workspace {
     pub(super) fn delete_profile(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
         if self.config.uses_ssh_profile(id) {
-            self.error = Some(
-                i18n_key::DATABASE_THIS_SSH_PROFILE_IS_USED_BY_A_DATABASE_TUNNEL_CHANGE.into(),
-            );
+            self.error = Some(i18n_key::CONNECTIONS_SSH_ROUTE_IN_USE.into());
             cx.notify();
             return;
         }
@@ -673,10 +680,7 @@ impl Workspace {
                     return;
                 }
                 if this.config.uses_ssh_profile(id) {
-                    this.error = Some(
-                        i18n_key::DATABASE_THIS_SSH_PROFILE_IS_USED_BY_A_DATABASE_TUNNEL_CHANGE
-                            .into(),
-                    );
+                    this.error = Some(i18n_key::CONNECTIONS_SSH_ROUTE_IN_USE.into());
                     cx.notify();
                     return;
                 }
@@ -743,7 +747,7 @@ mod tests {
     use rustterm::config::{RedisConfig, SqlConfig, SshConfig};
 
     #[test]
-    fn changing_gateway_identity_invalidates_only_dependent_database_credentials() {
+    fn changing_gateway_identity_invalidates_only_dependent_credentials_and_trust() {
         let mut gateway = Profile::ssh("Gateway", SshConfig::default());
         let reference = CredentialRef::new();
         let redis = Profile::redis(
@@ -793,6 +797,21 @@ mod tests {
             ],
             ..Default::default()
         };
+        let desktop = rustterm::config::RdpConfig {
+            credential: Some(reference),
+            certificate_sha256: Some("ab".repeat(32)),
+            ..Default::default()
+        };
+        config.profiles.extend([
+            Profile::rdp("Direct desktop", desktop.clone()),
+            Profile::rdp(
+                "Private desktop",
+                rustterm::config::RdpConfig {
+                    ssh_profile: Some(gateway.id),
+                    ..desktop
+                },
+            ),
+        ]);
         gateway.name = "Renamed gateway".into();
         apply_profile(&mut config, gateway.clone());
         for profile in &config.profiles[1..] {
@@ -806,8 +825,17 @@ mod tests {
         for profile in &config.profiles[1..4] {
             assert_eq!(profile_reference(profile), None);
         }
-        for profile in &config.profiles[4..] {
+        for profile in &config.profiles[4..8] {
             assert_eq!(profile_reference(profile), Some(reference));
         }
+        let Connection::Rdp(direct) = &config.profiles[7].connection else {
+            unreachable!()
+        };
+        assert!(direct.certificate_sha256.is_some());
+        let Connection::Rdp(tunneled) = &config.profiles[8].connection else {
+            unreachable!()
+        };
+        assert_eq!(tunneled.credential, None);
+        assert_eq!(tunneled.certificate_sha256, None);
     }
 }

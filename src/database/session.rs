@@ -201,9 +201,12 @@ impl Connection {
             }
         }
     }
-    async fn shutdown(&mut self) {
-        if let Self::Sqlite(connection) = self {
+    async fn shutdown(mut self) {
+        if let Self::Sqlite(connection) = &mut self {
             connection.shutdown().await;
+        }
+        if let Self::Mysql(connection) = self {
+            connection.close().await;
         }
     }
 }
@@ -211,69 +214,54 @@ impl Connection {
 #[derive(Clone)]
 pub(super) enum CancelHandle {
     ClickHouse(clickhouse::Connection, String),
-    Mysql(sqlx::mysql::MySqlConnectOptions, String),
-    Postgres(sqlx::postgres::PgConnectOptions, String),
+    Mysql(mysql::Options, String),
+    Postgres(postgres::Options, String),
     Sqlite(Arc<rusqlite::InterruptHandle>),
 }
 impl CancelHandle {
     async fn cancel(&self) -> Result<bool> {
-        use sqlx::{Connection as _, Decode, MySql, Row};
         match self {
             Self::Mysql(options, marker) => {
-                let mut control = sqlx::MySqlConnection::connect_with(options)
-                    .await
-                    .map_err(classify)?;
+                let mut control = options.connect().await?;
                 let query = format!(
                     "SELECT ID FROM information_schema.PROCESSLIST WHERE USER = SUBSTRING_INDEX(USER(), '@', 1) AND COMMAND = 'Query' AND LEFT(INFO, {}) = '{}' LIMIT 2",
                     marker.len(),
                     marker
                 );
-                let matches = sqlx::raw_sql(sqlx::AssertSqlSafe(query.as_str()))
-                    .fetch_all(&mut control)
-                    .await
-                    .map_err(classify)?;
-                let result = if matches.len() == 1 {
-                    let id = <&[u8] as Decode<MySql>>::decode(
-                        matches[0].try_get_raw(0).map_err(classify)?,
-                    )
-                    .map_err(|_| DatabaseError::Protocol)?;
-                    let id: u64 = std::str::from_utf8(id)
-                        .map_err(|_| DatabaseError::Protocol)?
+                let output = control.execute(&query, 2).await?;
+                let rows: Vec<_> = output.iter().flat_map(|result| &result.rows).collect();
+                let result = if rows.len() == 1 {
+                    let id: u64 = rows[0]
+                        .first()
+                        .and_then(Option::as_deref)
+                        .ok_or(DatabaseError::Protocol)?
                         .parse()
                         .map_err(|_| DatabaseError::Protocol)?;
-                    let sql = format!("KILL QUERY {id}");
-                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                        .execute(&mut control)
+                    control
+                        .execute(&format!("KILL QUERY {id}"), 1)
                         .await
                         .map(|_| true)
-                        .map_err(classify)
                 } else {
                     Ok(false)
                 };
-                let _ = control.close().await;
+                control.close().await;
                 result
             }
             Self::Postgres(options, marker) => {
-                let mut control = sqlx::PgConnection::connect_with(options)
-                    .await
-                    .map_err(classify)?;
+                let mut control = options.connect().await?;
                 let sql = format!(
                     "SELECT CASE WHEN count(*) = 1 THEN pg_catalog.pg_cancel_backend(min(pid)) ELSE false END FROM pg_catalog.pg_stat_activity WHERE pid <> pg_catalog.pg_backend_pid() AND usename = session_user AND datname = current_database() AND state = 'active' AND left(query, {}) = '{}'",
                     marker.len(),
                     marker
                 );
-                let row = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                    .fetch_one(&mut control)
-                    .await
-                    .map_err(classify)?;
-                let result = row
-                    .try_get_raw(0)
-                    .map_err(classify)?
-                    .as_str()
-                    .map(|value| value == "t")
-                    .map_err(|_| DatabaseError::Protocol);
-                let _ = control.close().await;
-                result
+                let output = control.execute(&sql, 1).await?;
+                let value = output
+                    .first()
+                    .and_then(|result| result.rows.first())
+                    .and_then(|row| row.first())
+                    .and_then(Option::as_deref)
+                    .ok_or(DatabaseError::Protocol)?;
+                Ok(value == "t")
             }
             Self::ClickHouse(connection, marker) => connection.cancel(marker).await,
             Self::Sqlite(interrupt) => {
@@ -368,7 +356,6 @@ pub(super) async fn actor(
         published_transaction.store(transaction as u8, Ordering::Release);
         if !reusable {
             stop.cancel();
-            connection.shutdown().await;
         }
         active.lock().unwrap().take();
         let _ = request.reply.send(result);

@@ -1,4 +1,3 @@
-database-a-database-ssh-tunnel-must-reference-an-existing-ssh-profile = 数据库 SSH 隧道必须引用已有的 SSH 配置
 
 database-a-primary-key-is-required-to-edit-rows-safely = 需要主键才能安全编辑数据行。
 
@@ -306,7 +305,6 @@ database-the-sqlite-file-already-exists-choose-another-path = SQLite 文件已�
 
 database-the-sqlite-file-is-not-writable-open-it-in-read = SQLite 文件不可写，请以只读模式打开
 
-database-the-ssh-profile-for-this-database-connection-is-unavailable-edit = 此数据库连接使用的 SSH 配置不可用，请修改隧道设置后重新连接。
 
 database-the-table-edit-contains-an-invalid-value-or-column = 表修改包含无效的值或字段。
 
@@ -324,7 +322,6 @@ database-this-database-selection-applies-to-this-pane-credentials-are-used = 此
 
 database-this-row-has-no-reliable-unique-key = 此行没有可靠的唯一键。
 
-database-this-ssh-profile-is-used-by-a-database-tunnel-change = 此 SSH 配置正被数据库隧道使用，请先修改相关数据库连接再删除。
 
 database-this-table-cannot-be-edited-safely = 无法安全编辑此表。
 
@@ -362,7 +359,6 @@ database-write-sql-ctrl-enter-runs-the-current-statement = 输入 SQL，按 Ctrl
 
 database-write-sql-ctrl-enter-runs-the-selection-or-the-entire = 输入 SQL，按 Ctrl+Enter 执行选中内容或整个编辑器中的语句。
 
-database-ssh-tunnel-platform-unavailable = 此平台暂不支持 SQL 的 SSH 隧道，请使用数据库直连。
 
 database-clickhouse-connection-hint = 使用 HTTP 端口（8123），或启用 TLS 并使用 HTTPS 端口（通常为 8443）。数据库留空时使用服务端默认值。
 database-clickhouse-result-format = ClickHouse 返回了不支持的结果格式或不完整的响应。请移除 FORMAT 子句，或使用 FORMAT JSONCompact。

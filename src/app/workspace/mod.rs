@@ -45,6 +45,7 @@ use std::time::Duration;
 struct Tab {
     id: usize,
     title: String,
+    pinned: bool,
     layout: PaneNode,
     focused: usize,
 }
@@ -181,7 +182,7 @@ pub struct Workspace {
     _updates_subscription: Subscription,
     update_restart_subscription: Option<Subscription>,
     restart_requested: bool,
-    restart: std::rc::Rc<std::cell::RefCell<Option<PathBuf>>>,
+    restart: std::rc::Rc<std::cell::RefCell<Option<rustterm::update::Installation>>>,
 }
 impl Workspace {
     pub fn new(
@@ -501,12 +502,7 @@ impl Workspace {
                 this.update(cx, |this, cx| {
                     if permit.is_valid() {
                         if this.restart_requested {
-                            *this.restart.borrow_mut() = this
-                                .updates
-                                .read(cx)
-                                .installation
-                                .as_ref()
-                                .map(|installation| installation.executable());
+                            *this.restart.borrow_mut() = this.updates.read(cx).installation.clone();
                         }
                         window.remove_window();
                     } else {

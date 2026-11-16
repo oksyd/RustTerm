@@ -167,9 +167,11 @@ impl ProfileForm {
     }
 
     pub(super) fn network_options(&self, cx: &mut Context<Self>) -> AnyElement {
-        let database = matches!(
+        let tunneled = matches!(
             self.kind,
-            ProfileKind::Mysql
+            ProfileKind::Rdp
+                | ProfileKind::Telnet
+                | ProfileKind::Mysql
                 | ProfileKind::Postgres
                 | ProfileKind::ClickHouse
                 | ProfileKind::Redis
@@ -177,7 +179,7 @@ impl ProfileForm {
         );
         column()
             .gap(px(16.))
-            .when(database, |body| body.child(self.tunnel_picker(cx)))
+            .when(tunneled, |body| body.child(self.tunnel_picker(cx)))
             .child(self.fields.selected_rows(&self.advanced_fields()))
             .into_any_element()
     }

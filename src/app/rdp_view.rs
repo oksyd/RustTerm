@@ -37,6 +37,7 @@ mod remote_files;
 mod render;
 
 pub struct RdpLaunch {
+    pub ssh: Option<rustterm::session::SshOptions>,
     pub config: RdpConfig,
     pub secret: Secret,
 }
@@ -45,6 +46,7 @@ pub struct RdpLaunch {
 enum State {
     Connecting,
     WaitingCertificate,
+    WaitingHostKey,
     Connected,
     Disconnected,
     Failed,
@@ -223,6 +225,14 @@ impl RdpView {
                     cx.notify();
                 }
             }),
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                let scale = window.scale_factor();
+                if this.device_scale != scale {
+                    this.device_scale = scale;
+                    this.request_resize(cx);
+                    cx.notify();
+                }
+            }),
             cx.on_release_in(window, |this: &mut Self, window, cx| {
                 this.close_application_windows(cx);
                 this.drop_control();
@@ -334,7 +344,7 @@ impl RdpView {
             pointer_task: None,
             resize_task: None,
         };
-        view.connect(launch.secret, window, cx);
+        view.connect_after_layout(launch.secret, launch.ssh, window, cx);
         if locked {
             view.set_locked(true, cx);
         }
@@ -352,7 +362,10 @@ impl RdpView {
     pub fn is_running(&self) -> bool {
         matches!(
             self.state,
-            State::Connecting | State::WaitingCertificate | State::Connected
+            State::Connecting
+                | State::WaitingCertificate
+                | State::WaitingHostKey
+                | State::Connected
         )
     }
 
@@ -364,6 +377,7 @@ impl RdpView {
         tr(match self.state {
             State::Connecting => i18n_key::COMMON_CONNECTING_PROGRESS,
             State::WaitingCertificate => i18n_key::RDP_VERIFY_SERVER_CERTIFICATE,
+            State::WaitingHostKey => i18n_key::TERMINAL_WAITING_FOR_HOST_CONFIRMATION,
             State::Connected => i18n_key::COMMON_CONNECTED,
             State::Disconnected => i18n_key::COMMON_DISCONNECTED,
             State::Failed => i18n_key::REDIS_CONNECTION_FAILED,
@@ -374,7 +388,9 @@ impl RdpView {
     pub fn status_color(&self) -> u32 {
         match self.state {
             State::Connected => ui::colors().success,
-            State::Connecting | State::WaitingCertificate => ui::colors().warning,
+            State::Connecting | State::WaitingCertificate | State::WaitingHostKey => {
+                ui::colors().warning
+            }
             State::Failed => ui::colors().danger,
             State::Disconnected => ui::colors().muted,
         }
@@ -398,6 +414,7 @@ impl RdpView {
         match self.state {
             State::Connecting => "connecting",
             State::WaitingCertificate => "waiting-certificate",
+            State::WaitingHostKey => "waiting-ssh-host-key",
             State::Connected => "connected",
             State::Disconnected => "disconnected",
             State::Failed => "failed",
@@ -644,7 +661,7 @@ impl RdpView {
         let Some(requested) = resize_dimensions(self.layout_size, self.device_scale) else {
             return;
         };
-        if self.last_resize == Some(requested) {
+        if self.last_resize.unwrap_or(self.desktop_size) == requested {
             return;
         }
         // Replace a pending resize instead of queueing every pixel of a drag.
@@ -664,6 +681,14 @@ impl RdpView {
                     )
                 {
                     this.last_resize = Some(requested);
+                    this.window_state.record_values(
+                        "rdp-resize-requested",
+                        [
+                            this.index as u64,
+                            u64::from(requested.0),
+                            u64::from(requested.1),
+                        ],
+                    );
                 }
             });
         }));

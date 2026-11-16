@@ -15,6 +15,7 @@ updates-downloading = Downloading… { $percent }%
 updates-verifying = Verifying the update…
 updates-installing = Installing the update…
 updates-installed = Version { $version } is installed. Restart RustTerm to use it.
+updates-ready = Version { $version } is downloaded and verified. Restart RustTerm to finish updating.
 updates-restart = Restart RustTerm
 updates-cancel = Cancel download
 updates-cancelling = Cancelling the download…
@@ -31,4 +32,4 @@ updates-busy-exit = An update is being installed. Wait for installation to finis
 updates-save-before-restart = Save or discard your settings changes before restarting.
 updates-restart-help = Restarting closes running sessions. Your normal exit confirmation will appear.
 
-updates-windows-portable = To update the Windows portable edition, download the new ZIP from Releases and replace the extracted folder after closing RustTerm.
+updates-windows-portable = Extract the complete official Windows ZIP into a writable folder to enable in-app updates. Updates are applied when you restart RustTerm.

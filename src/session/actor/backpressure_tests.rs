@@ -1,3 +1,5 @@
+use crate::session::state::LifecycleEvent;
+
 use super::*;
 use crate::session::{SelectionKind, Session};
 use tokio::{sync::oneshot, task::JoinHandle, time::timeout};
@@ -13,7 +15,7 @@ struct BlockedWriter {
 impl BlockedWriter {
     fn start() -> Self {
         let (session, terminal, commands) = Session::create(80, 3, 0).unwrap();
-        session.shared.state(SessionState::Connected);
+        session.shared.transition(LifecycleEvent::Connected);
         let (output, receive) = mpsc::channel(2);
         let (input, writes) = mpsc::channel(1);
         input

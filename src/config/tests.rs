@@ -97,6 +97,62 @@ fn sql_profiles_preserve_engine_routes_and_credential_references() {
 }
 
 #[test]
+fn desktop_and_telnet_routes_validate_gateway_references_and_preserve_old_configs() {
+    let ssh = Profile::ssh(
+        "Gateway",
+        SshConfig {
+            host: "gateway.invalid".into(),
+            username: "operator".into(),
+            ..Default::default()
+        },
+    );
+    let local = Profile::local("Local", LocalConfig::default());
+    let old_rdp: RdpConfig =
+        toml::from_str("host = 'desktop.invalid'\nusername = 'operator'").unwrap();
+    let old_telnet: TelnetConfig = toml::from_str("host = 'console.invalid'").unwrap();
+    assert_eq!(old_rdp.ssh_profile, None);
+    assert_eq!(old_telnet.ssh_profile, None);
+    for profile in [
+        Profile::rdp(
+            "Desktop",
+            RdpConfig {
+                ssh_profile: Some(ssh.id),
+                ..old_rdp
+            },
+        ),
+        Profile::telnet(
+            "Console",
+            TelnetConfig {
+                ssh_profile: Some(ssh.id),
+                ..old_telnet
+            },
+        ),
+    ] {
+        let mut config = AppConfig {
+            profiles: vec![ssh.clone(), local.clone(), profile.clone()],
+            ..Default::default()
+        };
+        config.validate().unwrap();
+        assert!(config.uses_ssh_profile(ssh.id));
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: AppConfig = toml::from_str(&encoded).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded.profiles[2].connection, profile.connection);
+        for invalid in [Uuid::nil(), Uuid::new_v4(), local.id, profile.id] {
+            match &mut config.profiles[2].connection {
+                Connection::Rdp(c) => c.ssh_profile = Some(invalid),
+                Connection::Telnet(c) => c.ssh_profile = Some(invalid),
+                _ => unreachable!(),
+            }
+            assert!(config.validate().is_err());
+        }
+        config.profiles[2] = profile;
+        config.profiles.remove(0);
+        assert!(config.validate().is_err());
+    }
+}
+
+#[test]
 fn telnet_profiles_round_trip_without_credentials() {
     let telnet: TelnetConfig = toml::from_str("host = 'console.example.invalid'").unwrap();
     assert_eq!(telnet.port, 23);
@@ -854,6 +910,18 @@ fn redis_without_a_tunnel_field_defaults_to_direct_connection() {
 }
 
 #[test]
+fn pinned_tabs_round_trip_and_older_workspaces_remain_unpinned() {
+    let legacy = "title = 'server'\n[layout]\nkind = 'pane'\nindex = 0\n";
+    let mut tab: SavedTab = toml::from_str(legacy).unwrap();
+    assert!(!tab.pinned);
+    assert!(!toml::to_string(&tab).unwrap().contains("pinned"));
+    tab.pinned = true;
+    let encoded = toml::to_string(&tab).unwrap();
+    assert!(encoded.contains("pinned = true"));
+    assert_eq!(toml::from_str::<SavedTab>(&encoded).unwrap(), tab);
+}
+
+#[test]
 fn ssh_tab_group_collapse_state_round_trips_and_older_workspaces_default_expanded() {
     let old: SavedWorkspace = toml::from_str("active = 0\nfocused = 0").unwrap();
     assert!(old.collapsed_ssh_tab_groups.is_empty());
@@ -862,10 +930,12 @@ fn ssh_tab_group_collapse_state_round_trips_and_older_workspaces_default_expande
         layout: SavedWorkspace {
             tabs: vec![
                 SavedTab {
+                    pinned: false,
                     title: "server".into(),
                     layout: SavedLayout::Pane { index: 0 },
                 },
                 SavedTab {
+                    pinned: false,
                     title: "server:2".into(),
                     layout: SavedLayout::Pane { index: 1 },
                 },
@@ -900,6 +970,7 @@ fn workspace_preserves_ssh_session_numbers_and_accepts_older_positions() {
         workspace: WorkspaceSnapshot {
             layout: SavedWorkspace {
                 tabs: vec![SavedTab {
+                    pinned: false,
                     title: profile.name.clone(),
                     layout: SavedLayout::Pane { index: 0 },
                 }],
@@ -934,6 +1005,7 @@ fn workspace_and_commands_round_trip_and_reject_invalid_layout_references() {
         workspace: WorkspaceSnapshot {
             layout: SavedWorkspace {
                 tabs: vec![SavedTab {
+                    pinned: false,
                     title: "Work".into(),
                     layout: SavedLayout::Pane { index: 0 },
                 }],

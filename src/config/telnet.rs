@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct TelnetConfig {
     pub host: String,
+    pub ssh_profile: Option<super::Uuid>,
     pub port: u16,
     pub timeout_secs: u64,
 }
@@ -15,6 +16,7 @@ impl Default for TelnetConfig {
     fn default() -> Self {
         Self {
             host: String::new(),
+            ssh_profile: None,
             port: 23,
             timeout_secs: 15,
         }
@@ -23,6 +25,9 @@ impl Default for TelnetConfig {
 
 impl TelnetConfig {
     pub fn validate(&self) -> Result<()> {
+        if self.ssh_profile.is_some_and(|id| id.is_nil()) {
+            return Err(invalid(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE));
+        }
         known_hosts::normalize_host(&self.host)
             .map_err(|error| error.at_field(i18n_key::WORKSPACE_HOST))?;
         if self.port == 0 || !(1..=600).contains(&self.timeout_secs) {
@@ -70,6 +75,7 @@ mod tests {
                     host: "localhost".into(),
                     port,
                     timeout_secs,
+                    ..TelnetConfig::default()
                 }
                 .validate()
                 .is_err()

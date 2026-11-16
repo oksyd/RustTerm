@@ -41,7 +41,7 @@ pub struct Startup {
     profile: Profile,
     panes: usize,
     restore: bool,
-    restart: Rc<RefCell<Option<PathBuf>>>,
+    restart: Rc<RefCell<Option<rustterm::update::Installation>>>,
 }
 
 struct Options {
@@ -121,6 +121,10 @@ impl Options {
     }
 }
 pub(crate) fn run() -> Result<()> {
+    #[cfg(windows)]
+    if rustterm::update::run_update_helper()? {
+        return Ok(());
+    }
     if std::env::args_os().skip(1).collect::<Vec<_>>() == ["--credential-worker"] {
         return rustterm::config::run_credential_worker().map_err(Into::into);
     }
@@ -136,6 +140,13 @@ fn run_application(context: &mut startup_error::StartupContext) -> Result<()> {
     if std::env::args().skip(1).eq(["--version"]) {
         println!("RustTerm {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+    #[cfg(windows)]
+    {
+        if rustterm::update::recover_interrupted_update()? {
+            return Ok(());
+        }
+        rustterm::update::cleanup_completed_updates();
     }
     let Some(options) = Options::parse(std::env::args().skip(1))? else {
         println!("{}", tr(i18n_key::COMMON_CLI_HELP));
@@ -193,7 +204,7 @@ fn run_application(context: &mut startup_error::StartupContext) -> Result<()> {
         }
         profile
     };
-    let restart = Rc::new(RefCell::new(None::<PathBuf>));
+    let restart = Rc::new(RefCell::new(None::<rustterm::update::Installation>));
     let startup = Startup {
         profile: initial,
         panes: options.panes,
@@ -263,8 +274,12 @@ fn run_application(context: &mut startup_error::StartupContext) -> Result<()> {
             error = error
         ));
     }
-    if let Some(executable) = restart.borrow_mut().take() {
-        let mut command = std::process::Command::new(executable);
+    if let Some(installation) = restart.borrow_mut().take() {
+        #[cfg(windows)]
+        if installation.is_portable() {
+            return installation.restart_portable(restart_directory.as_deref());
+        }
+        let mut command = std::process::Command::new(installation.executable());
         if let Some(directory) = restart_directory {
             command.arg("--config-dir").arg(directory);
         }

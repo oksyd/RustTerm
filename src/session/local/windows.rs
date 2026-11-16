@@ -1,9 +1,11 @@
 //! ConPTY uses blocking pipe handles. Keep those operations off the UI/runtime
 //! workers, with the same bounded channels as the Linux transport.
+use crate::session::state::LifecycleEvent;
+
 #[path = "options.rs"]
 mod options;
 use super::{
-    ActorCommand, FailureKind, SessionState, actor,
+    ActorCommand, FailureKind, actor,
     state::Shared,
     transport::{OUTPUT_CAPACITY, Output, Transport, WRITE_CAPACITY, WriteCommand},
 };
@@ -136,7 +138,7 @@ pub(super) async fn run(
         tokio::task::spawn_blocking(move || open(options, columns, rows, worker_shared)).await;
     let transport = match transport {
         Ok(Ok(transport)) => {
-            shared.live_state(SessionState::Connected);
+            shared.transition(LifecycleEvent::Connected);
             Some(transport)
         }
         result => {
@@ -146,9 +148,9 @@ pub(super) async fn run(
                 _ => unreachable!(),
             };
             if shared.io_stop.is_cancelled() {
-                shared.state(SessionState::Disconnected { exit_code: None });
+                shared.transition(LifecycleEvent::Disconnected { exit_code: None });
             } else {
-                shared.failed(FailureKind::Spawn, message);
+                shared.transition(LifecycleEvent::failed(FailureKind::Spawn, message));
             }
             None
         }
