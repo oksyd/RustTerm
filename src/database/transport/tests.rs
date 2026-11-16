@@ -174,16 +174,22 @@ async fn forwarding_preserves_fragmentation_backpressure_and_half_close() {
 
 #[tokio::test]
 async fn forwarding_releases_its_listener_and_stream_on_drop_and_cancellation() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        for connected in [false, true] {
-            for cancel in [false, true] {
+    for connected in [false, true] {
+        for cancel in [false, true] {
+            tokio::time::timeout(Duration::from_secs(5), async {
                 let (client, mut remote) = tokio::io::duplex(8);
                 let stop = CancellationToken::new();
                 let mut forward = Forward::start(client, stop.clone()).await.unwrap();
                 let address = forward.address;
                 let socket = if connected {
-                    Some(TcpStream::connect(address).await.unwrap())
+                    let mut socket = TcpStream::connect(address).await.unwrap();
+                    socket.write_all(b"ready").await.unwrap();
+                    let mut received = [0; 5];
+                    remote.read_exact(&mut received).await.unwrap();
+                    assert_eq!(&received, b"ready");
+                    Some(socket)
                 } else {
+                    assert!(TcpListener::bind(address).await.is_err());
                     None
                 };
                 if cancel {
@@ -193,11 +199,17 @@ async fn forwarding_releases_its_listener_and_stream_on_drop_and_cancellation() 
                     drop(forward);
                 }
                 assert_eq!(remote.read(&mut [0; 1]).await.unwrap(), 0);
-                assert!(TcpStream::connect(address).await.is_err());
-                drop(socket);
-            }
+                if let Some(mut socket) = socket {
+                    assert_eq!(socket.read(&mut [0; 1]).await.unwrap(), 0);
+                } else {
+                    // Rebinding checks release without a platform-dependent failed connection.
+                    let _listener = TcpListener::bind(address).await.unwrap();
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("forwarding cleanup timed out: connected={connected}, cancel={cancel}")
+            });
         }
-    })
-    .await
-    .unwrap();
+    }
 }
