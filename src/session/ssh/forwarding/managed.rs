@@ -18,6 +18,7 @@ struct Observed {
 }
 
 struct Manager {
+    protection: crate::session::SessionProtection,
     settings: ForwardSettings,
     rules: Vec<PortForward>,
     runtime: ForwardRuntime,
@@ -31,6 +32,7 @@ struct Manager {
 impl Manager {
     fn new(settings: ForwardSettings) -> Self {
         let mut manager = Self {
+            protection: Default::default(),
             rules: settings.rules.clone(),
             runtime: ForwardRuntime::new(&settings.rules),
             settings,
@@ -42,6 +44,10 @@ impl Manager {
         };
         manager.seed_policies();
         manager
+    }
+
+    fn automatic_enabled(&self) -> bool {
+        self.protection.allows_enhancements() && self.settings.automatic.enabled
     }
 
     fn seed_policies(&mut self) {
@@ -190,7 +196,7 @@ impl Manager {
                     .hints
                     .get(&service.port)
                     .filter(|(_, at)| at.elapsed() < Duration::from_secs(30));
-                let auto = self.settings.automatic.enabled
+                let auto = self.automatic_enabled()
                     && service.published
                     && ((!previously_present.contains(&key)
                         && !first_host
@@ -320,13 +326,13 @@ impl Manager {
                     .unwrap_or(service.port),
                 destination_host: service.host.clone(),
                 destination_port: service.port,
-                enabled: self.settings.automatic.enabled
+                enabled: self.automatic_enabled()
                     && policy.enabled
                     && service.published
                     && within_grace,
             };
             let mut status = ForwardStatus::new(rule);
-            status.enabled = self.settings.automatic.enabled && policy.enabled;
+            status.enabled = self.automatic_enabled() && policy.enabled;
             status.service = Some(service.identity.clone());
             status.available = observed.present && service.published;
             status.port_fallback = policy.local_port.is_none();
@@ -366,7 +372,7 @@ impl Manager {
                 }
                 let previous = self.desired();
                 acknowledged = Some(revision);
-                if settings.automatic.enabled && !self.settings.automatic.enabled {
+                if settings.automatic.enabled && !self.automatic_enabled() {
                     self.baseline = false;
                 }
                 self.settings = settings;
@@ -401,12 +407,13 @@ impl Manager {
                 }
             }
             Control::Retry(index) => retry = self.rules.get(index).map(|r| r.id),
+            Control::Refresh if !self.protection.allows_enhancements() => return false,
             Control::Refresh => {
                 self.refresh_requested = true;
                 self.refresh_sent = false;
             }
             Control::Hint(port, protocol) => {
-                if self.settings.automatic.enabled {
+                if self.automatic_enabled() {
                     self.hints
                         .retain(|_, (_, at)| at.elapsed() < Duration::from_secs(30));
                     if self.hints.len() < 32 {
@@ -443,7 +450,7 @@ impl Manager {
                 store.pending = None;
             }
         }
-        self.settings.automatic.enabled
+        self.automatic_enabled()
             || self.refresh_requested
             || self.settings.rules.iter().any(|r| r.enabled)
     }
@@ -591,7 +598,7 @@ impl Manager {
         }
     }
     fn needs_connection(&self) -> bool {
-        self.runtime.enabled() || self.settings.automatic.enabled || self.refresh_requested
+        self.runtime.enabled() || self.automatic_enabled() || self.refresh_requested
     }
 }
 
@@ -621,6 +628,7 @@ pub(super) fn start(
     };
     let (control, controls) = mpsc::channel(32);
     let controller = ForwardController {
+        protection: options.production_protection.into(),
         control,
         states: Arc::new(Mutex::new(
             settings
@@ -637,7 +645,9 @@ pub(super) fn start(
         hints: Arc::new(Mutex::new(discovery::OutputHints::default())),
     };
     let active = controller.clone();
-    let task = tokio::spawn(run(options, stop, active, controls, Manager::new(settings)));
+    let mut manager = Manager::new(settings);
+    manager.protection = controller.protection;
+    let task = tokio::spawn(run(options, stop, active, controls, manager));
     (controller, task)
 }
 
@@ -742,7 +752,7 @@ async fn run(
         }
         let failure = loop {
             manager.reconcile(&active, Some(&connection));
-            let scanning = manager.settings.automatic.enabled || manager.refresh_requested;
+            let scanning = manager.automatic_enabled() || manager.refresh_requested;
             if scanning && scanner.is_none() {
                 let cancel = connection.stop.child_token();
                 let (samples, task) = discovery::start(

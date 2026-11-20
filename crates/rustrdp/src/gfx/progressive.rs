@@ -490,7 +490,10 @@ impl Decoder {
             }
             block.finish()?;
             self.associate_tile(surface, position, context)?;
-            let tile = surface.tiles.get_mut(&position).unwrap();
+            let tile = surface
+                .tiles
+                .get_mut(&position)
+                .ok_or(Error::Invalid("progressive tile state"))?;
             tile.frame = self.frame;
             tile.render();
             changed.insert(position);
@@ -528,7 +531,10 @@ fn first(
 ) -> Result<()> {
     let lengths = [input.u16_le()?, input.u16_le()?, input.u16_le()?];
     let tail = input.u16_le()?;
-    let pass = tile.pass.as_mut().unwrap();
+    let pass = tile
+        .pass
+        .as_mut()
+        .ok_or(Error::Invalid("progressive first pass state"))?;
     for (component, length) in lengths.into_iter().enumerate() {
         let mut values = wavelet::rlgr(input.take(usize::from(length))?, false)?;
         for (sign, value) in pass.signs[component].iter_mut().zip(&values) {
@@ -564,7 +570,10 @@ fn upgrade(tile: &mut StoredTile, input: &mut Reader<'_>, positions: [Quant; 3])
         (input.u16_le()?, input.u16_le()?),
         (input.u16_le()?, input.u16_le()?),
     ];
-    let pass = tile.pass.as_mut().unwrap();
+    let pass = tile
+        .pass
+        .as_mut()
+        .ok_or(Error::Invalid("progressive upgrade without coefficients"))?;
     for (component, (srl_length, raw_length)) in lengths.into_iter().enumerate() {
         let mut srl = Srl::new(input.take(usize::from(srl_length))?);
         let mut raw = Bits::new(input.take(usize::from(raw_length))?);

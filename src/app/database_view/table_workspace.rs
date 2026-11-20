@@ -105,6 +105,11 @@ impl GridSnapshot {
 }
 
 impl TableWorkspace {
+    fn current_value(&self, row: usize, column: usize) -> Option<&CellValue> {
+        let original = self.page.as_ref().and_then(|page| page.originals.get(row));
+        changes::current_value(self.changes.get(&row), original.map(Vec::as_slice), column)
+    }
+
     pub(super) fn mark_submission_uncertain(&mut self) {
         self.submission_uncertain = true;
     }
@@ -233,7 +238,11 @@ impl DatabaseView {
     }
 
     pub(super) fn table_workspace(&self) -> Option<&TableWorkspace> {
-        self.documents[self.active_document].table.as_ref()
+        self.documents.get(self.active_document)?.table.as_ref()
+    }
+
+    pub(super) fn table_workspace_mut(&mut self) -> Option<&mut TableWorkspace> {
+        self.documents.get_mut(self.active_document)?.table.as_mut()
     }
 
     pub(super) fn table_action(&mut self, action: TableAction, cx: &mut Context<Self>) {
@@ -332,7 +341,7 @@ impl DatabaseView {
                 TableAction::Columns => client.columns(info).await,
                 TableAction::Indexes => client.indexes(info).await,
                 TableAction::Definition => client.definition(info).await,
-                TableAction::Data => unreachable!(),
+                TableAction::Data => Err(rustterm::database::DatabaseError::InvalidConfig),
             }
         });
         self.task = Some(cx.spawn(async move |this, cx| {

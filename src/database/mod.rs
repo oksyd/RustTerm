@@ -18,7 +18,7 @@ mod tests;
 mod transport;
 
 pub use session::TransactionStatus;
-use session::{CancelHandle, Command, Connection, TransactionAction, actor};
+use session::{CancelHandle, Command, Connection, QueryRows, TransactionAction, actor};
 
 use crate::config::{DatabaseConfig, Secret, SqlEngine, SqliteConfig};
 use crate::session::{HostKeyChallenge, SshOptions};
@@ -405,7 +405,11 @@ impl DatabaseClient {
         {
             return Err(DatabaseError::Limit);
         }
-        self.request(Command::Sql { sql, row_limit }).await
+        self.request(Command::Sql {
+            sql,
+            rows: QueryRows::Display(row_limit),
+        })
+        .await
     }
 
     pub async fn begin(&self) -> Result<()> {
@@ -720,6 +724,14 @@ impl Collector {
         self.results
     }
 }
+fn display_blob(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        "0x".into()
+    } else {
+        display_bytes(bytes)
+    }
+}
+
 fn display_bytes(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(text)

@@ -205,6 +205,7 @@ impl Workspace {
         if self.restore_saved_workspace(restore, window, cx) {
             return;
         }
+        self.opening_initial_tabs = true;
         self.open_profile(initial.clone(), None, window, cx);
         if panes == 4 {
             let first = self.focused;
@@ -219,6 +220,7 @@ impl Workspace {
                 self.open_profile_at(initial, None, Some((target, Axis::Vertical)), window, cx);
             }
         }
+        self.opening_initial_tabs = false;
     }
 
     pub(super) fn note_activity(&mut self) {
@@ -295,7 +297,7 @@ impl Workspace {
         }
         self.menu = None;
         self.dragging = None;
-        self.sidebar_overlay_open = false;
+        self.sidebar_overlay_requested = false;
         self.popup_return_focus = None;
         window.set_window_title(&format!("RustTerm — {}", tr(i18n_key::SETTINGS_LOCKED)));
         self.lock_screen.password.read(cx).focus(window);
@@ -496,16 +498,11 @@ impl Workspace {
         let form = div()
             .w(px(344.))
             .max_w_full()
+            .my_auto()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .child(
-                ui::icon(ui::Icon::Logo)
-                    .size(px(48.))
-                    .mb(px(22.))
-                    .text_color(rgb(ui::colors().brand)),
-            )
             .child(
                 div()
                     .h(px(32.))
@@ -539,8 +536,6 @@ impl Workspace {
             )
             .child(action);
         let frame = crate::app::window_frame::WindowFrame::new(window);
-        let content_size = frame.content_size(window.viewport_size());
-        let top = ((f32::from(content_size.height) - ui::TITLE_HEIGHT - 280.) / 2. - 40.).max(24.);
         div()
             .size_full()
             .flex()
@@ -589,19 +584,13 @@ impl Workspace {
                     .id("lock-scroll")
                     .flex_1()
                     .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .p(px(24.))
                     .overflow_y_scroll()
                     .map(ui::preserve_scroll_axes)
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .px(px(24.))
-                            .pt(px(top))
-                            .pb(px(24.))
-                            .child(form),
-                    )
+                    .child(form)
                     .map(|content| ui::scrollable(content, None)),
             )
             .into_any_element()
@@ -627,7 +616,7 @@ impl Workspace {
                             || this.palette.open
                             || this.modal.is_some()
                             || this.authentication.read(cx).is_active()
-                            || this.sidebar_overlay_open
+                            || this.sidebar_overlay_active()
                             || this.utility_overlay
                             || this.window_state.prompts.is_busy();
                         for pane in this.panes.values() {

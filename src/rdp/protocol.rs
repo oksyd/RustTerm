@@ -94,7 +94,9 @@ async fn send_with_receipt(
     cancel: Option<CancellationToken>,
     delivery: Delivery,
 ) -> Result<()> {
-    debug_assert!(deliveries.len() < MAX_DELIVERIES);
+    if deliveries.len() >= MAX_DELIVERIES {
+        return Err(RdpError::Limit("pending transport receipts"));
+    }
     let (receipt, received) = oneshot::channel();
     writer.enqueue(packet, cancel, Some(receipt)).await?;
     deliveries.spawn(async move {
@@ -618,8 +620,8 @@ async fn nla(
     Ok(())
 }
 
-pub(super) fn input(command: RdpCommand) -> Input {
-    match command {
+pub(super) fn input(command: RdpCommand) -> rustrdp::Result<Input> {
+    Ok(match command {
         RdpCommand::Key { scancode, pressed } => Input::Key { scancode, pressed },
         RdpCommand::Unicode(text) => Input::Unicode(text),
         RdpCommand::Pointer { x, y } => Input::Pointer { x, y },
@@ -661,14 +663,62 @@ pub(super) fn input(command: RdpCommand) -> Input {
         | RdpCommand::SetLocked(_)
         | RdpCommand::ReceiveFiles { .. }
         | RdpCommand::CancelReceiveFiles { .. } => {
-            unreachable!("handled by session channels")
+            return Err(rustrdp::Error::Invalid(
+                "non-input command sent to input encoder",
+            ));
         }
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn full_receipt_queue_rejects_work_without_panicking_or_sending() {
+        let (client, mut peer) = tokio::io::duplex(64);
+        let writer = transport::Writer::new(transport::Framed::new(client), Duration::from_secs(1));
+        let mut deliveries = Deliveries::new();
+        for _ in 0..MAX_DELIVERIES {
+            deliveries.spawn(std::future::pending());
+        }
+        assert_eq!(
+            send_with_receipt(
+                &writer,
+                &mut deliveries,
+                vec![1],
+                None,
+                Delivery::Paste { revision: 1 }
+            )
+            .await,
+            Err(RdpError::Limit("pending transport receipts"))
+        );
+        assert_eq!(deliveries.len(), MAX_DELIVERIES);
+        use tokio::io::AsyncReadExt;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), peer.read_u8())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn input_encoder_rejects_session_commands_without_panicking() {
+        assert!(matches!(
+            input(RdpCommand::Pointer { x: 4, y: 5 }),
+            Ok(Input::Pointer { x: 4, y: 5 })
+        ));
+        for command in [
+            RdpCommand::Resize {
+                width: 800,
+                height: 600,
+            },
+            RdpCommand::SetLocked(true),
+            RdpCommand::SetAudioMuted(true),
+        ] {
+            assert!(matches!(input(command), Err(rustrdp::Error::Invalid(_))));
+        }
+    }
 
     #[test]
     fn interaction_priority_preserves_drag_edges_and_coalesces_pointer_positions() {

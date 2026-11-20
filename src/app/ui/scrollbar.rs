@@ -6,6 +6,7 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 use std::rc::Rc;
+use std::sync::Arc;
 
 pub const SCROLLBAR_WIDTH: f32 = 12.;
 const THUMB_WIDTH: f32 = 6.;
@@ -125,6 +126,7 @@ impl Source {
 pub struct Scrollbars {
     id: ElementId,
     sources: [Option<Source>; 2],
+    vertical_markers: Option<(Arc<[usize]>, Option<usize>)>,
 }
 
 /// Place after the tracked content, inside a relative viewport.
@@ -136,6 +138,7 @@ pub fn scrollbars(
     Scrollbars {
         id: id.into(),
         sources: [horizontal.map(Source::Handle), vertical.map(Source::Handle)],
+        vertical_markers: None,
     }
 }
 
@@ -154,6 +157,7 @@ pub fn scrollbar(
     Scrollbars {
         id: id.into(),
         sources,
+        vertical_markers: None,
     }
 }
 
@@ -161,10 +165,17 @@ pub fn list_scrollbar(id: impl Into<ElementId>, list: ListState) -> Scrollbars {
     Scrollbars {
         id: id.into(),
         sources: [None, Some(Source::List(list))],
+        vertical_markers: None,
     }
 }
 
 impl Scrollbars {
+    /// Positions are sorted document rows in the same units as vertical scroll metrics.
+    pub fn with_vertical_markers(mut self, rows: Arc<[usize]>, current: Option<usize>) -> Self {
+        self.vertical_markers = Some((rows, current));
+        self
+    }
+
     /// Decorate a scrolling element without adding a child to its content layout.
     pub fn decorate(self, content: impl IntoElement) -> DecoratedScrollArea {
         DecoratedScrollArea {
@@ -320,6 +331,24 @@ fn track_bounds(
     }
 }
 
+fn marker_slots(
+    rows: &[usize],
+    current: Option<usize>,
+    content: f32,
+    slots: usize,
+) -> impl Iterator<Item = (usize, bool)> {
+    let rows = if slots > 0 && content > 0. { rows } else { &[] };
+    let slot = move |row: usize| {
+        (((row as f32 + 0.5) / content * slots as f32) as usize).min(slots.saturating_sub(1))
+    };
+    let active = current.map(slot);
+    rows.chunk_by(move |a, b| slot(*a) == slot(*b))
+        .map(move |group| {
+            let index = slot(group[0]);
+            (index, active == Some(index))
+        })
+}
+
 #[derive(Clone)]
 struct Bar {
     axis: ScrollAxis,
@@ -329,6 +358,51 @@ struct Bar {
     thumb: Thumb,
     viewport_pixels: f32,
     hitbox: Hitbox,
+}
+
+fn paint_markers(
+    track: Bounds<Pixels>,
+    content: f32,
+    rows: &[usize],
+    current: Option<usize>,
+    mut paint: impl FnMut(Bounds<Pixels>, u32),
+) {
+    let length = f32::from(track.size.height) - 2. * INSET;
+    if length <= 0. {
+        return;
+    }
+    let colors = super::colors();
+    // Leave space between ordinary ticks even when every row matches.
+    let slots = (length / 5.).floor().max(1.) as usize;
+    let mut current_bounds = None;
+    for (slot, active) in marker_slots(rows, current, content, slots) {
+        let center = (slot as f32 + 0.5) * length / slots as f32;
+        let (width, height) = if active {
+            (track.size.width, 5_f32)
+        } else {
+            (px(8.), 3.)
+        };
+        let height = height.min(length);
+        let top = (center - height / 2.).round().clamp(0., length - height);
+        let bounds = Bounds::new(
+            point(track.right() - width, track.top() + px(INSET + top)),
+            size(width, px(height)),
+        );
+        if active {
+            current_bounds = Some(bounds);
+        } else {
+            paint(bounds, colors.warning);
+        }
+    }
+    if let Some(bounds) = current_bounds {
+        // Separate the active tick from adjacent hits and the thumb, even during a drag.
+        let outline = Bounds::from_corners(
+            point(bounds.left(), bounds.top() - px(1.)),
+            point(bounds.right(), bounds.bottom() + px(1.)),
+        );
+        paint(outline, colors.surface);
+        paint(bounds, colors.accent);
+    }
 }
 
 impl Bar {
@@ -476,6 +550,19 @@ impl RenderOnce for Scrollbars {
                         )
                         .corner_radii(px(3.)),
                     );
+                    if bar.axis == ScrollAxis::Vertical
+                        && let Some((rows, current)) = &self.vertical_markers
+                    {
+                        paint_markers(
+                            bar.track,
+                            bar.metrics.content,
+                            rows,
+                            *current,
+                            |bounds, color| {
+                                window.paint_quad(fill(bounds, rgb(color)));
+                            },
+                        );
+                    }
                 }
                 bind_mouse(bars, state, window);
             },
@@ -618,6 +705,57 @@ fn bind_mouse(bars: Vec<Bar>, state: Entity<State>, window: &mut Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrollbar_search_markers_merge_dense_rows_and_keep_the_active_hit() {
+        let slots = |rows: &[usize], current, count| {
+            marker_slots(rows, current, 1000., count).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            slots(&[0, 1, 2, 505, 999], Some(1), 10),
+            [(0, true), (5, false), (9, false)]
+        );
+        assert_eq!(slots(&[0, 999], None, 1), [(0, false)]);
+        assert!(slots(&[0], None, 0).is_empty());
+        assert!(slots(&[], None, 10).is_empty());
+    }
+
+    #[test]
+    fn scrollbar_search_ticks_stand_out_and_keep_the_current_hit_on_top() {
+        let track = Bounds::new(point(px(10.), px(20.)), size(px(SCROLLBAR_WIDTH), px(104.)));
+        let colors = crate::app::ui::colors();
+        let mut quads = Vec::new();
+        let rows: Vec<_> = (0..100).collect();
+        paint_markers(track, 100., &rows, Some(50), |bounds, color| {
+            quads.push((bounds, color));
+        });
+        let ordinary: Vec<_> = quads
+            .iter()
+            .filter(|(_, color)| *color == colors.warning)
+            .collect();
+        assert!(ordinary.len() >= 2);
+        assert!(
+            ordinary
+                .windows(2)
+                .all(|pair| pair[1].0.top() >= pair[0].0.bottom() + px(1.))
+        );
+        for (bounds, _) in &ordinary {
+            assert!(bounds.size.width >= px(8.) && bounds.size.height >= px(3.));
+        }
+        let [(outline, edge_color), (active, color)] = quads[ordinary.len()..] else {
+            panic!("expected the current marker above the ordinary ticks");
+        };
+        assert_eq!(edge_color, colors.surface);
+        assert!(outline.top() < active.top() && outline.bottom() > active.bottom());
+        assert_eq!(color, colors.accent);
+        assert_eq!(active.size.width, track.size.width);
+        assert!(active.size.height >= px(5.));
+        assert!(
+            quads
+                .iter()
+                .all(|(bounds, _)| track.intersect(bounds) == *bounds)
+        );
+    }
 
     #[test]
     fn reserved_gutters_are_not_subtracted_twice_and_headers_stay_clear() {

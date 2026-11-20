@@ -68,7 +68,8 @@ impl InputWorker {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .record(queued.queued_at.elapsed());
-                        let result = encoder.encode(protocol::input(queued.command));
+                        let result =
+                            protocol::input(queued.command).and_then(|input| encoder.encode(input));
                         match result {
                             Ok(Some(batch)) => {
                                 for packet in batch.packets {
@@ -129,14 +130,12 @@ impl InputWorker {
         self.stop.cancel();
         // Keep the join handle owned by self across await, so cancellation still
         // aborts it through Drop instead of detaching a second mailbox consumer.
-        let recovered = self
-            .task
-            .as_mut()
-            .expect("input worker is running")
-            .await
-            .map_err(|_| RdpError::Runtime)?;
+        let Some(task) = &mut self.task else {
+            return Ok(());
+        };
+        let recovered = task.await;
         self.task.take();
-        *source = recovered;
+        *source = recovered.map_err(|_| RdpError::Runtime)?;
         Ok(())
     }
 }
@@ -193,7 +192,7 @@ mod tests {
 
     fn packets(session: &mut rustrdp::Session, command: RdpCommand) -> Vec<u8> {
         session
-            .input(protocol::input(command))
+            .input(protocol::input(command).unwrap())
             .unwrap()
             .into_iter()
             .flat_map(|event| {
@@ -262,6 +261,7 @@ mod tests {
         assert!(independent, "drag input waited for graphics decoding");
         assert_eq!(received, expected);
         assert_eq!(worker.take_latency().samples, 3);
+        worker.finish(&mut source).await.unwrap();
         worker.finish(&mut source).await.unwrap();
         source_tx
             .try_send(

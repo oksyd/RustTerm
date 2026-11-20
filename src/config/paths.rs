@@ -1,6 +1,6 @@
 //! Per-user storage. Configuration stays at its original location; disposable data
 //! and session state have independent lifetimes. Passwords remain in the OS vault.
-use super::{AppConfig, ConfigError, Result, WorkspaceSnapshot, storage};
+use super::{AppConfig, ConfigError, RecentConnections, Result, WorkspaceSnapshot, storage};
 #[cfg(any(not(windows), test))]
 use std::path::Path;
 use std::path::PathBuf;
@@ -58,6 +58,7 @@ impl AppPaths {
             // An explicitly empty snapshot also wins over old inline session state.
             config.workspace = workspace;
         }
+        config.recent_connections = RecentConnections::load(&self.state);
         if legacy_workspace {
             // Save the snapshot before removing it from config.toml. A failed or
             // interrupted migration leaves at least one complete copy to retry.
@@ -80,7 +81,9 @@ impl AppPaths {
                 error => error,
             },
         )?;
-        storage::write_atomic(&self.config.join("config.toml"), preferences.as_bytes())
+        storage::write_atomic(&self.config.join("config.toml"), preferences.as_bytes())?;
+        config.recent_connections.save(&self.state);
+        Ok(())
     }
 
     /// Logs are optional: callers may continue if the log directory is unavailable.

@@ -221,7 +221,9 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                                 }
                             }
                             Err(error) => RdpEvent::RemoteFilesFailed { offer_id, error },
-                            Ok(DownloadNext::Request { .. }) => unreachable!(),
+                            Ok(DownloadNext::Request { .. }) => {
+                                return Err(RdpError::Protocol("clipboard download state"));
+                            }
                         };
                         self.events
                             .send(event)
@@ -492,7 +494,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                     .await?;
                 }
             }
-            _ => unreachable!("clipboard events are dispatched by output"),
+            _ => return Err(RdpError::Protocol("unexpected clipboard event")),
         }
         Ok(())
     }

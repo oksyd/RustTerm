@@ -67,7 +67,6 @@ macro_rules! icons {
 
 icons! {
     Logo => "logo",
-    Menu => "menu",
     Sidebar => "sidebar",
     Terminal => "terminal",
     Ssh => "ssh",
@@ -183,18 +182,32 @@ pub fn icon_button_with_size(
     label: &'static str,
     icon_size: f32,
 ) -> Stateful<Div> {
-    icon_button_control(id, glyph, label, ButtonStyle::Neutral, true, icon_size)
+    icon_button_control(
+        id,
+        glyph,
+        label,
+        IconButtonColors::for_style(ButtonStyle::Neutral),
+        true,
+        icon_size,
+    )
 }
 
 pub fn icon_button_enabled(
     id: impl Into<ElementId>,
     glyph: Icon,
-    label: &'static str,
+    label: impl Into<gpui::SharedString>,
     enabled: bool,
 ) -> Stateful<Div> {
-    icon_button_control(id, glyph, label, ButtonStyle::Neutral, enabled, 14.)
-        .tab_index(0)
-        .tab_stop(enabled)
+    icon_button_control(
+        id,
+        glyph,
+        label,
+        IconButtonColors::for_style(ButtonStyle::Neutral),
+        enabled,
+        14.,
+    )
+    .tab_index(0)
+    .tab_stop(enabled)
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +227,33 @@ impl ButtonStyle {
     }
 }
 
+/// Resolve colors before constructing the control; interaction styles are installed once.
+#[derive(Clone, Copy)]
+struct IconButtonColors {
+    foreground: u32,
+    hover_background: u32,
+    hover_foreground: u32,
+    focus_background: u32,
+    focus_border: u32,
+}
+
+impl IconButtonColors {
+    fn for_style(style: ButtonStyle) -> Self {
+        let (hover_background, hover_foreground) = style.hover_colors();
+        let foreground = match style {
+            ButtonStyle::Primary => colors().accent,
+            _ => colors().muted,
+        };
+        Self {
+            foreground,
+            hover_background,
+            hover_foreground,
+            focus_background: colors().selected,
+            focus_border: colors().accent,
+        }
+    }
+}
+
 /// GPUI allows only one hover refinement per element. Choose the variant here,
 /// before applying hover, instead of overriding a pre-styled button at the call site.
 pub fn styled_icon_button(
@@ -222,22 +262,25 @@ pub fn styled_icon_button(
     label: &'static str,
     style: ButtonStyle,
 ) -> Stateful<Div> {
-    icon_button_control(id, glyph, label, style, true, 14.)
+    icon_button_control(
+        id,
+        glyph,
+        label,
+        IconButtonColors::for_style(style),
+        true,
+        14.,
+    )
 }
 
 fn icon_button_control(
     id: impl Into<ElementId>,
     glyph: Icon,
-    label: &'static str,
-    style: ButtonStyle,
+    label: impl Into<gpui::SharedString>,
+    palette: IconButtonColors,
     enabled: bool,
     icon_size: f32,
 ) -> Stateful<Div> {
-    let (hover_bg, hover_fg) = style.hover_colors();
-    let foreground = match style {
-        ButtonStyle::Primary => colors().accent,
-        _ => colors().muted,
-    };
+    let label = label.into();
     div()
         .id(id)
         .group("icon-button")
@@ -251,24 +294,28 @@ fn icon_button_control(
         .rounded(px(metrics::RADIUS))
         .border_1()
         .border_color(gpui::rgba(0))
-        .focus(|s| {
-            s.bg(rgb(colors().selected))
-                .border_color(rgb(colors().accent))
+        .focus(move |s| {
+            s.bg(rgb(palette.focus_background))
+                .border_color(rgb(palette.focus_border))
         })
-        .text_color(rgb(foreground))
+        .text_color(rgb(palette.foreground))
         .when(enabled, |button| {
-            button
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(hover_bg)).text_color(rgb(hover_fg)))
+            button.cursor_pointer().hover(move |style| {
+                style
+                    .bg(rgb(palette.hover_background))
+                    .text_color(rgb(palette.hover_foreground))
+            })
         })
         .when(!enabled, disabled_button)
-        .tooltip(move |_, cx| cx.new(|_| Tooltip(tr(label).to_owned())).into())
+        .tooltip(move |_, cx| cx.new(|_| Tooltip(tr(label.as_ref()).to_owned())).into())
         .child(
             icon(glyph)
                 .size(px(icon_size))
-                .text_color(rgb(foreground))
+                .text_color(rgb(palette.foreground))
                 .when(enabled, |icon| {
-                    icon.group_hover("icon-button", |s| s.text_color(rgb(hover_fg)))
+                    icon.group_hover("icon-button", move |s| {
+                        s.text_color(rgb(palette.hover_foreground))
+                    })
                 }),
         )
 }
@@ -278,7 +325,7 @@ pub fn text_button(
     label: &'static str,
     style: ButtonStyle,
 ) -> Stateful<Div> {
-    text_button_control(id, label, style, true)
+    text_button_control(id, tr(label), style, true)
 }
 
 pub fn text_button_enabled(
@@ -287,7 +334,7 @@ pub fn text_button_enabled(
     style: ButtonStyle,
     enabled: bool,
 ) -> Stateful<Div> {
-    text_button_control(id, label, style, enabled)
+    text_button_control(id, tr(label), style, enabled)
         .tab_index(0)
         .tab_stop(enabled)
 }
@@ -343,9 +390,9 @@ fn disabled_button(button: Stateful<Div>) -> Stateful<Div> {
         })
 }
 
-fn text_button_control(
+pub(super) fn text_button_control(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<gpui::SharedString>,
     style: ButtonStyle,
     enabled: bool,
 ) -> Stateful<Div> {
@@ -381,7 +428,7 @@ fn text_button_control(
                 .hover(|style| style.bg(rgb(hover_bg)).text_color(rgb(hover_fg)))
         })
         .when(!enabled, disabled_button)
-        .child(tr(label))
+        .child(label.into())
 }
 
 pub fn connection_address(
@@ -473,7 +520,7 @@ impl gpui::Render for CopyAddressState {
             cx.stop_propagation();
         })
         .on_click(cx.listener(|this, _, _, cx| {
-            cx.write_to_clipboard(ClipboardItem::new_string(this.address.clone()));
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(this.address.clone()));
             this.copied = true;
             this.reset = Some(cx.spawn(async move |this, cx| {
                 Timer::after(Duration::from_secs(2)).await;
@@ -541,6 +588,26 @@ impl AssetSource for Assets {
             _ => Ok(Vec::new()),
         }
     }
+}
+
+/// A text label remains recognizable independently of the tab's group color.
+pub fn production_badge() -> Div {
+    protection_badge(i18n_key::CONNECTIONS_PRODUCTION)
+}
+
+pub fn protection_pending_badge() -> Div {
+    protection_badge(i18n_key::CONNECTIONS_PRODUCTION_RECONNECT_REQUIRED)
+}
+
+fn protection_badge(label: &'static str) -> Div {
+    div()
+        .flex_shrink_0()
+        .px_1()
+        .rounded_sm()
+        .text_size(px(10.))
+        .text_color(rgb(colors().warning))
+        .bg(rgb(colors().surface))
+        .child(tr(label))
 }
 
 #[cfg(test)]

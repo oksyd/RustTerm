@@ -12,7 +12,7 @@ impl RdpView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.config.uses_dynamic_resolution() {
+        if self.zoom != Zoom::Dynamic {
             self.connect(secret, ssh, window, cx);
             return;
         }
@@ -20,7 +20,8 @@ impl RdpView {
             if this.closed || this.state != State::Connecting {
                 return;
             }
-            if this.visible && resize_dimensions(this.layout_size, window.scale_factor()).is_none()
+            if this.visible
+                && resize_dimensions(this.connection_layout(), window.scale_factor()).is_none()
             {
                 // Frame callbacks precede layout. Allow one actual layout pass
                 // before the handshake; background or zero-sized panes retain
@@ -70,12 +71,13 @@ impl RdpView {
         self.applications = remote_app::Applications::default();
         self.cancel_file_clipboard_read();
         self.file_transfer = None;
-        self.audio_muted = false;
         self.microphone_enabled = self.config.audio_input;
         self.clipboard = clipboard::ClipboardState::default();
         // Resolve automatic DPI for this session without changing the saved profile.
         self.device_scale = window.scale_factor();
-        let config = connection_config(&self.config, self.layout_size, self.device_scale);
+        let mut requested = self.config.clone();
+        requested.dynamic_resolution = self.zoom == Zoom::Dynamic;
+        let config = connection_config(&requested, self.connection_layout(), self.device_scale);
         self.desktop_scale = config.desktop_scale.expect("session DPI is resolved");
         if config.uses_dynamic_resolution() {
             self.desktop_size = (config.width, config.height);
@@ -88,11 +90,12 @@ impl RdpView {
                 u64::from(config.height),
             ],
         );
-        let handle = match RdpClient::connect_with_ssh(
+        let handle = match RdpClient::connect_with_initial_audio_mute(
             config,
             secret,
             Some(self.window_state.cache_dir.to_path_buf()),
             ssh,
+            self.effective_audio_mute(),
         ) {
             Ok(handle) => handle,
             Err(error) => {
@@ -105,9 +108,6 @@ impl RdpView {
         self.sender = Some(handle.sender());
         if self.window_state.is_locked() {
             self.set_locked(true, cx);
-        }
-        if self.window_state.is_locked() {
-            self.send(RdpCommand::SetAudioMuted(true), cx);
         }
         self.frames = Some(handle.frames.clone());
         if self.config.remote_app.is_none() {
@@ -213,10 +213,16 @@ impl RdpView {
             RdpEvent::RemoteApp(event) => self.remote_app_event(event, window, cx),
             RdpEvent::Performance(sample) => {
                 performance::record_backend(&self.window_state, self.index, &sample);
+                self.quality = Some(self.performance.quality(sample));
                 self.performance.flush(&self.window_state, self.index);
+                if self.menu_open && self.menu_page == menu::Page::ConnectionInfo {
+                    cx.notify();
+                }
                 return;
             }
             RdpEvent::Connecting => {
+                self.quality = None;
+                self.performance = performance::Performance::default();
                 self.close_application_windows(cx);
                 self.applications = remote_app::Applications::default();
                 self.resize_task = None;
@@ -234,14 +240,6 @@ impl RdpView {
                 self.retry_allowed = false;
                 self.state = State::Connected;
                 self.error = None;
-                if self.config.audio_output {
-                    self.send(
-                        RdpCommand::SetAudioMuted(
-                            self.audio_muted || self.window_state.is_locked(),
-                        ),
-                        cx,
-                    );
-                }
                 self.request_resize(cx);
             }
             RdpEvent::Disconnected => {
@@ -526,9 +524,12 @@ impl RdpView {
                 if self.window_state.is_locked() {
                     return;
                 }
-                self.clipboard
-                    .receive(revision, RdpClipboardEvent::Content(content));
-                if let Some(content) = self.clipboard.remote_content.clone() {
+                if self
+                    .clipboard
+                    .receive(revision, RdpClipboardEvent::Content(content))
+                    && self.clipboard.export_ready()
+                    && let Some(content) = self.clipboard.remote_content.clone()
+                {
                     self.publish_remote_content(revision, content, cx);
                 }
             }
@@ -551,18 +552,21 @@ impl RdpView {
                     | RdpClipboardEvent::Content(_)
                     | RdpClipboardEvent::Unavailable => None,
                 };
-                if self.clipboard.receive(revision, event)
-                    && let Some(event) = diagnostic
-                {
+                let unavailable = matches!(
+                    &event,
+                    RdpClipboardEvent::Unavailable | RdpClipboardEvent::Rejected(_)
+                );
+                let current = self.clipboard.receive(revision, event);
+                if current && let Some(event) = diagnostic {
                     self.window_state.record(event, self.index);
                     if let Some(code) = error_code {
                         self.window_state.record(code, self.index);
                     }
                 }
-                if text_received {
-                    if revision == self.clipboard.revision() {
-                        self.file_export_snapshot = None;
-                    }
+                if current && (text_received || (unavailable && !self.clipboard.has_export())) {
+                    self.file_export_snapshot = None;
+                }
+                if current && text_received {
                     self.sync_remote_clipboard(window, cx);
                 }
             }

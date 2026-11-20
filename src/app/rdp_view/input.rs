@@ -503,14 +503,11 @@ impl RdpView {
             self.release_input();
             let (dx, dy) = local_pan_delta(event.delta, event.modifiers.alt);
             if let Some(bounds) = self.bounds {
-                self.pan.0 = (self.pan.0 - dx).clamp(
-                    0.,
-                    (f32::from(self.desktop_size.0) - f32::from(bounds.size.width)).max(0.),
-                );
-                self.pan.1 = (self.pan.1 - dy).clamp(
-                    0.,
-                    (f32::from(self.desktop_size.1) - f32::from(bounds.size.height)).max(0.),
-                );
+                self.pan.0 -= dx * self.device_scale;
+                self.pan.1 -= dy * self.device_scale;
+                self.restore_pan = None;
+                self.clamp_pan(bounds);
+                self.display_changed(cx);
                 cx.notify();
             }
             cx.stop_propagation();
@@ -707,6 +704,13 @@ impl RdpView {
         paste: bool,
         cx: &mut Context<Self>,
     ) {
+        self.clipboard.operation = Some(clipboard::Operation::Send(
+            if content.png.is_some() || content.dib.is_some() {
+                clipboard::ContentKind::Image
+            } else {
+                clipboard::ContentKind::Text
+            },
+        ));
         let action = if paste {
             RdpClipboardAction::PasteContent(content)
         } else {
@@ -825,13 +829,12 @@ impl RdpView {
     }
 
     pub(super) fn toggle_audio_mute(&mut self, cx: &mut Context<Self>) {
-        let muted = !self.audio_muted;
         if !self.window_state.is_locked()
             && self.config.audio_output
             && self.state == State::Connected
-            && self.send(RdpCommand::SetAudioMuted(muted), cx)
         {
-            self.audio_muted = muted;
+            self.audio_muted = !self.audio_muted;
+            self.sync_audio_mute(cx);
             cx.emit(PaneEvent::Activity);
             cx.notify();
         }
@@ -951,8 +954,9 @@ impl RdpView {
             return;
         }
         if !self.clipboard.has_export() && (window.is_window_active() || application_active) {
+            let sequence = file_clipboard::sequence();
             let local = self.read_clipboard(cx);
-            self.clipboard.capture_export(local);
+            self.clipboard.capture_export(local, sequence);
         }
         if self.config.clipboard && self.clipboard.has_export() {
             self.file_export_snapshot = if explicit {
@@ -982,17 +986,24 @@ impl RdpView {
             || (!application_active
                 && (!self.focus.is_focused(window) || (!window.is_window_active() && !is_x11())))
             || !self.clipboard.export_ready()
+            || self.clipboard.remote_content.is_some()
         {
             return false;
         }
         let local = self.read_clipboard(cx);
-        if let Some(text) = self.clipboard.take_export(&local) {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        if let Some(text) = self
+            .clipboard
+            .take_export(&local, file_clipboard::sequence())
+        {
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(text.clone()));
             self.clipboard.remote_copy(Ok(Some(text)));
-            let feedback_cleared = self.clipboard.feedback.take().is_some();
             self.window_state
                 .record("rdp-clipboard-received", self.index);
-            return feedback_cleared;
+            return self.clipboard.feedback.take().is_some();
+        }
+        if matches!(self.clipboard.feedback, Some(Feedback::Requesting)) {
+            self.clipboard.feedback = None;
+            return true;
         }
         false
     }
@@ -1043,48 +1054,16 @@ impl RdpView {
     }
 
     pub(super) fn copy_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.config.clipboard
-            && self.input_enabled()
-            && let Some(content) = self.clipboard.remote_content.clone()
-        {
-            let Some(revision) = self.begin_clipboard(cx) else {
-                return;
-            };
-            self.file_export_snapshot = Some(self.capture_clipboard_snapshot(cx));
-            self.publish_remote_content(revision, content, cx);
+        if !self.config.clipboard || !self.input_enabled() {
             return;
         }
-        if self.config.clipboard
-            && self.input_enabled()
-            && let Some(text) = self.clipboard.remote.clone()
-        {
-            let Some(revision) = self.begin_clipboard(cx) else {
-                return;
-            };
-            if !self.send(
-                RdpCommand::Clipboard {
-                    revision,
-                    action: RdpClipboardAction::Cancel,
-                },
-                cx,
-            ) {
-                return;
-            }
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            self.clipboard.remote_copy(Ok(Some(text)));
-            self.clipboard.feedback = Some(Feedback::Message(
-                i18n_key::RDP_REMOTE_TEXT_COPIED_TO_THE_LOCAL_CLIPBOARD,
-            ));
-            cx.emit(PaneEvent::Activity);
-            cx.notify();
-        }
-    }
-
-    pub(super) fn request_clipboard(&mut self, cx: &mut Context<Self>) {
-        if self.config.clipboard && self.input_enabled() {
-            let Some(revision) = self.begin_clipboard(cx) else {
-                return;
-            };
+        let Some(revision) = self.begin_clipboard(cx) else {
+            return;
+        };
+        if self.clipboard.remote_content.is_none() && self.clipboard.remote.is_none() {
+            let sequence = file_clipboard::sequence();
+            let local = self.read_clipboard(cx);
+            let snapshot = self.capture_clipboard_snapshot(cx);
             if self.send(
                 RdpCommand::Clipboard {
                     revision,
@@ -1092,9 +1071,32 @@ impl RdpView {
                 },
                 cx,
             ) {
-                self.clipboard.feedback = Some(Feedback::Requesting);
+                self.clipboard.request_export(local, sequence);
+                self.file_export_snapshot = Some(snapshot);
                 cx.emit(PaneEvent::Activity);
+                cx.notify();
             }
+            return;
+        }
+        if !self.send(
+            RdpCommand::Clipboard {
+                revision,
+                action: RdpClipboardAction::Cancel,
+            },
+            cx,
+        ) {
+            return;
+        }
+        if let Some(content) = self.clipboard.remote_content.clone() {
+            self.file_export_snapshot = Some(self.capture_clipboard_snapshot(cx));
+            self.publish_remote_content(revision, content, cx);
+        } else if let Some(text) = self.clipboard.remote.clone() {
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(text.clone()));
+            self.clipboard.remote_copy(Ok(Some(text)));
+            self.clipboard.feedback = Some(Feedback::Message(
+                i18n_key::RDP_REMOTE_TEXT_COPIED_TO_THE_LOCAL_CLIPBOARD,
+            ));
+            cx.emit(PaneEvent::Activity);
             cx.notify();
         }
     }

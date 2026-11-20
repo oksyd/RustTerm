@@ -1,5 +1,6 @@
 mod activity;
 mod chrome;
+mod closing;
 mod command_notice;
 mod connection_kind;
 mod connections;
@@ -20,13 +21,14 @@ mod resources;
 mod session_names;
 mod sidebar;
 mod tab_groups;
+mod tab_history;
 mod utilities;
 
 use crate::app::command_view::CommandHistoryView;
 use crate::app::file_transfer::FileTransferView;
 use crate::app::forms::{Fields, ProfileForm, SettingsForm};
 use crate::app::interaction::WindowState;
-use crate::app::layout::{Axis, PaneNode};
+use crate::app::layout::{Axis, DockPanel, PaneNode};
 use crate::app::pane::{Pane, SessionTool};
 use crate::app::text_input::{InputEvent, TextInput};
 use crate::app::{Startup, diagnostics};
@@ -81,8 +83,11 @@ struct TunnelAuth {
 #[derive(Clone, Copy)]
 enum DragTarget {
     Split(usize),
-    Sidebar,
-    Files,
+    Panel {
+        panel: DockPanel,
+        start_x: Pixels,
+        start_width: f32,
+    },
 }
 #[derive(Clone, Copy)]
 enum LeaveAction {
@@ -96,6 +101,8 @@ pub struct Workspace {
     paths: rustterm::config::AppPaths,
     _lock: ConfigLock,
     tabs: Vec<Tab>,
+    tab_history: tab_history::TabHistory,
+    opening_initial_tabs: bool,
     collapsed_tab_groups: HashSet<Uuid>,
     tab_group_colors: tab_groups::TabGroupColors,
     save_confirmation: Option<gpui::Task<()>>,
@@ -150,9 +157,8 @@ pub struct Workspace {
     modal_save_focus: FocusHandle,
     files: HashMap<usize, Entity<FileTransferView>>,
     files_subscriptions: HashMap<usize, Subscription>,
-    files_follow: HashSet<usize>,
     tools: HashMap<usize, SessionTool>,
-    left_tool: Option<SessionTool>,
+    dock_tool: Option<SessionTool>,
     connection_type: Option<connection_kind::ConnectionKind>,
     command_views: HashMap<usize, Entity<CommandHistoryView>>,
     command_subscriptions: HashMap<usize, Subscription>,
@@ -164,10 +170,10 @@ pub struct Workspace {
     sidebar_focus: FocusHandle,
     sidebar_scroll: gpui::ScrollHandle,
     sidebar_visible: bool,
-    sidebar_width: f32,
-    sidebar_overlay_open: bool,
+    sidebar_overlay_requested: bool,
     utility_overlay: bool,
     zoomed: Option<usize>,
+    immersive_rdp: Option<usize>,
     compact_panes: bool,
     error_banner_height: f32,
     menu_anchor: gpui::Point<Pixels>,
@@ -260,6 +266,8 @@ impl Workspace {
             paths,
             _lock: lock,
             tabs: Vec::new(),
+            tab_history: Default::default(),
+            opening_initial_tabs: false,
             collapsed_tab_groups: HashSet::new(),
             tab_group_colors: tab_groups::TabGroupColors::default(),
             save_confirmation: None,
@@ -314,9 +322,8 @@ impl Workspace {
             modal_save_focus: cx.focus_handle(),
             files: HashMap::new(),
             files_subscriptions: HashMap::new(),
-            files_follow: HashSet::new(),
             tools: HashMap::new(),
-            left_tool: None,
+            dock_tool: None,
             connection_type: None,
             command_views: HashMap::new(),
             command_subscriptions: HashMap::new(),
@@ -328,10 +335,10 @@ impl Workspace {
             sidebar_focus: cx.focus_handle(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_visible: false,
-            sidebar_width: 224.,
-            sidebar_overlay_open: false,
+            sidebar_overlay_requested: false,
             utility_overlay: false,
             zoomed: None,
+            immersive_rdp: None,
             compact_panes: false,
             error_banner_height: 0.,
             menu_anchor: gpui::Point::default(),

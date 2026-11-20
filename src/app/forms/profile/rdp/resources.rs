@@ -27,6 +27,17 @@ impl ProfileForm {
                 |settings| settings.audio_output = !settings.audio_output,
                 cx,
             ))
+            .when(self.rdp.settings.audio_output, |body| {
+                body.child(self.rdp_toggle(
+                    "rdp-background-audio",
+                    i18n_key::RDP_MUTE_BACKGROUND_AUDIO,
+                    self.rdp.settings.mute_audio_in_background,
+                    |settings| {
+                        settings.mute_audio_in_background = !settings.mute_audio_in_background
+                    },
+                    cx,
+                ))
+            })
             .child(self.rdp_toggle(
                 "rdp-audio-input",
                 i18n_key::RDP_ALLOW_REMOTE_APPLICATIONS_TO_USE_THE_LOCAL_MICROPHONE,

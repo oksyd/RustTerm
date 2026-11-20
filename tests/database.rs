@@ -1,6 +1,9 @@
 use rustterm::{
     config::{DatabaseConfig, Secret, SqlConfig},
-    database::{DatabaseClient, DatabaseError, TransactionStatus},
+    database::{
+        DatabaseClient, DatabaseError, TableInfo, TransactionStatus,
+        table::{CellValue, PageRequest},
+    },
 };
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -145,10 +148,19 @@ async fn sql_limits_errors_and_binary_values_preserve_connection_and_transaction
                     wire.ready(b'I').await;
                 }
                 assert!(wire.query().await.ends_with("SELECT binary"));
-                let binary: &[u8] = if mysql { b"ABC" } else { b"\\x414243" };
+                let json = r#"{"msg":"示例"}"#.as_bytes();
+                let binary: &[u8] = if mysql {
+                    json
+                } else {
+                    b"\\x7b226d7367223a22e7a4bae4be8b227d"
+                };
+                let opaque: &[u8] = if mysql { &[65, 0, 255] } else { b"\\x4100ff" };
                 wire.rows(
                     &[("binary", true), ("text", false)],
-                    &[vec![Some(binary), Some(b"ABC")]],
+                    &[
+                        vec![Some(binary), Some(b"\\x4142")],
+                        vec![Some(opaque), Some(b"0x4100ff")],
+                    ],
                     false,
                 )
                 .await;
@@ -178,10 +190,23 @@ async fn sql_limits_errors_and_binary_values_preserve_connection_and_transaction
                     .unwrap()
                     .results[0]
                     .rows,
-                [vec![
-                    Some(if mysql { "0x414243" } else { "\\x414243" }.into()),
-                    Some("ABC".into())
-                ]]
+                [
+                    vec![
+                        Some(
+                            if mysql {
+                                r#"{"msg":"示例"}"#
+                            } else {
+                                "\\x7b226d7367223a22e7a4bae4be8b227d"
+                            }
+                            .into()
+                        ),
+                        Some("\\x4142".into())
+                    ],
+                    vec![
+                        Some(if mysql { "0x4100ff" } else { "\\x4100ff" }.into()),
+                        Some("0x4100ff".into())
+                    ]
+                ]
             );
             client.begin().await.unwrap();
             assert_eq!(client.transaction_status(), TransactionStatus::Active);
@@ -193,6 +218,92 @@ async fn sql_limits_errors_and_binary_values_preserve_connection_and_transaction
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn server_table_binary_previews_keep_the_bytes_used_to_edit() {
+    for mysql in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut wire = wire::Wire::new(stream, mysql);
+            if mysql {
+                wire.greeting(false).await;
+            }
+            wire.login().await;
+            wire.query().await;
+            let (data_type, relation, extra): (&[u8], &[u8], &[u8]) = if mysql {
+                (b"blob", b"BASE TABLE", b"InnoDB")
+            } else {
+                (b"bytea", b"r", b"bytea")
+            };
+            wire.rows(
+                &[("name", false); 8],
+                &[vec![
+                    Some(b"payload"),
+                    Some(data_type),
+                    Some(b"NO"),
+                    None,
+                    Some(b""),
+                    Some(b"1"),
+                    Some(relation),
+                    Some(extra),
+                ]],
+                false,
+            )
+            .await;
+            let sql = wire.query().await;
+            assert!(
+                sql.contains(if mysql { "HEX(" } else { "pg_catalog.encode(" }),
+                "{sql}"
+            );
+            wire.rows(
+                &[("encoded", false)],
+                &[
+                    vec![Some(b"307834313432")],
+                    vec![Some(b"00ff")],
+                    vec![Some(b"")],
+                ],
+                false,
+            )
+            .await;
+        });
+        let client = connect(mysql, port).await;
+        let schema = client
+            .table_schema(TableInfo {
+                schema: "fixture".into(),
+                name: "cache".into(),
+                kind: "TABLE".into(),
+            })
+            .await
+            .unwrap();
+        let page = client
+            .table_page(&schema, PageRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(page.result.columns, ["payload"]);
+        for (row, (display, bytes)) in [
+            ("0x4142", b"0x4142".as_slice()),
+            ("0x00ff", &[0, 255]),
+            ("0x", &[]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(page.result.rows[row][0].as_deref(), Some(display));
+            assert_eq!(page.originals[row][0], CellValue::Binary(bytes.to_vec()));
+            let original = &page.originals[row][0];
+            assert_eq!(
+                schema
+                    .parse_cell(0, Some(original), &original.display().unwrap())
+                    .unwrap(),
+                *original
+            );
+        }
+        client.close();
+        server.await.unwrap();
+    }
 }
 
 #[tokio::test]

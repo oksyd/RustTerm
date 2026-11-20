@@ -68,7 +68,9 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                 self.session.cancel_remote_files(offer_id)
             }
             RdpCommand::PasteRemote => {
-                let cancel = paste.expect("remote paste carries a cancellation token");
+                let cancel = paste.ok_or(RdpError::Protocol(
+                    "missing remote paste cancellation token",
+                ))?;
                 if self.session.is_active() && !cancel.is_cancelled() {
                     self.clipboard.queued_paste = Some(cancel.clone());
                     send_paste(
@@ -100,7 +102,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
             RdpCommand::Clipboard { revision, action } => {
                 return self.clipboard_command(revision, action, paste).await;
             }
-            command => self.session.input(input(command)),
+            command => self.session.input(input(command)?),
         };
         self.command_result(result, command_revision).await
     }
@@ -140,7 +142,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                     | RdpClipboardAction::PasteContent(content) => {
                         self.session.set_clipboard_content(content)
                     }
-                    _ => unreachable!("matched a clipboard content action"),
+                    _ => Err(rustrdp::Error::Invalid("clipboard publication action")),
                 };
                 if result.is_ok() {
                     self.pending_publication(revision, paste);

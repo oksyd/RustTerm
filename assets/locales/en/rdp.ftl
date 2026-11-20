@@ -248,9 +248,7 @@ rdp-remote-audio-could-not-be-played-on-this-computer = Remote audio could not b
 
 rdp-remote-clipboard-confirmed-press-ctrl-v-in-the-remote-desktop = Remote clipboard confirmed; press Ctrl+V in the remote desktop to paste
 
-rdp-remote-clipboard-is-ready-use-copy-from-remote-to-copy = Remote clipboard is ready; use Copy from remote to copy it locally
-
-rdp-remote-clipboard-requested-use-copy-from-remote-when-text-is = Remote clipboard requested; use Copy from remote when it is ready
+rdp-fetching-remote-clipboard = Getting remote clipboard…
 
 rdp-remote-desktop-actions = Remote desktop actions
 
@@ -263,8 +261,6 @@ rdp-remote-resolution = Remote resolution
 rdp-remote-text-copied-to-the-local-clipboard = Remote text copied to the local clipboard
 
 rdp-remove-shared-directory = Remove shared directory
-
-rdp-request-remote-clipboard = Request remote clipboard
 
 rdp-requested-desktop-scale = Requested desktop scale
 
@@ -435,3 +431,71 @@ rdp-remote-app-suspended = The remote application desktop is unavailable or lock
 rdp-remote-app-window-failed = Could not create the local application window.
 
 rdp-remote-app-no-windows = The application has no visible windows. Close this connection to end the session.
+
+rdp-display-dynamic = Remote resolution follows window
+
+rdp-display-fit = Scale to fit locally
+
+rdp-display-current = Remote { $width } × { $height } · Local scale { $scale }%
+
+rdp-display-waiting = Resize requested · Waiting for server
+
+rdp-display-dynamic-help = Request a remote resolution matching this pane. The server must support Display Control.
+
+rdp-clipboard-send-direction = Local → Remote
+
+rdp-clipboard-receive-direction = Remote → Local
+
+rdp-clipboard-content = Clipboard
+
+rdp-clipboard-text = Text
+
+rdp-clipboard-image = Image
+
+rdp-clipboard-files = Files
+
+rdp-clipboard-unavailable-detail = Remote clipboard data is unavailable. It may be empty, unsupported or refused by the server.
+
+rdp-keyboard-local = Keyboard: local
+
+rdp-keyboard-remote = Remote · Ctrl+Alt releases
+
+rdp-keyboard-limited = Limited · Ctrl+Alt releases
+
+rdp-quality-timing = Avg { $mean } ms · Max { $max } ms
+
+rdp-quality-sample-age = Last sample
+
+rdp-quality-seconds-ago = { $seconds } seconds ago
+
+rdp-quality-server-updates = Server graphics updates / s
+
+rdp-quality-input-queue = Input queue
+
+rdp-quality-write-queue = Send queue
+
+rdp-quality-processing = Protocol and graphics processing
+
+rdp-quality-paint = CPU painting
+
+rdp-quality-frame-age = Frame publication → CPU paint
+
+rdp-quality-note = How to read these values
+
+rdp-quality-explanation = Low update rates are normal on a static desktop. Timings are local CPU/queue measurements, not network RTT or GPU presentation latency. — means no samples.
+
+rdp-clipboard-enabled = Enabled for this connection
+
+rdp-display-auto-short = Display: Auto
+
+rdp-display-fit-short = Display: Fit
+
+rdp-display-actual-short = Display: 100%
+
+rdp-previous-desktop-read-only = Previous desktop · Read-only
+
+rdp-pin-connection-bar = Pin connection bar
+
+rdp-release-keyboard-control = Release keyboard · Ctrl+Alt
+
+rdp-mute-background-audio = Mute audio when this desktop is in the background

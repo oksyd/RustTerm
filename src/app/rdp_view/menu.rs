@@ -7,17 +7,19 @@ use ui::Icon;
 pub(super) enum Page {
     Actions,
     ConnectionInfo,
+    Display,
 }
 
 #[derive(Clone, Copy)]
 enum Action {
+    Dynamic,
+    Fit,
     Actual,
     SendClipboard,
     SendFiles,
     SendFolders,
     CancelFiles,
     CopyRemote,
-    RequestClipboard,
     MuteAudio,
     Microphone,
     SecureAttention,
@@ -26,14 +28,14 @@ enum Action {
     Disconnect,
 }
 
-const ACTIONS: [Action; 13] = [
-    Action::Actual,
+const DISPLAY_ACTIONS: [Action; 3] = [Action::Dynamic, Action::Fit, Action::Actual];
+
+const ACTIONS: [Action; 11] = [
     Action::SendClipboard,
     Action::SendFiles,
     Action::SendFolders,
     Action::CancelFiles,
     Action::CopyRemote,
-    Action::RequestClipboard,
     Action::MuteAudio,
     Action::Microphone,
     Action::SecureAttention,
@@ -42,7 +44,109 @@ const ACTIONS: [Action; 13] = [
     Action::Disconnect,
 ];
 
+impl Page {
+    fn actions(self) -> &'static [Action] {
+        match self {
+            Self::Actions => &ACTIONS,
+            Self::Display => &DISPLAY_ACTIONS,
+            Self::ConnectionInfo => &[],
+        }
+    }
+
+    fn rows(self, can_cancel_files: bool) -> impl Iterator<Item = (usize, Action)> {
+        // The selection index stays attached to its action when a transfer ends.
+        self.actions()
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(move |(_, action)| can_cancel_files || !matches!(action, Action::CancelFiles))
+    }
+}
+
+impl Action {
+    fn help(self) -> Option<&'static str> {
+        match self {
+            Self::Dynamic => Some(i18n_key::RDP_DISPLAY_DYNAMIC_HELP),
+            Self::Fit => Some(i18n_key::RDP_SCALE_DESKTOP_TO_FIT_THE_PANE),
+            Self::Actual => {
+                Some(i18n_key::RDP_RELEASE_CONTROL_FIRST_CTRL_SHIFT_WHEEL_PANS_AT_100_ADD)
+            }
+            _ => None,
+        }
+    }
+}
+
 impl RdpView {
+    pub(super) fn render_display_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        ui::text_button(
+            ("rdp-display", self.index),
+            self.display_label(),
+            ui::ButtonStyle::Neutral,
+        )
+        .tab_index(0)
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .child(ui::icon(Icon::ChevronDown).size(px(12.)))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(cx.listener(|this, _, window, cx| {
+            let display_open = this.menu_open && this.menu_page == Page::Display;
+            if this.menu_open {
+                this.close_menu(window, cx);
+            }
+            if !display_open {
+                this.toggle_menu(window, cx);
+                if this.menu_open {
+                    this.select_first_menu_action(Page::Display);
+                }
+            }
+        }))
+        .into_any_element()
+    }
+
+    pub(super) fn display_label(&self) -> &'static str {
+        match self.zoom {
+            Zoom::Dynamic => i18n_key::RDP_DISPLAY_AUTO_SHORT,
+            Zoom::Fit => i18n_key::RDP_DISPLAY_FIT_SHORT,
+            Zoom::Actual => i18n_key::RDP_DISPLAY_ACTUAL_SHORT,
+        }
+    }
+
+    fn display_details(&self) -> String {
+        let scale = self
+            .bounds
+            .map(|bounds| {
+                let desktop = render::desktop_bounds(
+                    bounds,
+                    self.desktop_size,
+                    self.zoom,
+                    self.pan,
+                    self.device_scale,
+                );
+                f32::from(desktop.size.width) / f32::from(self.desktop_size.0.max(1))
+                    * self.device_scale
+                    * 100.
+            })
+            .unwrap_or(100.);
+        let mut text = rustterm::trf!(
+            i18n_key::RDP_DISPLAY_CURRENT,
+            width = self.desktop_size.0,
+            height = self.desktop_size.1,
+            scale = format!("{scale:.0}")
+        );
+        if self.zoom == Zoom::Dynamic
+            && self
+                .last_resize
+                .is_some_and(|size| size != self.desktop_size)
+        {
+            text.push('\n');
+            text.push_str(tr(i18n_key::RDP_DISPLAY_WAITING));
+        }
+        text
+    }
+
     pub(super) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.surface_visible()
             || !window.is_window_active()
@@ -57,20 +161,42 @@ impl RdpView {
         } else {
             self.release_control(cx);
             self.menu_open = true;
-            self.menu_page = Page::Actions;
-            self.menu_index = ACTIONS
-                .iter()
-                .position(|action| self.menu_action_enabled(*action))
-                .unwrap();
-            self.menu_scroll.scroll_to_item(self.menu_index);
+            self.select_first_menu_action(Page::Actions);
             cx.emit(PaneEvent::Focused(self.index));
             self.menu_focus.focus(window);
             cx.notify();
         }
     }
 
+    fn menu_rows(&self) -> impl Iterator<Item = (usize, Action)> {
+        self.menu_page
+            .rows(self.menu_action_enabled(Action::CancelFiles))
+    }
+
+    fn select_first_menu_action(&mut self, page: Page) {
+        self.menu_page = page;
+        self.menu_index = page
+            .actions()
+            .iter()
+            .position(|action| self.menu_action_enabled(*action))
+            .unwrap_or_default();
+        self.scroll_to_menu_selection();
+    }
+
+    fn scroll_to_menu_selection(&self) {
+        if let Some(row) = self
+            .menu_rows()
+            .position(|(index, _)| index == self.menu_index)
+        {
+            // The display summary is the first scrollable child on that page.
+            self.menu_scroll
+                .scroll_to_item(row + usize::from(self.menu_page == Page::Display));
+        }
+    }
+
     pub(super) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
+        self.hide_fullscreen_bar_later(cx);
         self.menu_page = Page::Actions;
         self.focus.focus(window);
         cx.emit(PaneEvent::Activity);
@@ -99,14 +225,11 @@ impl RdpView {
             Action::MuteAudio => self.state == State::Connected && self.config.audio_output,
             Action::Microphone => self.state == State::Connected && self.config.audio_input,
             Action::SecureAttention | Action::ConnectionInfo => self.state == State::Connected,
-            Action::SendClipboard | Action::RequestClipboard | Action::CopyRemote => {
-                self.state == State::Connected
-                    && self.config.clipboard
-                    && (!matches!(action, Action::CopyRemote)
-                        || self.clipboard.remote.is_some()
-                        || self.clipboard.remote_content.is_some())
+            Action::SendClipboard | Action::CopyRemote => {
+                self.state == State::Connected && self.config.clipboard
             }
-            Action::Actual | Action::KeyboardHelp | Action::Disconnect => true,
+            Action::Dynamic => self.config.remote_app.is_none() && self.config.monitor_count == 1,
+            Action::Fit | Action::Actual | Action::KeyboardHelp | Action::Disconnect => true,
         }
     }
 
@@ -128,13 +251,23 @@ impl RdpView {
         }
         self.close_menu(window, cx);
         match action {
-            Action::Actual => self.zoom = Zoom::Actual,
+            Action::Dynamic | Action::Fit | Action::Actual => {
+                self.zoom = match action {
+                    Action::Dynamic => Zoom::Dynamic,
+                    Action::Fit => Zoom::Fit,
+                    _ => Zoom::Actual,
+                };
+                self.pan = (0., 0.);
+                self.restore_pan = None;
+                self.display_changed(cx);
+                self.last_resize = None;
+                self.request_resize(cx);
+            }
             Action::SendClipboard => self.send_clipboard(window, cx),
             Action::SendFiles => self.choose_files(false, cx),
             Action::SendFolders => self.choose_files(true, cx),
             Action::CancelFiles => self.cancel_file_transfer(cx),
             Action::CopyRemote => self.copy_clipboard(cx),
-            Action::RequestClipboard => self.request_clipboard(cx),
             Action::MuteAudio => self.toggle_audio_mute(cx),
             Action::Microphone => {
                 let enabled = !self.microphone_enabled;
@@ -158,7 +291,7 @@ impl RdpView {
                     }
                 }
             }
-            Action::ConnectionInfo => unreachable!("connection information keeps the menu open"),
+            Action::ConnectionInfo => return,
             Action::KeyboardHelp => {
                 self.notice = Some(i18n_key::RDP_CONTROL_CLIPBOARD_HELP);
             }
@@ -183,44 +316,32 @@ impl RdpView {
                 "escape" | "left" | "backspace" | "enter" | "return" | "space"
             ) {
                 self.menu_page = Page::Actions;
-                self.menu_scroll.scroll_to_item(self.menu_index);
+                self.scroll_to_menu_selection();
                 cx.notify();
             }
             window.prevent_default();
             cx.stop_propagation();
             return true;
         }
-        // Display actions remain available in every connection state.
-        let enabled: Vec<_> = ACTIONS
-            .iter()
-            .enumerate()
-            .filter_map(|(index, action)| self.menu_action_enabled(*action).then_some(index))
-            .collect();
+        let actions = self.menu_page.actions();
         match event.keystroke.key.as_str() {
             "escape" => self.close_menu(window, cx),
-            "up" | "tab" if event.keystroke.key == "up" || event.keystroke.modifiers.shift => {
-                self.menu_index = enabled
-                    .iter()
-                    .rev()
-                    .copied()
-                    .find(|index| *index < self.menu_index)
-                    .unwrap_or(enabled[enabled.len() - 1]);
-            }
-            "down" | "tab" => {
-                self.menu_index = enabled
-                    .iter()
-                    .copied()
-                    .find(|index| *index > self.menu_index)
-                    .unwrap_or(enabled[0]);
-            }
-            "home" => self.menu_index = enabled[0],
-            "end" => self.menu_index = enabled[enabled.len() - 1],
             "enter" | "return" | "space" => {
-                self.run_menu_action(ACTIONS[self.menu_index], window, cx);
+                if let Some(&action) = actions.get(self.menu_index) {
+                    self.run_menu_action(action, window, cx);
+                }
             }
-            _ => {}
+            _ => {
+                let enabled: Vec<_> = actions
+                    .iter()
+                    .map(|action| self.menu_action_enabled(*action))
+                    .collect();
+                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
+                    self.menu_index = index;
+                    self.scroll_to_menu_selection();
+                }
+            }
         }
-        self.menu_scroll.scroll_to_item(self.menu_index);
         // Consume every key while the menu owns focus, including unhandled
         // shortcuts, so none can edit the remote desktop behind it.
         window.prevent_default();
@@ -260,9 +381,34 @@ impl RdpView {
                 .on_mouse_down(button, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(button, |_, _, cx| cx.stop_propagation());
         }
-        if self.menu_page == Page::Actions {
-            for (index, action) in ACTIONS.into_iter().enumerate() {
+        if self.menu_page != Page::ConnectionInfo {
+            if self.menu_page == Page::Display {
+                popup = popup.child(
+                    div()
+                        .p(px(10.))
+                        .text_size(px(11.))
+                        .text_color(rgb(ui::colors().muted))
+                        .child(self.display_details()),
+                );
+            }
+            for (index, action) in self.menu_rows() {
                 let (label, icon) = match action {
+                    Action::Dynamic => (
+                        i18n_key::RDP_DISPLAY_DYNAMIC,
+                        if self.zoom == Zoom::Dynamic {
+                            Icon::Check
+                        } else {
+                            Icon::Desktop
+                        },
+                    ),
+                    Action::Fit => (
+                        i18n_key::RDP_DISPLAY_FIT,
+                        if self.zoom == Zoom::Fit {
+                            Icon::Check
+                        } else {
+                            Icon::Desktop
+                        },
+                    ),
                     Action::Actual => (
                         i18n_key::RDP_SCALE_100_PERCENT,
                         if self.zoom == Zoom::Actual {
@@ -276,9 +422,6 @@ impl RdpView {
                     Action::SendFolders => (i18n_key::RDP_SEND_FOLDERS, Icon::Folder),
                     Action::CancelFiles => (i18n_key::RDP_CANCEL_FILE_TRANSFER, Icon::Close),
                     Action::CopyRemote => (i18n_key::RDP_COPY_FROM_REMOTE, Icon::ChevronDown),
-                    Action::RequestClipboard => {
-                        (i18n_key::RDP_REQUEST_REMOTE_CLIPBOARD, Icon::Refresh)
-                    }
                     Action::MuteAudio => (i18n_key::RDP_MUTE_REMOTE_AUDIO, Icon::Check),
                     Action::Microphone => (
                         if self.microphone_enabled {
@@ -297,12 +440,6 @@ impl RdpView {
                     Action::Disconnect => (i18n_key::COMMON_RECONNECT, Icon::Refresh),
                 };
                 let enabled = self.menu_action_enabled(action);
-                let hint = match action {
-                    Action::Actual => {
-                        i18n_key::RDP_RELEASE_CONTROL_FIRST_CTRL_SHIFT_WHEEL_PANS_AT_100_ADD
-                    }
-                    _ => label,
-                };
                 popup = popup.child(
                     div()
                         .id(("rdp-menu-action", index))
@@ -335,7 +472,11 @@ impl RdpView {
                                 },
                             ))
                         })
-                        .tooltip(move |_, cx| cx.new(|_| ui::Tooltip(tr(hint).to_owned())).into())
+                        .when_some(action.help(), |row, hint| {
+                            row.tooltip(move |_, cx| {
+                                cx.new(|_| ui::Tooltip(tr(hint).to_owned())).into()
+                            })
+                        })
                         .child(
                             ui::icon(icon)
                                 .when(
@@ -389,7 +530,7 @@ impl RdpView {
             || "—".to_owned(),
             |depth| rustterm::trf!(i18n_key::RDP_DEPTH_BIT, depth = depth),
         );
-        let rows = [
+        let mut rows = vec![
             (
                 i18n_key::RDP_REMOTE_RESOLUTION,
                 self.negotiated_color_depth.map_or_else(
@@ -407,6 +548,18 @@ impl RdpView {
                 rustterm::trf!(i18n_key::RDP_FPS_FPS_MAXIMUM, fps = self.config.max_fps),
             ),
         ];
+        if let Some(quality) = &self.quality {
+            rows.extend(quality.rows());
+        }
+        rows.push((
+            i18n_key::RDP_CLIPBOARD_CONTENT,
+            tr(if self.config.clipboard {
+                i18n_key::RDP_CLIPBOARD_ENABLED
+            } else {
+                i18n_key::RDP_SHARED_CLIPBOARD_IS_DISABLED_FOR_THIS_CONNECTION
+            })
+            .into(),
+        ));
         div()
             .flex()
             .flex_col()
@@ -425,7 +578,7 @@ impl RdpView {
                     .child(tr(i18n_key::RDP_CONNECTION_INFORMATION))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.menu_page = Page::Actions;
-                        this.menu_scroll.scroll_to_item(this.menu_index);
+                        this.scroll_to_menu_selection();
                         cx.notify();
                     })),
             )
@@ -438,5 +591,43 @@ impl RdpView {
                     .child(div().text_color(rgb(ui::colors().muted)).child(tr(label)))
                     .child(div().text_color(rgb(ui::colors().text)).child(value))
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_menu_only_shows_cancel_while_files_can_be_cancelled() {
+        let cancel = |can_cancel| {
+            Page::Actions
+                .rows(can_cancel)
+                .position(|(_, action)| matches!(action, Action::CancelFiles))
+        };
+        assert!(cancel(true).is_some());
+        assert_eq!(cancel(false), None);
+
+        let copy = |can_cancel| {
+            Page::Actions
+                .rows(can_cancel)
+                .enumerate()
+                .find_map(|(row, (selection, action))| {
+                    matches!(action, Action::CopyRemote).then_some((row, selection))
+                })
+                .unwrap()
+        };
+        let (active_row, selected) = copy(true);
+        assert_eq!(copy(false), (active_row - 1, selected));
+    }
+
+    #[test]
+    fn only_display_choices_have_explanatory_tooltips() {
+        for action in Page::Actions.actions() {
+            assert_eq!(action.help(), None);
+        }
+        for action in Page::Display.actions() {
+            assert!(action.help().is_some());
+        }
     }
 }

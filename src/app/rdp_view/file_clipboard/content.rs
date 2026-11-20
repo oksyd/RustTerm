@@ -126,14 +126,14 @@ fn decode_dib(bytes: &[u8]) -> Result<RgbaImage, ReadError> {
                 .get(offset..offset + 4)
                 .ok_or(ReadError::Invalid)?
                 .try_into()
-                .unwrap(),
+                .map_err(|_| ReadError::Invalid)?,
         ))
     };
     let header = word(0)?;
     if !matches!(header, 40 | 52 | 56 | 108 | 124) || bytes.len() < header as usize {
         return Err(ReadError::Invalid);
     }
-    let bit_count = u16::from_le_bytes(bytes[14..16].try_into().unwrap());
+    let bit_count = u16::from_le_bytes([bytes[14], bytes[15]]);
     let colors = match (word(32)?, bit_count) {
         (0, 1 | 4 | 8) => 1u32 << bit_count,
         (colors, _) => colors,

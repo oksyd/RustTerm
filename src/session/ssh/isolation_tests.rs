@@ -207,6 +207,7 @@ impl Fixture {
                 keepalive_secs: 0,
                 keepalive_max: 2,
                 shell_integration: false,
+                production_protection: false,
                 jump_hosts: Vec::new(),
                 forwards: vec![PortForward {
                     id: uuid::Uuid::new_v4(),
@@ -258,7 +259,7 @@ impl Fixture {
                 .snapshot()
                 .lines
                 .iter()
-                .flat_map(|line| &line.cells)
+                .flat_map(|line| line.cells.iter())
                 .map(|cell| cell.text.as_str())
                 .collect();
             if text.contains(marker) {
@@ -294,6 +295,57 @@ async fn wait_for(mut predicate: impl FnMut() -> bool) {
     while !predicate() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test]
+async fn ssh_advertises_a_bounded_receive_window_for_high_latency_links() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut fixture = Fixture::new(false, false).await;
+        let config = super::connection::receive_config();
+        assert_eq!(
+            config.window_size,
+            russh::client::Config::default().window_size
+        );
+        assert!(
+            config.window_size as usize
+                >= config.channel_buffer_size * config.maximum_packet_size as usize
+        );
+        assert!(config.channel_buffer_size * config.maximum_packet_size as usize <= 1024 * 1024);
+        fixture
+            .echo("window negotiation keeps interactive input working")
+            .await;
+        fixture.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ssh_output_backpressure_preserves_bytes_and_wakes_on_receiver_close() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let (send, mut receive) = tokio::sync::mpsc::channel(2);
+        let expected = vec![42; super::OUTPUT_CHUNK_BYTES * 3 + 7];
+        let bytes = expected.clone();
+        let producer = tokio::spawn(async move { super::send_data(&send, &bytes).await });
+        while receive.len() < 2 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!producer.is_finished());
+        let mut actual = Vec::new();
+        while let Some(crate::session::transport::Output::Data(bytes)) = receive.recv().await {
+            assert!(bytes.len() <= super::OUTPUT_CHUNK_BYTES);
+            actual.extend(bytes);
+        }
+        assert!(producer.await.unwrap());
+        assert_eq!(actual, expected);
+
+        let (send, receive) = tokio::sync::mpsc::channel(1);
+        let producer = tokio::spawn(async move { super::send_data(&send, &expected).await });
+        drop(receive);
+        assert!(!producer.await.unwrap());
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

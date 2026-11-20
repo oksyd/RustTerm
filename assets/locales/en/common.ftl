@@ -34,7 +34,7 @@ common-cli-help =
     Usage: rustterm [--config-dir PATH] [--panes 1|4] [--font NAME] [--font-size 8..40] [--shell PATH] [-- SHELL_ARGS...]
 
     Configuration: $XDG_CONFIG_HOME/rustterm or ~/.config/rustterm
-    Shortcuts: Ctrl+Shift+T new terminal · W close pane · C/V copy/paste · F search · S SFTP · D/E split · J next pane · Ctrl+Tab next tab
+    Default shortcuts: Ctrl+Shift+T new terminal · W close pane · C/V copy/paste · F search · S SFTP · D/E split · J next pane · Ctrl+Tab next tab
     sz/rz requires lrzsz on this machine; a handshake opens the file or destination picker.
     Shell arguments are passed directly. Passwords and passphrases are not written to ordinary configuration.
 

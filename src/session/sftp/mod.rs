@@ -190,7 +190,9 @@ impl SftpClient {
         validate_path(path)?;
         match self.request(Request::ReadText(path.into())).await? {
             Response::Text(document) => Ok(document),
-            _ => unreachable!(),
+            _ => Err(SftpError::Remote(
+                "unexpected response to read text request".into(),
+            )),
         }
     }
     pub async fn save_text(
@@ -201,7 +203,9 @@ impl SftpClient {
         validate_target(&original.path)?;
         match self.request(Request::SaveText(original, content)).await? {
             Response::Text(document) => Ok(document),
-            _ => unreachable!(),
+            _ => Err(SftpError::Remote(
+                "unexpected response to save text request".into(),
+            )),
         }
     }
     pub fn upload_tree(
@@ -246,14 +250,18 @@ impl SftpClient {
         validate_path(path)?;
         match self.request(Request::List(path.into())).await? {
             Response::Entries(entries) => Ok(entries),
-            _ => unreachable!("list request returns entries"),
+            _ => Err(SftpError::Remote(
+                "unexpected response to list request".into(),
+            )),
         }
     }
     pub async fn canonicalize(&self, path: &str) -> Result<String, SftpError> {
         validate_path(path)?;
         match self.request(Request::Canonicalize(path.into())).await? {
             Response::Path(path) => Ok(path),
-            _ => unreachable!("realpath request returns a path"),
+            _ => Err(SftpError::Remote(
+                "unexpected response to realpath request".into(),
+            )),
         }
     }
     /// Follows symbolic links and reports whether the target is a directory.
@@ -261,7 +269,9 @@ impl SftpClient {
         validate_path(path)?;
         match self.request(Request::IsDirectory(path.into())).await? {
             Response::IsDirectory(is_dir) => Ok(is_dir),
-            _ => unreachable!("stat request returns the target type"),
+            _ => Err(SftpError::Remote(
+                "unexpected response to stat request".into(),
+            )),
         }
     }
     pub async fn mkdir(&self, path: &str) -> Result<(), SftpError> {
@@ -1695,6 +1705,7 @@ mod tests {
                 keepalive_secs: 0,
                 keepalive_max: 2,
                 shell_integration: false,
+                production_protection: false,
                 jump_hosts: Vec::new(),
                 forwards: Vec::new(),
                 auto_forward: Default::default(),

@@ -1,4 +1,5 @@
 use super::Workspace;
+use super::connection_kind::{ConnectionKind, target};
 use crate::app::forms::SettingsSection;
 use crate::app::pane::{Pane, PaneEvent};
 use crate::app::text_input::{InputEvent, TextInput};
@@ -6,14 +7,32 @@ use crate::app::ui;
 use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, Subscription, Window,
-    div, px, rgb, rgba,
+    AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, SharedString,
+    Subscription, Window, div, px, rgb, rgba,
 };
-use rustterm::config::{Connection, Uuid};
+use rustterm::config::{
+    AppConfig, Connection, Group, QuickCommand, QuickOpenOrder, ShortcutAction, Uuid,
+};
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::{Message, tr};
 
-use rustterm::config::QuickCommand;
+use std::collections::HashMap;
+use std::rc::Rc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PaletteScope {
+    Commands,
+    Connections,
+}
+
+impl PaletteScope {
+    fn placeholder(self) -> &'static str {
+        match self {
+            Self::Commands => i18n_key::WORKSPACE_SEARCH_CONNECTIONS_COMMANDS_AND_ACTIONS,
+            Self::Connections => i18n_key::WORKSPACE_FILTER_BY_NAME_HOST_OR_GROUP,
+        }
+    }
+}
 
 fn is_reconnect_shortcut(key: &gpui::Keystroke) -> bool {
     key.key.eq_ignore_ascii_case("r")
@@ -25,7 +44,9 @@ fn is_reconnect_shortcut(key: &gpui::Keystroke) -> bool {
 
 pub(super) struct Palette {
     pub open: bool,
+    scope: PaletteScope,
     query: Entity<TextInput>,
+    quick_open: QuickOpenResults,
     name: Entity<TextInput>,
     command: Entity<TextInput>,
     editing: Option<Option<Uuid>>,
@@ -34,15 +55,126 @@ pub(super) struct Palette {
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
-#[derive(Clone)]
 struct Item {
-    label: String,
-    detail: String,
+    label: SharedString,
+    detail: SharedString,
     action: Action,
+}
+
+#[derive(Default)]
+struct QuickOpenResults {
+    cached: Option<(String, Rc<[Item]>)>,
+}
+
+impl QuickOpenResults {
+    fn items(&mut self, config: &AppConfig, query: &str) -> Rc<[Item]> {
+        if let Some((previous, items)) = &self.cached
+            && previous == query
+        {
+            return Rc::clone(items);
+        }
+        let items = Rc::from(connection_items(config, query, PaletteScope::Connections));
+        self.cached = Some((query.to_owned(), Rc::clone(&items)));
+        items
+    }
+
+    fn invalidate(&mut self) {
+        self.cached = None;
+    }
+}
+
+fn connection_items(config: &AppConfig, query: &str, scope: PaletteScope) -> Vec<Item> {
+    let groups: HashMap<_, _> = Group::tree(&config.groups)
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| (node.group.id, (index + 1, node.path)))
+        .collect();
+    let query = query.trim().to_lowercase();
+    let words: Vec<_> = query.split_whitespace().collect();
+    let initial_list = scope == PaletteScope::Connections && query.is_empty();
+    let recent: HashMap<_, _> =
+        if initial_list && config.settings.quick_open_order == QuickOpenOrder::RecentlyUsed {
+            config
+                .recent_connections
+                .ids()
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(index, id)| (id, index))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+    let mut matches = Vec::new();
+    for (index, profile) in config.profiles.iter().enumerate() {
+        let kind = ConnectionKind::of(&profile.connection).label();
+        let address = target(&profile.connection);
+        let mut detail = match &profile.connection {
+            Connection::Ssh(c) if !c.username.is_empty() => {
+                format!("{kind} · {}@{address}", c.username)
+            }
+            Connection::Mysql(c) | Connection::Postgres(c) | Connection::ClickHouse(c)
+                if !c.database.is_empty() =>
+            {
+                format!("{kind} · {address} / {}", c.database)
+            }
+            _ => format!("{kind} · {address}"),
+        };
+        let group = profile.group.and_then(|id| groups.get(&id));
+        if let Some((_, path)) = group {
+            detail.push_str(" · ");
+            detail.push_str(path);
+        }
+        let name = profile.name.to_lowercase();
+        let rank = if name == query {
+            0
+        } else if name.starts_with(&query) {
+            1
+        } else if name.contains(&query) {
+            2
+        } else {
+            let fields = detail.to_lowercase();
+            if !words
+                .iter()
+                .all(|word| name.contains(word) || fields.contains(word))
+            {
+                continue;
+            }
+            3
+        };
+        matches.push((
+            (
+                rank,
+                recent.get(&profile.id).copied().unwrap_or(usize::MAX),
+                if initial_list {
+                    group.map_or(0, |(index, _)| *index)
+                } else {
+                    0
+                },
+            ),
+            index,
+            profile,
+            detail,
+        ));
+    }
+    matches.sort_by_key(|(rank, ..)| *rank);
+    matches
+        .into_iter()
+        .take(128)
+        .map(|(_, index, profile, detail)| Item {
+            label: profile.name.clone().into(),
+            detail: detail.into(),
+            action: Action::Connect {
+                index,
+                id: profile.id,
+            },
+        })
+        .collect()
 }
 #[derive(Clone)]
 enum Action {
-    Connect(Uuid),
+    Connect { index: usize, id: Uuid },
+    QuickOpen,
     PasteSaved { run: Uuid, text: String },
     InsertCommand { run: Uuid, command: u64 },
     CopyOutput { run: Uuid, command: u64 },
@@ -57,6 +189,19 @@ enum Action {
     AddCommand,
 }
 impl Palette {
+    pub(super) fn invalidate_connections(&mut self) {
+        self.quick_open.invalidate();
+    }
+
+    fn is_composing(&self, cx: &App) -> bool {
+        self.open
+            && if self.editing.is_some() {
+                self.name.read(cx).is_composing() || self.command.read(cx).is_composing()
+            } else {
+                self.query.read(cx).is_composing()
+            }
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Self {
         let query = cx.new(|cx| {
             TextInput::new(
@@ -97,7 +242,9 @@ impl Palette {
         ];
         Self {
             open: false,
+            scope: PaletteScope::Commands,
             query,
+            quick_open: QuickOpenResults::default(),
             name,
             command,
             editing: None,
@@ -109,7 +256,12 @@ impl Palette {
     }
 }
 impl Workspace {
-    pub(super) fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_palette(
+        &mut self,
+        scope: PaletteScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.lock_screen.locked
             || self.closing
             || self.modal.is_some()
@@ -118,20 +270,35 @@ impl Workspace {
         {
             return;
         }
-        if self.palette.open {
-            self.close_palette(window, cx);
-            return;
+        let switching = self.palette.open;
+        if switching {
+            if self.palette.scope == scope {
+                self.close_palette(window, cx);
+                return;
+            }
+            if self.palette.editing.is_some() {
+                return;
+            }
         }
         self.palette.open = true;
+        self.palette.invalidate_connections();
+        self.palette.scope = scope;
         self.palette.editing = None;
-        self.palette.query.update(cx, |input, cx| input.clear(cx));
+        self.palette.query.update(cx, |input, cx| {
+            input.set_placeholder(scope.placeholder(), cx);
+            if !switching {
+                input.clear(cx);
+            }
+        });
         self.palette.selected = 0;
+        self.palette.scroll.scroll_to_item(0);
         self.menu = None;
         self.palette.query.read(cx).focus(window);
         cx.notify();
     }
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette.open = false;
+        self.palette.invalidate_connections();
         self.palette.editing = None;
         self.palette.command.update(cx, |input, cx| input.clear(cx));
         self.restore_focus(window, cx);
@@ -152,6 +319,17 @@ impl Workspace {
     ) {
         if !self.lock_screen.locked && self.rdp_captures_keyboard(cx) {
             self.note_activity();
+            return;
+        }
+        if let Some(super::Modal::Settings(form)) = &self.modal
+            && !self.lock_screen.locked
+            && !self.modal_saving
+            && !self.window_state.prompts.is_busy()
+            && form.update(cx, |form, cx| form.record_shortcut(event, window, cx))
+        {
+            self.note_activity();
+            window.prevent_default();
+            cx.stop_propagation();
             return;
         }
         self.lock_key(event, window, cx);
@@ -175,13 +353,37 @@ impl Workspace {
             self.open_settings(SettingsSection::General, window, cx);
             window.prevent_default();
             cx.stop_propagation();
-        } else if event.keystroke.key == "p"
-            && modifiers.control
-            && modifiers.shift
-            && !modifiers.alt
-            && !modifiers.platform
+        } else if let Some(action) = self.config.settings.shortcuts.action(&event.keystroke)
+            && self.modal.is_none()
+            && !self.window_state.prompts.is_busy()
+            && !self.input_composing(window, cx)
+            && !self.palette.is_composing(cx)
         {
-            self.toggle_palette(window, cx);
+            use super::menus::MenuAction;
+            let command = match action {
+                ShortcutAction::QuickOpen => MenuAction::QuickOpen,
+                ShortcutAction::Palette => MenuAction::Palette,
+                ShortcutAction::Sidebar if !self.palette.open && self.menu.is_none() => {
+                    MenuAction::Sidebar
+                }
+                ShortcutAction::Search if !self.palette.open && self.menu.is_none() => {
+                    let Some(pane) = self.panes.get(&self.focused) else {
+                        return;
+                    };
+                    // The terminal handles search after its paste, menu and IME checks.
+                    if matches!(pane, Pane::Terminal(_) | Pane::Rdp(_))
+                        || !pane.focus_handle(cx).contains_focused(window, cx)
+                        || !self.action_enabled(MenuAction::Search, cx)
+                    {
+                        return;
+                    }
+                    MenuAction::Search
+                }
+                _ => return,
+            };
+            if !event.is_held {
+                self.menu_action(command, window, cx);
+            }
             window.prevent_default();
             cx.stop_propagation();
         } else if is_reconnect_shortcut(&event.keystroke)
@@ -212,12 +414,28 @@ impl Workspace {
             cx.stop_propagation();
         }
     }
-    fn palette_items(&self, cx: &App) -> Vec<Item> {
+    fn palette_items(&mut self, cx: &App) -> Rc<[Item]> {
+        let query = self.palette.query.read(cx).value();
+        if self.palette.scope == PaletteScope::Connections {
+            let items = self.palette.quick_open.items(&self.config, query);
+            self.palette.selected = self.palette.selected.min(items.len().saturating_sub(1));
+            return items;
+        }
+        let connections = connection_items(&self.config, query, PaletteScope::Commands);
+        let query = query.trim().to_lowercase();
         let mut items = vec![
             (
                 i18n_key::WORKSPACE_NEW_LOCAL_TERMINAL,
                 "Ctrl+Shift+T",
                 Action::NewTerminal,
+            ),
+            (
+                i18n_key::WORKSPACE_QUICK_OPEN_CONNECTION,
+                self.config
+                    .settings
+                    .shortcuts
+                    .label(ShortcutAction::QuickOpen),
+                Action::QuickOpen,
             ),
             (
                 i18n_key::WORKSPACE_ADD_SAVED_COMMAND,
@@ -226,7 +444,9 @@ impl Workspace {
             ),
             (i18n_key::SFTP_FILE_MANAGER_DIALOG, "", Action::Files),
             (
-                if self.files_follow.contains(&self.focused) {
+                if matches!(self.panes.get(&self.focused), Some(Pane::Terminal(terminal))
+                    if terminal.read(cx).followed_sftp_directory().is_some())
+                {
                     i18n_key::WORKSPACE_STOP_FOLLOWING_TERMINAL_DIRECTORY
                 } else {
                     i18n_key::WORKSPACE_FOLLOW_TERMINAL_DIRECTORY_IN_SFTP
@@ -249,7 +469,7 @@ impl Workspace {
         .into_iter()
         .map(|(label, detail, action)| Item {
             label: tr(label).into(),
-            detail: detail.into(),
+            detail: detail.to_owned().into(),
             action,
         })
         .collect::<Vec<_>>();
@@ -263,7 +483,8 @@ impl Workspace {
                     label: rustterm::trf!(
                         i18n_key::WORKSPACE_PASTE_SAVED_COMMAND_NAME,
                         name = command.name
-                    ),
+                    )
+                    .into(),
                     detail: tr(i18n_key::WORKSPACE_SAVED_COMMAND).into(),
                     action: Action::PasteSaved {
                         run,
@@ -275,47 +496,30 @@ impl Workspace {
                 label: rustterm::trf!(
                     i18n_key::WORKSPACE_EDIT_SAVED_COMMAND_NAME,
                     name = command.name
-                ),
-                detail: String::new(),
+                )
+                .into(),
+                detail: SharedString::default(),
                 action: Action::Edit(command.id),
             });
         }
-        for profile in &self.config.profiles {
-            let target = match &profile.connection {
-                Connection::Ssh(s) => format!("SSH {}@{}:{}", s.username, s.host, s.port),
-                Connection::Telnet(s) => format!("Telnet {}:{}", s.host, s.port),
-                Connection::Elasticsearch(config) => format!("Elasticsearch {}", config.endpoint),
-                Connection::Redis(s) => format!("Redis {}:{}", s.host, s.port),
-                Connection::Mysql(s) => format!("MySQL {}:{} {}", s.host, s.port, s.database),
-                Connection::ClickHouse(s) => {
-                    format!("ClickHouse {}:{} {}", s.host, s.port, s.database)
-                }
-                Connection::Postgres(s) => {
-                    format!("PostgreSQL {}:{} {}", s.host, s.port, s.database)
-                }
-                Connection::Sqlite(s) => format!("SQLite {}", s.path.display()),
-                Connection::Rdp(s) => format!("RDP {}:{}", s.host, s.port),
-                Connection::Local(s) => s.shell.clone(),
-            };
-            items.push(Item {
-                label: profile.name.clone(),
-                detail: target,
-                action: Action::Connect(profile.id),
-            });
-        }
+        items.extend(connections);
         if let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused)
             && let Some(run) = terminal_run
         {
             for command in terminal.read(cx).command_records().iter().rev().take(32) {
-                let detail = command.exit_status.map_or_else(
-                    || tr(i18n_key::WORKSPACE_RUNNING).to_owned(),
-                    |status| format!("{} {status}", tr(i18n_key::WORKSPACE_EXIT_STATUS)),
-                );
+                let detail: SharedString = command
+                    .exit_status
+                    .map_or_else(
+                        || tr(i18n_key::WORKSPACE_RUNNING).to_owned(),
+                        |status| format!("{} {status}", tr(i18n_key::WORKSPACE_EXIT_STATUS)),
+                    )
+                    .into();
                 items.push(Item {
                     label: rustterm::trf!(
                         i18n_key::WORKSPACE_INSERT_COMMAND_COMMAND,
                         command = command.command
-                    ),
+                    )
+                    .into(),
                     detail: detail.clone(),
                     action: Action::InsertCommand {
                         run,
@@ -327,7 +531,8 @@ impl Workspace {
                         label: rustterm::trf!(
                             i18n_key::WORKSPACE_COPY_OUTPUT_COMMAND,
                             command = command.command
-                        ),
+                        )
+                        .into(),
                         detail,
                         action: Action::CopyOutput {
                             run,
@@ -339,20 +544,21 @@ impl Workspace {
                     label: rustterm::trf!(
                         i18n_key::WORKSPACE_SAVE_COMMAND_COMMAND,
                         command = command.command
-                    ),
-                    detail: String::new(),
+                    )
+                    .into(),
+                    detail: SharedString::default(),
                     action: Action::SaveCommand(command.command.clone()),
                 });
             }
         }
-        let query = self.palette.query.read(cx).value().to_lowercase();
         items
             .into_iter()
             .filter(|item| self.palette_action_available(&item.action, cx))
             .filter(|item| {
-                format!("{} {}", item.label, item.detail)
-                    .to_lowercase()
-                    .contains(&query)
+                matches!(item.action, Action::Connect { .. })
+                    || format!("{} {}", item.label, item.detail)
+                        .to_lowercase()
+                        .contains(&query)
             })
             .take(128)
             .collect()
@@ -374,11 +580,7 @@ impl Workspace {
                     Action::Files => {
                         self.files.contains_key(&self.focused) || terminal.sftp_client().is_some()
                     }
-                    Action::SyncFiles => {
-                        self.files_follow.contains(&self.focused)
-                            || (terminal.sftp_client().is_some()
-                                && terminal.current_directory().is_some())
-                    }
+                    Action::SyncFiles => terminal.sftp_directory().is_some(),
                     Action::Forwards => terminal.forwarding().is_some(),
                     Action::PasteSaved { run, .. } => {
                         !self.utility_overlay
@@ -403,7 +605,7 @@ impl Workspace {
                                 .iter()
                                 .any(|record| record.id == *command && record.output.is_some())
                     }
-                    _ => unreachable!(),
+                    _ => false,
                 }
             }
             _ => true,
@@ -413,10 +615,11 @@ impl Workspace {
         if self.lock_screen.locked || self.palette.query.read(cx).is_composing() {
             return;
         }
-        let Some(item) = self.palette_items(cx).get(self.palette.selected).cloned() else {
+        let items = self.palette_items(cx);
+        let Some(item) = items.get(self.palette.selected) else {
             return;
         };
-        self.run_palette_action(item.action, window, cx);
+        self.run_palette_action(item.action.clone(), window, cx);
     }
     fn edit_quick_command(
         &mut self,
@@ -499,6 +702,11 @@ impl Workspace {
             return;
         }
         match action {
+            Action::QuickOpen => {
+                self.palette.query.update(cx, |input, cx| input.clear(cx));
+                self.toggle_palette(PaletteScope::Connections, window, cx);
+                return;
+            }
             Action::AddCommand => {
                 self.edit_quick_command(None, String::new(), window, cx);
                 return;
@@ -514,7 +722,7 @@ impl Workspace {
             _ => self.close_palette(window, cx),
         }
         match action {
-            Action::Connect(id) => {
+            Action::Connect { id, .. } => {
                 if let Some(profile) = self
                     .config
                     .profiles
@@ -529,7 +737,7 @@ impl Workspace {
                 if let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused) {
                     terminal.update(cx, |terminal, cx| {
                         if terminal.can_insert_history_command(run) {
-                            terminal.send_text(&text, cx);
+                            terminal.send_text(&text, window, cx);
                         }
                     });
                 }
@@ -581,32 +789,34 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.files_follow.remove(&self.focused) {
-            if let Some(files) = self.files.get(&self.focused) {
-                files.update(cx, |files, _| files.cancel_pending_navigation());
-            }
-            cx.notify();
+        let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused) else {
             return;
-        }
-        let directory = match self.panes.get(&self.focused) {
-            Some(Pane::Terminal(terminal)) => terminal.read(cx).current_directory(),
-            _ => None,
         };
-        let Some(directory) = directory else {
+        let view = terminal.read(cx);
+        if view.sftp_directory().is_none() {
             self.error = Some(
-                i18n_key::WORKSPACE_ENABLE_SHELL_INTEGRATION_TO_FOLLOW_THE_TERMINAL_DIRECTORY
-                    .into(),
+                if view.production_protected() {
+                    i18n_key::CONNECTIONS_PRODUCTION_BLOCKED
+                } else {
+                    i18n_key::WORKSPACE_ENABLE_SHELL_INTEGRATION_TO_FOLLOW_THE_TERMINAL_DIRECTORY
+                }
+                .into(),
             );
             cx.notify();
             return;
-        };
-        self.open_files(window, cx);
-        if let Some(files) = self.active_files() {
-            files.update(cx, |files, cx| files.navigate_to(directory, cx));
-            self.files_follow.insert(self.focused);
         }
+        let enable = view.followed_sftp_directory().is_none();
+        terminal.update(cx, |terminal, _| terminal.set_sftp_follow(enable));
+        if enable {
+            self.open_files(window, cx);
+        }
+        cx.notify();
     }
-    pub(super) fn render_palette(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_palette(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         if !self.palette.focus.contains_focused(window, cx) {
             self.focus_palette(window, cx);
         }
@@ -677,19 +887,64 @@ impl Workspace {
                 );
         } else {
             let items = self.palette_items(cx);
-            card = card.child(self.palette.query.clone()).child(
+            let selected_hint = items.get(self.palette.selected).and_then(|item| {
+                if let (PaletteScope::Connections, Action::Connect { index, id }) =
+                    (self.palette.scope, &item.action)
+                {
+                    let profile = self
+                        .config
+                        .profiles
+                        .get(*index)
+                        .filter(|profile| profile.id == *id)?;
+                    self.profile_open_action(profile).hint(&profile.connection)
+                } else {
+                    None
+                }
+            });
+            let empty_connections =
+                self.palette.scope == PaletteScope::Connections && items.is_empty();
+            let query = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .when(self.palette.scope == PaletteScope::Connections, |row| {
+                    row.child(ui::icon(ui::Icon::Connections))
+                        .child(tr(i18n_key::WORKSPACE_CONNECTIONS))
+                })
+                .child(div().flex_1().min_w_0().child(self.palette.query.clone()));
+            card = card.child(query).child(
                 div()
                     .id("palette-results")
                     .max_h(px(420.))
                     .overflow_y_scroll()
                     .map(ui::preserve_scroll_axes)
                     .track_scroll(&self.palette.scroll)
-                    .children(items.into_iter().enumerate().map(|(index, item)| {
-                        div()
-                            .id(("palette-item", index))
+                    .when(empty_connections, |list| list.child(
+                        div().p_3().text_color(rgb(ui::colors().muted)).child(tr(
+                            if self.config.profiles.is_empty() {
+                                i18n_key::WORKSPACE_NO_SAVED_CONNECTIONS_YET_CHOOSE_NEW_CONNECTION_TO_ADD_ONE
+                            } else {
+                                i18n_key::WORKSPACE_NO_MATCHING_CONNECTION_PROFILES
+                            }
+                        ))
+                    ))
+                    .children(items.iter().enumerate().map(|(index, item)| {
+                        let rows = Rc::clone(&items);
+                        let description = div()
                             .flex()
                             .items_center()
                             .gap_3()
+                            .child(div().flex_1().min_w_0().truncate().child(item.label.clone()))
+                            .child(
+                                div()
+                                    .max_w(gpui::relative(0.65))
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(ui::colors().muted))
+                                    .child(item.detail.clone()),
+                            );
+                        div()
+                            .id(("palette-item", index))
                             .px_3()
                             .py_2()
                             .cursor_pointer()
@@ -697,15 +952,20 @@ impl Workspace {
                                 row.bg(rgb(ui::colors().selected))
                             })
                             .hover(|row| row.bg(rgb(ui::colors().hover)))
-                            .child(div().flex_1().min_w_0().truncate().child(item.label))
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(ui::colors().muted))
-                                    .child(item.detail),
-                            )
+                            .child(description)
+                            .when(index == self.palette.selected, |row| {
+                                row.children(selected_hint.as_ref().map(|hint| {
+                                    div()
+                                        .mt_1()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(ui::colors().muted))
+                                        .child(hint.clone())
+                                }))
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.run_palette_action(item.action.clone(), window, cx)
+                                if let Some(item) = rows.get(index) {
+                                    this.run_palette_action(item.action.clone(), window, cx);
+                                }
                             }))
                     }))
                     .map(|content| ui::scrollable(content, Some(self.palette.scroll.clone()))),
@@ -731,13 +991,7 @@ impl Workspace {
             .map(|backdrop| WindowFrame::new(window).rounded(backdrop))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                let composing = if this.palette.editing.is_some() {
-                    this.palette.name.read(cx).is_composing()
-                        || this.palette.command.read(cx).is_composing()
-                } else {
-                    this.palette.query.read(cx).is_composing()
-                };
-                if composing {
+                if this.palette.is_composing(cx) {
                     return;
                 }
                 if event.keystroke.key == "escape" {
@@ -783,6 +1037,93 @@ impl Workspace {
 mod shortcut_tests {
     use super::*;
     use gpui::{Keystroke, Modifiers};
+
+    #[test]
+    fn quick_open_reuses_ranked_results_until_the_search_or_connections_change() {
+        use rustterm::config::{LocalConfig, Profile};
+        let mut config = AppConfig {
+            profiles: ["alpha", "beta"]
+                .map(|name| Profile::local(name, LocalConfig::default()))
+                .into(),
+            ..Default::default()
+        };
+        let mut results = QuickOpenResults::default();
+        let visible = results.items(&config, "");
+        assert_eq!(visible.len(), 2);
+        assert!(Rc::ptr_eq(&visible, &results.items(&config, "")));
+
+        let filtered = results.items(&config, "beta");
+        assert_eq!(filtered.len(), 1);
+        assert!(
+            matches!(filtered[0].action, Action::Connect { index: 1, id } if id == config.profiles[1].id)
+        );
+        assert!(results.items(&config, "missing").is_empty());
+
+        config.profiles[0].name = "missing".into();
+        results.invalidate();
+        let updated = results.items(&config, "missing");
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].label, "missing");
+    }
+
+    #[test]
+    fn quick_open_ranks_recent_connections_only_for_an_empty_picker() {
+        use rustterm::config::{LocalConfig, Profile, QuickOpenOrder};
+        let group = Group::new("Team");
+        let mut grouped = Profile::local("api-backup", LocalConfig::default());
+        grouped.group = Some(group.id);
+        let exact = Profile::local("api", LocalConfig::default());
+        let other = Profile::local("worker", LocalConfig::default());
+        let mut config = AppConfig {
+            groups: vec![group],
+            profiles: vec![grouped.clone(), exact.clone(), other.clone()],
+            ..Default::default()
+        };
+        config.recent_connections.remember(grouped.id);
+        config.recent_connections.remember(other.id);
+        let order = |config: &AppConfig, query| {
+            connection_items(config, query, PaletteScope::Connections)
+                .into_iter()
+                .map(|item| item.label)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&config, ""), ["worker", "api-backup", "api"]);
+        assert_eq!(order(&config, "api"), ["api", "api-backup"]);
+        config.settings.quick_open_order = QuickOpenOrder::ConnectionList;
+        assert_eq!(order(&config, ""), ["api", "worker", "api-backup"]);
+    }
+
+    #[test]
+    fn quick_open_finds_saved_connections_by_name_address_protocol_and_nested_group() {
+        use rustterm::config::{AppConfig, Group, LocalConfig, Profile, SshConfig};
+
+        let org = Group::new("Example");
+        let mut group = Group::new("生产");
+        group.parent = Some(org.id);
+        let mut api = Profile::ssh(
+            "api",
+            SshConfig {
+                host: "web.example.test".into(),
+                username: "deploy".into(),
+                ..Default::default()
+            },
+        );
+        api.group = Some(group.id);
+        let other = Profile::local("api-backup", LocalConfig::default());
+        let config = AppConfig {
+            profiles: vec![other, api.clone()],
+            groups: vec![org, group],
+            ..Default::default()
+        };
+        let matches = connection_items(&config, "API", PaletteScope::Connections);
+        assert_eq!(matches.len(), 2);
+        assert!(matches!(matches[0].action, Action::Connect { id, .. } if id == api.id));
+        let matches = connection_items(&config, "生产 ssh WEB", PaletteScope::Connections);
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].detail.contains("Example / 生产"));
+        assert!(matches[0].detail.contains("deploy@web.example.test"));
+        assert!(connection_items(&config, "missing host", PaletteScope::Connections).is_empty());
+    }
 
     #[test]
     fn reconnect_does_not_capture_shell_history_search_or_altgr() {

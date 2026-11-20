@@ -11,6 +11,7 @@ mod local;
 mod paths;
 mod profiles;
 mod rdp;
+mod recents;
 mod redis;
 mod settings;
 mod sql;
@@ -28,8 +29,12 @@ pub use local::{LocalConfig, LocalProfile};
 pub use paths::{AppPaths, cache_dir, config_dir};
 pub use profiles::{Connection, Group, Profile};
 pub use rdp::{RdpConfig, RdpQuality, RdpRemoteApp, RdpSharedFolder};
+pub use recents::RecentConnections;
 pub use redis::{RedisConfig, RedisEndpoint, RedisTopology};
-pub use settings::{AppLockConfig, AppTheme, Settings, Theme};
+pub use settings::{
+    AppLockConfig, AppTheme, QuickOpenOrder, Settings, ShortcutAction, ShortcutChord, Shortcuts,
+    TabSwitchOrder, Theme,
+};
 pub use sql::{DatabaseConfig, SqlConfig, SqlEngine, SqliteConfig};
 pub use ssh::{AuthMethod, ForwardKind, PortForward, SshConfig, SshJumpHost, SshProfile};
 pub use storage::ConfigLock;
@@ -38,8 +43,8 @@ pub(crate) use storage::ensure_directory;
 pub use telnet::TelnetConfig;
 pub use uuid::Uuid;
 pub use workspace::{
-    PanePosition, QuickCommand, SavedLayout, SavedTab, SavedWorkspace, SshSessionPosition,
-    WorkspaceSnapshot,
+    PanePosition, QuickCommand, RdpViewMode, RdpViewState, SavedLayout, SavedTab, SavedWorkspace,
+    SshSessionPosition, WorkspaceSnapshot,
 };
 
 use serde::{Deserialize, Serialize};
@@ -169,6 +174,10 @@ pub struct AppConfig {
     pub app_lock: AppLockConfig,
     #[serde(skip_serializing_if = "WorkspaceSnapshot::is_empty")]
     pub workspace: WorkspaceSnapshot,
+    #[serde(skip)]
+    pub recent_connections: RecentConnections,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub rdp_views: std::collections::BTreeMap<Uuid, RdpViewState>,
     pub quick_commands: Vec<QuickCommand>,
 }
 
@@ -184,6 +193,8 @@ impl Default for AppConfig {
             settings: Settings::default(),
             app_lock: AppLockConfig::default(),
             workspace: WorkspaceSnapshot::default(),
+            recent_connections: RecentConnections::default(),
+            rdp_views: Default::default(),
             quick_commands: Vec::new(),
         }
     }
@@ -253,7 +264,10 @@ impl AppConfig {
                 supported: SCHEMA_VERSION,
             });
         }
-        if self.profiles.len() > 10_000 || self.groups.len() > 1_000 {
+        if self.profiles.len() > 10_000
+            || self.groups.len() > 1_000
+            || self.rdp_views.len() > 10_000
+        {
             return Err(invalid(
                 i18n_key::CONNECTIONS_THE_PROFILE_OR_GROUP_COUNT_EXCEEDS_THE_LIMIT,
             ));

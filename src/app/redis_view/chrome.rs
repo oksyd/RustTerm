@@ -779,7 +779,7 @@ impl RedisView {
                     .as_ref()
                     .and_then(|key| std::str::from_utf8(key).ok())
                 {
-                    cx.write_to_clipboard(ClipboardItem::new_string(key.to_owned()));
+                    crate::app::clipboard::write(cx, ClipboardItem::new_string(key.to_owned()));
                     self.show_success(i18n_key::REDIS_KEY_NAME_COPIED, cx);
                 } else {
                     self.error =

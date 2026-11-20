@@ -18,7 +18,7 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use zeroize::Zeroizing;
 
-const MAX_INPUT_BYTES: usize = 65_536;
+pub(super) const MAX_INPUT_BYTES: usize = 65_536;
 
 pub(super) fn can_edit_literal(value: &str) -> bool {
     value.len() <= MAX_INPUT_BYTES && supports_literal_text(value, true)
@@ -70,6 +70,7 @@ pub struct TextInput {
     multiline: bool,
     multiline_height: f32,
     literal: bool,
+    show_line_endings: bool,
     reveal_cursor: bool,
     anchor: usize,
     cursor: usize,
@@ -112,6 +113,7 @@ impl TextInput {
             multiline: false,
             multiline_height: 180.,
             literal: false,
+            show_line_endings: false,
             reveal_cursor: true,
             anchor: 0,
             cursor: 0,
@@ -344,6 +346,11 @@ impl TextInput {
     }
     /// Literal data rejects unsupported control characters instead of normalizing them.
     /// Set this before assigning a value; ordinary form fields keep their existing policy.
+    pub fn set_show_line_endings(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.show_line_endings = show;
+        cx.notify();
+    }
+
     pub fn set_literal(&mut self, multiline: bool, cx: &mut Context<Self>) {
         self.literal = true;
         self.multiline = multiline && !self.password;
@@ -544,9 +551,10 @@ impl TextInput {
                 "a" => self.select_all(cx),
                 "c" | "x" => {
                     if !self.password && !selected.is_empty() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(
-                            self.content[selected.clone()].to_owned(),
-                        ));
+                        crate::app::clipboard::write(
+                            cx,
+                            ClipboardItem::new_string(self.content[selected.clone()].to_owned()),
+                        );
                         if key == "x" && self.replace(selected, "", cx) {
                             cx.emit(InputEvent::Changed);
                             cx.notify();
@@ -822,7 +830,14 @@ impl TextInput {
         let width = self
             .layout
             .iter()
-            .map(|line| line.shaped.width)
+            .map(|line| {
+                line.shaped.width
+                    + if self.show_line_endings {
+                        px(16.)
+                    } else {
+                        px(0.)
+                    }
+            })
             .max()
             .unwrap_or(px(0.));
         (width + px(3.) - bounds.size.width).max(px(0.))
@@ -954,6 +969,29 @@ impl TextInput {
                     ));
                 }
                 let _ = line.shaped.paint(origin, height, window, cx);
+                if self.show_line_endings
+                    && self.multiline
+                    && self.content.as_bytes().get(line.range.end) == Some(&b'\n')
+                {
+                    let marker: SharedString = "↵".into();
+                    let run = TextRun {
+                        len: marker.len(),
+                        font: font(ui::MONOSPACE_FONT),
+                        color: rgb(ui::colors().muted).into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let marker = window
+                        .text_system()
+                        .shape_line(marker, px(12.), &[run], None);
+                    let _ = marker.paint(
+                        point(origin.x + line.shaped.width, origin.y),
+                        height,
+                        window,
+                        cx,
+                    );
+                }
                 if let Some(marked) = &self.marked
                     && marked.start <= line.range.end
                     && marked.end >= line.range.start

@@ -86,7 +86,9 @@ impl DatabaseView {
             let Some((row, column)) = self.documents[self.active_document].selected_cell else {
                 return false;
             };
-            if self.can_edit_cell(row, column) {
+            if key == "enter" && !modifiers.shift && self.opens_value_viewer(row, column) {
+                self.open_value(window, cx);
+            } else if self.can_edit_cell(row, column) {
                 self.reveal_grid_cell(row, column, cx);
                 if modifiers.shift {
                     self.expand_cell_editor(window, cx);

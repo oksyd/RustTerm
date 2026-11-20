@@ -265,6 +265,11 @@ impl TunnelPanel {
         self.apply(settings, cx);
     }
     fn forward(&mut self, service: &DiscoveredService, cx: &mut Context<Self>) {
+        if !self.controller.protection().allows_enhancements() {
+            self.error = Some(tr(key::CONNECTIONS_PRODUCTION_BLOCKED).into());
+            cx.notify();
+            return;
+        }
         let mut settings = self.settings.clone();
         if settings.automatic.enabled && (service.owned || service.project.is_some()) {
             if let Some(policy) = settings
@@ -300,6 +305,11 @@ impl TunnelPanel {
         self.apply(settings, cx);
     }
     fn project(&mut self, project: &str, cx: &mut Context<Self>) {
+        if !self.controller.protection().allows_enhancements() {
+            self.error = Some(tr(key::CONNECTIONS_PRODUCTION_BLOCKED).into());
+            cx.notify();
+            return;
+        }
         let mut settings = self.settings.clone();
         let enabled = !settings.automatic.projects.iter().any(|p| p == project);
         if enabled {
@@ -374,6 +384,13 @@ impl Render for TunnelPanel {
             .flex()
             .flex_col()
             .gap_3()
+            .when(self.controller.protection().is_production(), |panel| {
+                panel.child(
+                    div()
+                        .text_color(rgb(ui::colors().muted))
+                        .child(tr(key::CONNECTIONS_PRODUCTION_PORTS_DISABLED)),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -383,13 +400,22 @@ impl Render for TunnelPanel {
                         ui::text_button(
                             "ports-auto",
                             key::PORTS_AUTO,
-                            if self.settings.automatic.enabled {
+                            if self.settings.automatic.enabled
+                                && self.controller.protection().allows_enhancements()
+                            {
                                 ui::ButtonStyle::Primary
                             } else {
                                 ui::ButtonStyle::Neutral
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.controller.protection().allows_enhancements() {
+                                this.error = Some(
+                                    rustterm::i18n::tr(key::CONNECTIONS_PRODUCTION_BLOCKED).into(),
+                                );
+                                cx.notify();
+                                return;
+                            }
                             let mut settings = this.settings.clone();
                             settings.automatic.enabled = !settings.automatic.enabled;
                             this.apply(settings, cx);
@@ -624,7 +650,10 @@ impl Render for TunnelPanel {
                     ui::icon_button(("port-copy", index), ui::Icon::Copy, key::PORTS_COPY)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if !this.state.is_locked() {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                                crate::app::clipboard::write(
+                                    cx,
+                                    ClipboardItem::new_string(copy.clone()),
+                                );
                             }
                         })),
                 );

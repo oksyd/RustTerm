@@ -28,6 +28,7 @@ pub(super) async fn run_shell<H: client::Handler>(
     mut sftp: mpsc::Receiver<OpenRequest>,
     mut resources: mpsc::Receiver<resources::Request>,
     mut exec: mpsc::Receiver<crate::session::exec::Request>,
+    protection: crate::session::SessionProtection,
     stop: &CancellationToken,
 ) {
     let mut sftp_pending = FuturesUnordered::new();
@@ -62,7 +63,9 @@ pub(super) async fn run_shell<H: client::Handler>(
                 if request.cancel.is_cancelled() || request.reply.is_closed() {
                     continue;
                 }
-                if resource_pending.len() == MAX_RESOURCE_OPENS {
+                if !protection.allows_enhancements() {
+                    let _ = request.reply.send(Err(ResourceError::Protected));
+                } else if resource_pending.len() == MAX_RESOURCE_OPENS {
                     let _ = request.reply.send(Err(ResourceError::Busy));
                 } else {
                     resource_pending.push(resources::collect(handle, request));

@@ -40,8 +40,6 @@ terminal-closing = 正在关闭
 
 terminal-columns-rows-utf-8-line-numbers-line-numbers-timestamps-timestamps-highlight-highlight = { $columns } × { $rows }  ·  UTF-8  ·  行号：{ $line_numbers }  ·  时间：{ $timestamps }  ·  高亮：{ $highlight }
 
-terminal-command-finished-in-seconds-s-exit-code = 命令耗时 { $seconds } 秒 · 退出码 { $code }
-
 terminal-command-finished-name-seconds-s-exit-status = 命令完成 · { $name } · { $seconds } 秒 · 退出码 { $status }
 
 terminal-command-output-is-no-longer-retained-or-exceeds-64-kib = 命令输出已被清理或超过 64 KiB。
@@ -63,6 +61,8 @@ terminal-continue-transfers = 继续传输
 terminal-control-characters-were-removed = 已过滤控制字符。
 
 terminal-copy-failed-error = 复制失败：{ $error }
+terminal-copy-interrupted = 复制失败：读取选区被中断，请重试。
+terminal-copy-selection-unavailable = 复制失败：选中的文本已失效，请重新选择。
 
 terminal-copy-last-command-output = 复制上一条命令的输出
 
@@ -132,7 +132,6 @@ terminal-final-alternate-screen-snapshot-read-only = 最终备用屏快照 · �
 
 terminal-final-screen = 最终屏
 
-terminal-find-output-ctrl-shift-f = 查找输出 · Ctrl+Shift+F
 
 terminal-first-connection-verify-the-host-key = 首次连接：请核对主机密钥
 
@@ -362,14 +361,12 @@ terminal-zmodem-select-a-download-folder = ZMODEM：选择下载保存目录
 
 terminal-zmodem-select-files-to-upload = ZMODEM：选择上传文件
 
-terminal-status-editing = { " " }· 编辑命令
-terminal-status-awaiting-input = { " " }· 等待输入
 terminal-reconnect-in-this-tab = 重新连接（Ctrl+Shift+R）：复用当前标签，之前的输出可在早期连接记录中查看。
 terminal-reconnect-ended-session = 重新连接当前已断开的终端会话
 terminal-status-executing = { " " }· 执行命令中
 terminal-status-history-search = { " " }· 历史搜索中
-terminal-interaction-history-supported = 可显示提示符就绪、命令执行，以及 Bash 和 Zsh 的增量历史搜索状态。常用 Shell 快捷键见帮助。
-terminal-interaction-history-unavailable = 此 Shell 集成只能确认提示符就绪和命令执行，无法区分普通编辑与历史搜索，因此统一显示“等待输入”。常用 Shell 快捷键见帮助。
+terminal-interaction-history-supported = 当前 Shell 支持在状态栏显示增量历史搜索。
+terminal-interaction-history-unavailable = 当前 Shell 未提供增量历史搜索状态。
 terminal-shell-shortcuts = Shell 快捷键
 terminal-shell-search-history = 向后搜索命令历史
 terminal-shell-kill-to-start = 剪切至行首或整行（依 Shell 而定）
@@ -377,4 +374,33 @@ terminal-shell-kill-to-end = 剪切光标到行尾的内容
 terminal-shell-yank = 粘贴之前剪切的内容
 terminal-shell-line-start-end = 移动到行首 / 行尾
 terminal-shell-shortcuts-note = 以上为常用 Emacs 编辑快捷键，Shell、编辑模式或插件可能修改它们。RustTerm 直接传递按键，不弹出操作提示。
-terminal-shell-status-support = 状态栏跟随当前终端。Bash、Fish 显示“等待输入”或“执行命令中”；Zsh 钩子可用时，还能区分“编辑命令”与内置的“历史搜索中”。全屏程序使用备用屏幕状态。
+terminal-shell-status-support = 状态栏在命令执行或搜索历史时显示相应状态。历史搜索需要 Shell 集成支持。使用备用屏幕的全屏程序会显示“备用屏幕”。
+terminal-collapse-command-output = 收起命令输出（{ $count } 行）
+terminal-expand-command-output = 展开命令输出（{ $count } 行）
+terminal-select-command-block = 选择命令及输出
+terminal-select-command-block-hint = 双击选择命令及其输出
+
+terminal-return-to-command = 回到命令行
+
+terminal-search-command = 当前命令
+
+terminal-search-session = 整个会话
+
+terminal-search-command-expired = 该命令已不在历史记录中
+terminal-search-match-unavailable = 原匹配内容已变更或移出历史
+
+terminal-new-output = 有新输出 · 回到最新
+
+terminal-search-scope-help = 限定到选中的命令或当前查看的命令。需要 Shell 集成提供命令边界，且该命令仍保留在历史中。
+
+terminal-block-running = 执行中
+terminal-block-result = 退出 { $status } · { $duration } 秒
+terminal-remove-trailing-newlines = 移除末尾换行
+terminal-open-link-hint = Ctrl+点击打开 { $target }
+
+terminal-production-paste-review = 请预览并确认多行粘贴内容，再发送至生产会话。
+
+terminal-invalid-shell-action = 不支持的 Shell 或无效的 Shell 操作。
+
+terminal-select-enclosed = 选择括号或引号内的内容
+terminal-select-enclosed-shortcut = Alt + 双击

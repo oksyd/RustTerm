@@ -275,10 +275,15 @@ impl DatabaseView {
         self.unread
     }
     pub fn has_unsaved_changes(&self) -> bool {
+        self.has_unsaved_documents() || self.has_pending_transaction()
+    }
+    pub fn has_unsaved_documents(&self) -> bool {
         self.documents.iter().any(Document::dirty)
-            || self.client.as_ref().is_some_and(|client| {
-                client.transaction_status() != rustterm::database::TransactionStatus::Idle
-            })
+    }
+    pub fn has_pending_transaction(&self) -> bool {
+        self.client.as_ref().is_some_and(|client| {
+            client.transaction_status() != rustterm::database::TransactionStatus::Idle
+        })
     }
     pub fn may_auto_reconnect(&self) -> bool {
         false
@@ -980,7 +985,6 @@ impl DatabaseView {
                 "d" => cx.emit(PaneEvent::Split(Axis::Horizontal)),
                 "e" => cx.emit(PaneEvent::Split(Axis::Vertical)),
                 "enter" => cx.emit(PaneEvent::Zoom),
-                "f" => self.open_search(window, cx),
                 "c" => self.copy_selection(window, cx),
                 _ => return,
             }
@@ -1003,8 +1007,6 @@ impl DatabaseView {
                 (self.active_document + 1) % count
             };
             self.select_document(index, window, cx);
-        } else if modifiers.control && !modifiers.alt && !modifiers.platform && key == "tab" {
-            cx.emit(PaneEvent::NextTab);
         } else if key == "f5" {
             if self.page == WorkspacePage::Document && self.table_workspace().is_some() {
                 self.refresh_active_table(cx);

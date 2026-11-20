@@ -47,28 +47,29 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
+        let palette = crate::terminal::Theme::default();
         Self {
-            background: 0x202124,
-            foreground: 0xbac6d1,
-            selection: 0x3a3b46,
-            cursor: 0xc3c6ed,
-            line_number: 0x757c8d,
-            trace: 0x7f8ca1,
-            debug: 0xa9a2c3,
-            info: 0xa2bca4,
-            warn: 0xd4b57d,
-            error: 0xdb949f,
-            fatal: 0xe39b9e,
-            timestamp: 0x7f8ca1,
-            address: 0xb5b8eb,
-            url: 0x9fb8cf,
-            path: 0xa3acc8,
+            background: palette.background,
+            foreground: palette.foreground,
+            selection: palette.selection,
+            cursor: palette.cursor,
+            line_number: palette.line_number,
+            trace: palette.trace,
+            debug: palette.debug,
+            info: palette.info,
+            warn: palette.warn,
+            error: palette.error,
+            fatal: palette.fatal,
+            timestamp: palette.timestamp,
+            address: palette.address,
+            url: palette.url,
+            path: palette.path,
         }
     }
 }
 
 impl Theme {
-    /// Refresh only the complete historical built-in palette. A single customized color
+    /// Refresh only complete historical built-in palettes. A single customized color
     /// preserves the entire user's theme; font preferences are deliberately unrelated.
     pub fn upgrade_legacy_default(&mut self) -> bool {
         let legacy = Self {
@@ -88,7 +89,41 @@ impl Theme {
             url: 0x7dd3fc,
             path: 0x5eead4,
         };
-        if *self == legacy {
+        let previous = Self {
+            background: 0x202124,
+            foreground: 0xbac6d1,
+            selection: 0x3a3b46,
+            cursor: 0xc3c6ed,
+            line_number: 0x757c8d,
+            trace: 0x7f8ca1,
+            debug: 0xa9a2c3,
+            info: 0xa2bca4,
+            warn: 0xd4b57d,
+            error: 0xdb949f,
+            fatal: 0xe39b9e,
+            timestamp: 0x7f8ca1,
+            address: 0xb5b8eb,
+            url: 0x9fb8cf,
+            path: 0xa3acc8,
+        };
+        let previous_readable = Self {
+            foreground: 0xbac6d1,
+            background: 0x202124,
+            selection: 0x4b6f97,
+            cursor: 0xc3c6ed,
+            line_number: 0x929bab,
+            trace: 0x929bab,
+            debug: 0xbd9de3,
+            info: 0x9fca91,
+            warn: 0xe5bd78,
+            error: 0xed9393,
+            fatal: 0xee91ba,
+            timestamp: 0x929bab,
+            address: 0xb5a5f0,
+            url: 0x64c8ff,
+            path: 0x7acbb5,
+        };
+        if *self == legacy || *self == previous || *self == previous_readable {
             *self = Self::default();
             true
         } else {
@@ -122,5 +157,73 @@ impl Theme {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn previous_readable_default_upgrades_without_replacing_custom_colors() {
+        let previous = Theme {
+            foreground: 0xbac6d1,
+            background: 0x202124,
+            selection: 0x4b6f97,
+            cursor: 0xc3c6ed,
+            line_number: 0x929bab,
+            trace: 0x929bab,
+            debug: 0xbd9de3,
+            info: 0x9fca91,
+            warn: 0xe5bd78,
+            error: 0xed9393,
+            fatal: 0xee91ba,
+            timestamp: 0x929bab,
+            address: 0xb5a5f0,
+            url: 0x64c8ff,
+            path: 0x7acbb5,
+        };
+        let mut upgraded = previous.clone();
+        assert!(upgraded.upgrade_legacy_default());
+        assert_eq!(upgraded, Theme::default());
+        assert!(!upgraded.upgrade_legacy_default());
+        let mut custom = Theme {
+            url: 0xabcdef,
+            ..previous
+        };
+        let expected = custom.clone();
+        assert!(!custom.upgrade_legacy_default());
+        assert_eq!(custom, expected);
+    }
+
+    #[test]
+    fn stored_default_upgrades_once_and_custom_palettes_remain_intact() {
+        let saved = r#"
+background = 2105636
+foreground = 12240593
+selection = 3816262
+cursor = 12830445
+line_number = 7699597
+trace = 8359073
+debug = 11117251
+info = 10665124
+warn = 13940093
+error = 14390431
+fatal = 14916510
+timestamp = 8359073
+address = 11909355
+url = 10467535
+path = 10726600
+"#;
+        let original: Theme = toml::from_str(saved).unwrap();
+        let mut upgraded = original.clone();
+        assert!(upgraded.upgrade_legacy_default());
+        assert_eq!(upgraded, Theme::default());
+        assert!(!upgraded.upgrade_legacy_default());
+        let mut custom = original;
+        custom.url = 0xabcdef;
+        let expected = custom.clone();
+        assert!(!custom.upgrade_legacy_default());
+        assert_eq!(custom, expected);
     }
 }

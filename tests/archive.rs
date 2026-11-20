@@ -94,7 +94,7 @@ fn disconnected_history_supports_search_copy_and_metadata() {
             .snapshot()
             .lines
             .iter()
-            .flat_map(|line| &line.cells)
+            .flat_map(|line| line.cells.iter())
             .any(|cell| cell.search_highlight.is_some())
     });
     assert!(session.send(Command::Paste("never sent".into())).is_err());
@@ -117,7 +117,7 @@ fn disconnected_alternate_screen_keeps_frozen_final_view_and_main_history() {
         final_screen
             .lines
             .iter()
-            .flat_map(|line| &line.cells)
+            .flat_map(|line| line.cells.iter())
             .map(|cell| cell.text.as_str())
             .collect::<String>()
             .contains("final-fullscreen")

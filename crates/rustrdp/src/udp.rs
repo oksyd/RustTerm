@@ -632,11 +632,12 @@ impl Connection {
     }
 
     fn release_received(&mut self, skip_missing: bool) {
-        while let Some((&source, _)) = self.received.first_key_value() {
+        while let Some(entry) = self.received.first_entry() {
+            let source = *entry.key();
             if source != self.receive_next && !skip_missing {
                 break;
             }
-            let (_, bytes) = self.received.pop_first().expect("received first key");
+            let bytes = entry.remove();
             self.receive_next = source + 1;
             if self.version == Some(Version::V3) && self.receive_next as u16 == 0 {
                 self.receive_next += 1;
@@ -709,7 +710,11 @@ impl Connection {
     }
 
     fn modern_header(&self, coded: Option<u64>, now_ms: u64) -> Vec<u8> {
-        let have_ack = !self.code_received.is_empty();
+        let receipts = self
+            .code_received
+            .first_key_value()
+            .zip(self.code_received.last_key_value());
+        let have_ack = receipts.is_some();
         let cumulative = have_ack
             && self.code_cumulative_safe
             && self.code_ack_override.is_none()
@@ -742,15 +747,7 @@ impl Connection {
         if let Some(coded) = coded {
             bytes.extend_from_slice(&(coded as u16).to_le_bytes());
         }
-        if have_ack && !cumulative {
-            let (&first, _) = self
-                .code_received
-                .first_key_value()
-                .expect("nonempty coded receipts");
-            let (&last, _) = self
-                .code_received
-                .last_key_value()
-                .expect("nonempty coded receipts");
+        if !cumulative && let Some(((&first, _), (&last, _))) = receipts {
             let mut base = self.code_ack_override.unwrap_or_else(|| {
                 if self.code_cumulative_safe {
                     self.code_floor.min(last)

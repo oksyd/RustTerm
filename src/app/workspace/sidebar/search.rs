@@ -69,7 +69,7 @@ impl Workspace {
             .flex()
             .items_center()
             .when(active, |d| {
-                d.w(px(self.sidebar_width - 16.))
+                d.right_2()
                     .h(px(32.))
                     .rounded(px(4.))
                     .border_1()

@@ -1,7 +1,7 @@
 use super::TerminalView;
 use crate::app::pane::PaneEvent;
 use gpui::Context;
-use rustterm::terminal::Snapshot;
+use rustterm::terminal::{ShellInteraction, Snapshot};
 use std::sync::Arc;
 
 impl TerminalView {
@@ -55,20 +55,14 @@ impl TerminalView {
             return false;
         }
         let previous_status = self.status_text();
-        let previous_command = self.command_status();
-        let previous_dimensions = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| (snapshot.columns, snapshot.rows));
+        let details = |s: &Snapshot| {
+            let search_support = (s.shell.interaction != ShellInteraction::Unknown)
+                .then_some(s.shell.history_search_supported);
+            (s.columns, s.rows, search_support)
+        };
+        let details_changed = self.snapshot.as_deref().map(details) != Some(details(&snapshot));
         self.snapshot = Some(snapshot);
-        if previous_status != self.status_text()
-            || previous_command != self.command_status()
-            || previous_dimensions
-                != self
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| (snapshot.columns, snapshot.rows))
-        {
+        if details_changed || previous_status != self.status_text() {
             cx.emit(PaneEvent::Activity);
         }
         true

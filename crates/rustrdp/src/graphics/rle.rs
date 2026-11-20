@@ -124,7 +124,7 @@ pub(super) fn decode(data: &[u8], width: usize, height: usize, bpp: u16) -> Resu
             }
             0xfd => pixels.push(white),
             0xfe => pixels.push(0),
-            _ => unreachable!(),
+            _ => return Err(Error::Invalid("bitmap RLE opcode")),
         }
         previous_background = background;
     }

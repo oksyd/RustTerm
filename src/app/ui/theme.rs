@@ -44,7 +44,7 @@ impl Colors {
                 accent: 0xb5b8eb,
                 accent_hover: 0xc3c6ed,
                 on_accent: 0x1c1e22,
-                brand: 0xd98c66,
+                brand: 0xdd9069,
                 success: 0xa7c99c,
                 warning: 0xe0b681,
                 danger: 0xe39b9e,
@@ -147,25 +147,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn contrast(a: u32, b: u32) -> f64 {
-        let luminance = |color: u32| {
-            [16, 8, 0]
-                .into_iter()
-                .zip([0.2126, 0.7152, 0.0722])
-                .map(|(shift, weight)| {
-                    let channel = f64::from((color >> shift) & 255) / 255.;
-                    weight
-                        * if channel <= 0.04045 {
-                            channel / 12.92
-                        } else {
-                            ((channel + 0.055) / 1.055).powf(2.4)
-                        }
-                })
-                .sum::<f64>()
-        };
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
+    use rustterm::color::contrast;
 
     #[test]
     fn theme_text_remains_readable_on_panels_selections_and_buttons() {
@@ -174,7 +156,10 @@ mod tests {
             for background in [
                 c.bg, c.chrome, c.surface, c.raised, c.input, c.selected, c.hover,
             ] {
-                for foreground in [c.text, c.muted, c.faint] {
+                for foreground in [
+                    c.text, c.muted, c.faint, c.accent, c.success, c.warning, c.danger, c.brand,
+                    c.blue, c.teal, c.pink,
+                ] {
                     assert!(
                         contrast(foreground, background) >= 4.5,
                         "{theme:?}: {foreground:06x} on {background:06x}"

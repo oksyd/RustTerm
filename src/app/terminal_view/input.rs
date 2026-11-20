@@ -1,36 +1,259 @@
 use super::{PADDING, TerminalView};
 use crate::app::{layout::Axis, pane::PaneEvent, text_input::alt_gr_text};
 use gpui::{
-    Bounds, Context, EntityInputHandler, KeyDownEvent, Modifiers, Pixels, Point, ScrollDelta,
-    ScrollWheelEvent, UTF16Selection, Window, px,
+    Bounds, Context, DispatchPhase, EntityInputHandler, KeyDownEvent, Modifiers, MouseButton,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, UTF16Selection,
+    Window, px,
 };
 use rustterm::i18n::messages as i18n_key;
 use rustterm::{
     session::{Command, SessionState},
-    terminal::SelectionKind,
+    terminal::{SelectionKind, SelectionPoint, SelectionSide},
 };
 use std::ops::Range;
 
+pub(super) fn local_selection_kind(
+    clicks: usize,
+    modifiers: Modifiers,
+    mouse_reporting: bool,
+    archived: bool,
+) -> Option<SelectionKind> {
+    let enclosed = modifiers.alt && !modifiers.control && !modifiers.platform;
+    // Reserve the first click too: a double-click must never send half a gesture
+    // to an application that enabled terminal mouse reporting.
+    if mouse_reporting && !modifiers.shift && !archived && !enclosed {
+        return None;
+    }
+    Some(match clicks {
+        2 if enclosed => SelectionKind::Enclosed,
+        2 => SelectionKind::Word,
+        3.. => SelectionKind::Line,
+        _ => SelectionKind::Character,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Motion {
+    Scroll(f64),
+    Selection(SelectionPoint),
+}
+
+#[derive(Default)]
+pub(super) struct FrameMotion {
+    pending: Option<Motion>,
+    scheduled: bool,
+}
+
+impl FrameMotion {
+    pub(super) fn discard(&mut self) {
+        self.pending = None;
+    }
+
+    fn push(&mut self, next: Motion) -> Option<Motion> {
+        match (self.pending, next) {
+            (Some(Motion::Scroll(previous)), Motion::Scroll(delta))
+                if previous.signum() == delta.signum() =>
+            {
+                self.pending = Some(Motion::Scroll(previous + delta));
+                None
+            }
+            (Some(Motion::Selection(_)), Motion::Selection(_)) => {
+                self.pending = Some(next);
+                None
+            }
+            _ => self.pending.replace(next),
+        }
+    }
+}
+
 pub(super) struct SelectionDrag {
-    origin: (u16, u16),
+    origin: SelectionPoint,
+    pointer_origin: Point<Pixels>,
     publish: bool,
-    last_update: Option<(u16, u16, u64)>,
+    last_update: Option<(SelectionPoint, u64)>,
+    deferred: bool,
+    pub(super) scroll: DragScroll,
 }
 
 impl SelectionDrag {
+    fn new(
+        origin: SelectionPoint,
+        position: Point<Pixels>,
+        kind: SelectionKind,
+        intent: SelectionIntent,
+    ) -> Self {
+        Self {
+            origin,
+            pointer_origin: position,
+            publish: kind != SelectionKind::Character || intent == SelectionIntent::Extend,
+            deferred: intent == SelectionIntent::Preserve,
+            last_update: None,
+            scroll: DragScroll::default(),
+        }
+    }
+
     pub(super) fn scrolled(&mut self) {
         self.publish = true;
         self.last_update = None;
     }
 
-    fn update(&mut self, column: u16, row: u16, version: u64) -> bool {
-        self.publish |= (column, row) != self.origin;
-        let update = (column, row, version);
-        if self.last_update == Some(update) {
+    pub(super) fn scroll_distance(
+        &self,
+        pointer: Point<Pixels>,
+        bounds: Bounds<Pixels>,
+        line_height: Pixels,
+    ) -> f32 {
+        // Start within two rows of the edge: maximized windows cannot rely on
+        // reaching a position outside the screen. Reserve the middle half of
+        // even a small pane for selection without scrolling.
+        let band = (f32::from(line_height).max(1.) * 2.)
+            .min(f32::from(bounds.size.height) / 4.)
+            .max(1.);
+        let movement = f32::from(pointer.y - self.pointer_origin.y);
+        if movement < -2. && pointer.y < bounds.top() + px(band) {
+            f32::from(bounds.top() + px(band) - pointer.y) / band * 6.
+        } else if movement > 2. && pointer.y > bounds.bottom() - px(band) {
+            f32::from(bounds.bottom() - px(band) - pointer.y) / band * 6.
+        } else {
+            0.
+        }
+    }
+
+    fn update(&mut self, position: Point<Pixels>, point: SelectionPoint, version: u64) -> bool {
+        // Match GPUI's two logical pixel drag threshold. Crossing a cell edge
+        // with a tiny click jitter must not turn a focus click into a selection.
+        self.publish |= (self.deferred || point != self.origin)
+            && (position - self.pointer_origin).magnitude() > 2.;
+        let update = (point, version);
+        if !self.publish || self.last_update == Some(update) {
             return false;
         }
         self.last_update = Some(update);
         true
+    }
+
+    fn finish(&self) -> SelectionFinish {
+        if self.deferred {
+            SelectionFinish::Keep
+        } else if self.publish {
+            SelectionFinish::Copy
+        } else {
+            SelectionFinish::Clear
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SelectionFinish {
+    Keep,
+    Clear,
+    Copy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionIntent {
+    New,
+    Extend,
+    Preserve,
+}
+
+pub(super) fn selection_intent(
+    focused: bool,
+    selected: bool,
+    clicks: usize,
+    modifiers: Modifiers,
+) -> SelectionIntent {
+    if clicks == 1 && !modifiers.control && !modifiers.alt && !modifiers.platform {
+        if modifiers.shift {
+            return SelectionIntent::Extend;
+        }
+        if !focused && selected {
+            return SelectionIntent::Preserve;
+        }
+    }
+    SelectionIntent::New
+}
+
+fn selection_hit(
+    snapshot: &rustterm::terminal::Snapshot,
+    x: f32,
+    y: f32,
+    cell_width: f32,
+    line_height: f32,
+) -> Option<SelectionPoint> {
+    let row = (y / line_height.max(1.) + snapshot.scroll_fraction)
+        .floor()
+        .max(0.) as usize;
+    let row = row.min(snapshot.lines.len().checked_sub(1)?);
+    let cells = &snapshot.lines.get(row)?.cells;
+    let x = x / cell_width.max(1.);
+    let column = (x.floor().max(0.) as usize).min(cells.len().checked_sub(1)?);
+    let mut lead = column;
+    if cells.get(lead)?.width == 0 && lead > 0 {
+        lead -= 1;
+        if cells[lead].width != 2 {
+            return Some(SelectionPoint::new(
+                lead as u16,
+                row as u16,
+                SelectionSide::Right,
+            ));
+        }
+    }
+    let width = usize::from(cells.get(lead)?.width.max(1));
+    let right = x >= lead as f32 + width as f32 / 2.;
+    let column = if right {
+        (lead + width - 1).min(cells.len() - 1)
+    } else {
+        lead
+    };
+    Some(SelectionPoint::new(
+        column as u16,
+        row as u16,
+        if right {
+            SelectionSide::Right
+        } else {
+            SelectionSide::Left
+        },
+    ))
+}
+
+#[derive(Default)]
+pub(super) struct DragScroll {
+    last: Option<std::time::Instant>,
+    direction: i32,
+    remainder: f32,
+}
+
+impl DragScroll {
+    /// Distance beyond the viewport in line heights; positive scrolls upward.
+    pub(super) fn step(&mut self, distance: f32, now: std::time::Instant) -> i32 {
+        let direction = if distance > 0. {
+            1
+        } else if distance < 0. {
+            -1
+        } else {
+            0
+        };
+        let previous = self.last.replace(now);
+        if direction == 0 || direction != self.direction {
+            self.direction = direction;
+            self.remainder = 0.;
+            return 0;
+        }
+        let Some(previous) = previous else {
+            return 0;
+        };
+        // Fractional lines make speed independent of frame rate. Limit catch-up
+        // after a stalled frame so a short drag cannot skip a screenful.
+        let seconds = now
+            .saturating_duration_since(previous)
+            .as_secs_f32()
+            .min(0.1);
+        let speed = (4. + 2. * distance * distance).min(120.);
+        self.remainder += seconds * speed;
+        let lines = self.remainder.floor() as i32;
+        self.remainder -= lines as f32;
+        direction * lines
     }
 }
 
@@ -119,6 +342,9 @@ impl TerminalView {
             return;
         }
         let input_focused = self.search_input.read(cx).focus_handle().is_focused(window);
+        if input_focused {
+            self.search_seed_task.take();
+        }
         let key = &event.keystroke;
         let modifiers = key.modifiers;
         if modifiers.control || modifiers.alt || modifiers.platform {
@@ -145,15 +371,48 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
-    pub fn send_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    pub fn send_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.chrome_blocked(cx) {
             return;
         }
-        self.send(Command::Paste(text.to_owned()), cx);
+        self.paste_text(text.to_owned(), window, cx);
+    }
+
+    fn deliver_motion(&mut self, motion: Motion, cx: &mut Context<Self>) -> bool {
+        let command = match motion {
+            Motion::Scroll(delta) => Command::ScrollFractional(delta),
+            Motion::Selection(point) => Command::UpdateSelectionAt(point),
+        };
+        self.send_input(command, false, cx)
+    }
+
+    pub(super) fn flush_motion(&mut self, cx: &mut Context<Self>) -> bool {
+        self.frame_motion
+            .pending
+            .take()
+            .is_none_or(|motion| self.deliver_motion(motion, cx))
+    }
+
+    fn stage_motion(&mut self, motion: Motion, cx: &mut Context<Self>) {
+        if let Some(prior) = self.frame_motion.push(motion) {
+            self.deliver_motion(prior, cx);
+        }
+    }
+
+    fn schedule_motion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.frame_motion.scheduled {
+            self.frame_motion.scheduled = true;
+            cx.on_next_frame(window, |this, _, cx| {
+                this.frame_motion.scheduled = false;
+                this.flush_motion(cx);
+            });
+            cx.notify();
+        }
     }
 
     pub(super) fn release_input(&mut self) {
-        self.copy_task.take();
+        self.frame_motion.discard();
+        self.link_press = None;
         self.primary_copy_task.take();
         self.wheel = WheelState::default();
         self.preedit.clear();
@@ -193,11 +452,19 @@ impl TerminalView {
         {
             return;
         }
-        if !self.preedit.is_empty() || self.paste_pending {
+        if !self.preedit.is_empty() || self.paste_preview.is_some() {
             return;
         }
         let key = &event.keystroke;
         let mods = key.modifiers;
+        if self.settings.shortcuts.action(key) == Some(rustterm::config::ShortcutAction::Search) {
+            if !event.is_held {
+                self.open_search(window, cx);
+            }
+            cx.stop_propagation();
+            window.prevent_default();
+            return;
+        }
         if mods.platform {
             return;
         }
@@ -219,9 +486,7 @@ impl TerminalView {
             && !mods.alt
             && ((mods.shift && key.key == "f10") || (!mods.shift && key.key == "menu"))
         {
-            if let Some(bounds) = self.cursor_bounds().or(self.bounds) {
-                self.open_context_menu(bounds.origin, window, cx);
-            }
+            self.open_keyboard_context_menu(window, cx);
             cx.stop_propagation();
             window.prevent_default();
             return;
@@ -280,7 +545,6 @@ impl TerminalView {
                     window.prevent_default();
                     return;
                 }
-                "b" => return, // The workspace owns the sidebar shortcut.
                 "enter" | "return" => {
                     cx.emit(PaneEvent::Zoom);
                     cx.stop_propagation();
@@ -295,11 +559,6 @@ impl TerminalView {
                     self.send(Command::SelectAll, cx);
                     cx.stop_propagation();
                     window.prevent_default();
-                    return;
-                }
-                "f" => {
-                    self.open_search(window, cx);
-                    cx.stop_propagation();
                     return;
                 }
                 "s" => {
@@ -397,7 +656,7 @@ impl TerminalView {
             && self.window_state.visibility.is_visible()
             && window.is_window_active()
             && self.focus.is_focused(window)
-            && !self.paste_pending
+            && !self.paste_preview.is_some()
             && !self.window_state.prompts.is_busy()
             && !self.window_state.prompts.is_blocked()
             && self.can_send_input()
@@ -412,9 +671,13 @@ impl TerminalView {
                 .is_some_and(|run| run.state() == SessionState::Connected && !run.is_read_only())
     }
 
-    fn commit_text(&mut self, text: &str, window: &Window, cx: &mut Context<Self>) {
+    fn commit_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.accepts_text_input(window) && !text.is_empty() {
-            self.send(Command::Input(text.as_bytes().to_vec()), cx);
+            if self.production_protected() && text.contains(['\r', '\n']) {
+                self.paste_text(text.to_owned(), window, cx);
+            } else {
+                self.send(Command::Input(text.as_bytes().to_vec()), cx);
+            }
         }
     }
 
@@ -424,28 +687,65 @@ impl TerminalView {
         kind: SelectionKind,
         cx: &mut Context<Self>,
     ) {
+        self.begin_selection_with_intent(position, kind, SelectionIntent::New, cx);
+    }
+
+    pub(super) fn begin_selection_with_intent(
+        &mut self,
+        position: Point<Pixels>,
+        kind: SelectionKind,
+        intent: SelectionIntent,
+        cx: &mut Context<Self>,
+    ) {
         if self.chrome_blocked(cx) || self.show_final_alternate {
             return;
         }
-        let Some((column, row)) = self.mouse_position(position) else {
+        if self.mouse_position(position).is_none() {
+            return;
+        }
+        let Some(point) = self.selection_position(position) else {
             return;
         };
         self.primary_copy_task.take();
-        self.selection_drag = Some(SelectionDrag {
-            origin: (column, row),
-            publish: kind != SelectionKind::Character,
-            last_update: None,
-        });
+        self.hovered_link = None;
+        if intent != SelectionIntent::Preserve
+            && !self.start_selection_at(point, kind, intent == SelectionIntent::Extend, cx)
+        {
+            self.selection_drag = None;
+            self.selection_pointer = None;
+            return;
+        }
+        self.selection_drag = Some(SelectionDrag::new(point, position, kind, intent));
         self.selection_pointer = Some(position);
-        self.send(Command::BeginSelection { column, row, kind }, cx);
+    }
+
+    fn start_selection_at(
+        &mut self,
+        position: SelectionPoint,
+        kind: SelectionKind,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.flush_motion(cx);
+        self.send_input(
+            Command::BeginSelectionAt {
+                position,
+                kind,
+                extend,
+            },
+            false,
+            cx,
+        )
     }
 
     pub fn drag_selection(
         &mut self,
         position: Point<Pixels>,
         released: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let was_scrolling = self.selection_scroll_distance() != 0.;
         let Some(drag) = &mut self.selection_drag else {
             return;
         };
@@ -454,42 +754,134 @@ impl TerminalView {
             drag.last_update = None;
         }
         self.selection_pointer = Some(position);
-        self.extend_selection(position, cx);
+        let scrolling = !released && self.selection_scroll_distance() != 0.;
+        if !scrolling && let Some(drag) = &mut self.selection_drag {
+            drag.scroll = DragScroll::default();
+        }
+        if scrolling != was_scrolling {
+            self.poll_wake.notify_one();
+        }
+        if let Some(point) = self.selection_endpoint(position, cx) {
+            self.stage_motion(Motion::Selection(point), cx);
+            if !released {
+                self.schedule_motion(window, cx);
+            }
+        }
         if released && let Some(drag) = self.selection_drag.take() {
+            let delivered = self.flush_motion(cx);
             self.selection_pointer = None;
-            if drag.publish {
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                self.copy_primary(cx);
-            } else {
-                self.send(Command::ClearSelection, cx);
+            match drag.finish() {
+                SelectionFinish::Copy if delivered => {
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    self.copy_primary(cx);
+                }
+                SelectionFinish::Clear => self.send(Command::ClearSelection, cx),
+                SelectionFinish::Copy | SelectionFinish::Keep => {}
             }
         }
     }
 
-    pub(super) fn extend_selection(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(bounds) = self.bounds else {
-            return;
-        };
-        let Some(snapshot) = &self.snapshot else {
-            return;
-        };
-        let column = ((f32::from(position.x - bounds.left() - px(PADDING) - self.gutter_width())
-            / f32::from(self.cell_width))
-        .floor()
-        .max(0.) as u16)
-            .min(snapshot.columns - 1);
-        let row = ((f32::from(position.y - bounds.top() - px(PADDING))
-            / f32::from(self.line_height))
-        .floor()
-        .max(0.) as u16)
-            .min(snapshot.rows - 1);
-        let Some(drag) = &mut self.selection_drag else {
-            return;
-        };
-        if !drag.update(column, row, snapshot.version) {
-            return;
+    /// Register during canvas paint. Element-level move handlers stop at the
+    /// hitbox, but a selection belongs to its originating pane until release.
+    pub(super) fn capture_selection_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.weak_entity();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            let Some(view) = view.upgrade() else {
+                return;
+            };
+            if view.read(cx).selection_drag.is_none() {
+                return;
+            }
+            view.update(cx, |this, cx| {
+                if event.pressed_button != Some(MouseButton::Left)
+                    || !this.visible
+                    || !window.is_window_active()
+                    || this.chrome_blocked(cx)
+                {
+                    this.release_input();
+                    cx.notify();
+                    return;
+                }
+                if let Some(press) = &mut this.link_press {
+                    press.update(event.position, event.modifiers);
+                }
+                this.drag_selection(event.position, false, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            });
+        });
+        let view = cx.weak_entity();
+        window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                return;
+            }
+            let Some(view) = view.upgrade() else {
+                return;
+            };
+            if view.read(cx).selection_drag.is_none() {
+                return;
+            }
+            view.update(cx, |this, cx| {
+                if !this.visible || !window.is_window_active() || this.chrome_blocked(cx) {
+                    this.release_input();
+                    cx.notify();
+                    return;
+                }
+                this.finish_link(event.position, event.modifiers, cx);
+                this.drag_selection(event.position, true, window, cx);
+                window.prevent_default();
+                cx.stop_propagation();
+            });
+        });
+    }
+
+    pub(super) fn selection_endpoint(
+        &mut self,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<SelectionPoint> {
+        let point = self.selection_position(position)?;
+        let snapshot = self.snapshot.as_ref()?;
+        let drag = self.selection_drag.as_mut()?;
+        if !drag.update(position, point, snapshot.version) {
+            return None;
         }
-        self.send(Command::UpdateSelection { column, row }, cx);
+        let begin = std::mem::take(&mut drag.deferred).then_some(drag.origin);
+        if let Some(position) = begin
+            && !self.start_selection_at(position, SelectionKind::Character, false, cx)
+        {
+            self.selection_drag = None;
+            self.selection_pointer = None;
+            return None;
+        }
+        Some(point)
+    }
+
+    fn selection_position(&self, position: Point<Pixels>) -> Option<SelectionPoint> {
+        let bounds = self.bounds?;
+        selection_hit(
+            self.snapshot.as_ref()?,
+            f32::from(position.x - bounds.left() - px(PADDING) - self.gutter_width()),
+            f32::from(position.y - bounds.top() - px(PADDING)),
+            f32::from(self.cell_width),
+            f32::from(self.line_height),
+        )
+    }
+
+    pub(super) fn selection_contains(&self, position: Point<Pixels>) -> bool {
+        self.mouse_position(position)
+            .and_then(|(column, row)| {
+                self.snapshot
+                    .as_ref()?
+                    .lines
+                    .get(usize::from(row))?
+                    .cells
+                    .get(usize::from(column))
+            })
+            .is_some_and(|cell| cell.selected)
     }
 
     pub(super) fn mouse_position(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
@@ -502,8 +894,14 @@ impl TerminalView {
         if x < 0. || y < 0. {
             return None;
         }
-        let (column, row) = ((x / width) as u16, (y / height) as u16);
-        (column < snapshot.columns && row < snapshot.rows).then_some((column, row))
+        let (column, row) = (
+            (x / width) as u16,
+            (y / height + snapshot.scroll_fraction) as u16,
+        );
+        (column < snapshot.columns
+            && usize::from(row) < snapshot.lines.len()
+            && y < height * f32::from(snapshot.rows))
+        .then_some((column, row))
     }
 
     pub(super) fn mouse(
@@ -561,13 +959,14 @@ impl TerminalView {
     pub(super) fn scroll(
         &mut self,
         event: &ScrollWheelEvent,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // Even sub-cell deltas belong to this canvas; a parent must not consume
         // the same gesture while it is being accumulated here.
         cx.stop_propagation();
         if event.modifiers.control && !event.modifiers.alt && !event.modifiers.platform {
+            self.flush_motion(cx);
             let size = self.wheel.zoom(event.delta, self.font_size);
             if size != self.font_size {
                 self.font_size = size;
@@ -595,6 +994,17 @@ impl TerminalView {
         } else {
             WheelTarget::History
         };
+        if target == WheelTarget::History
+            && let ScrollDelta::Pixels(delta) = event.delta
+        {
+            self.wheel = WheelState::default();
+            let lines = f64::from(f32::from(delta.y) / f32::from(self.line_height).max(1.));
+            if lines.is_finite() && lines != 0. {
+                self.stage_motion(Motion::Scroll(lines), cx);
+                self.schedule_motion(window, cx);
+            }
+            return;
+        }
         let steps = self.wheel.steps(
             event.delta,
             Point {
@@ -765,22 +1175,386 @@ mod tests {
     use super::*;
 
     #[test]
-    fn selection_drag_coalesces_cell_motion_without_losing_scroll_or_output_updates() {
-        let mut drag = SelectionDrag {
-            origin: (2, 3),
-            publish: false,
-            last_update: None,
+    fn frame_motion_respects_scroll_boundaries_and_copies_the_release_endpoint() {
+        let mut term = rustterm::terminal::Terminal::new(16, 2, 8);
+        term.feed(b"one\r\ntwo\r\nthree\r\nabcdef");
+        let mut motion = FrameMotion::default();
+        let mut emitted = Vec::new();
+        for delta in [-1., -2., 0.25, 0.5] {
+            emitted.extend(motion.push(Motion::Scroll(delta)));
+        }
+        emitted.extend(motion.pending.take());
+        assert_eq!(emitted, [Motion::Scroll(-3.), Motion::Scroll(0.75)]);
+        for m in emitted {
+            if let Motion::Scroll(delta) = m {
+                term.scroll_fractional(delta);
+            }
+        }
+        assert_eq!(term.snapshot().scroll_fraction, 0.25);
+        term.scroll_fractional(-1.);
+        term.begin_selection_at(
+            SelectionPoint::new(0, 1, SelectionSide::Left),
+            SelectionKind::Character,
+            false,
+        );
+        for col in [1, 4, 2] {
+            assert!(
+                motion
+                    .push(Motion::Selection(SelectionPoint::new(
+                        col,
+                        1,
+                        SelectionSide::Right
+                    )))
+                    .is_none()
+            );
+        }
+        let Some(Motion::Selection(released)) = motion.pending.take() else {
+            panic!("release lost")
         };
-        assert!(drag.update(2, 3, 1));
-        assert!(!drag.update(2, 3, 1));
+        term.update_selection_at(released);
+        assert_eq!(term.selected_text().as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn focus_click_preserves_a_range_while_double_click_shift_and_drag_have_their_normal_meaning() {
+        let plain = Modifiers::default();
+        assert_eq!(
+            selection_intent(false, true, 1, plain),
+            SelectionIntent::Preserve
+        );
+        assert_eq!(
+            selection_intent(false, true, 2, plain),
+            SelectionIntent::New
+        );
+        assert_eq!(selection_intent(true, true, 1, plain), SelectionIntent::New);
+        assert_eq!(
+            selection_intent(false, false, 1, plain),
+            SelectionIntent::New
+        );
+        let shift = Modifiers {
+            shift: true,
+            ..plain
+        };
+        assert_eq!(
+            selection_intent(false, true, 1, shift),
+            SelectionIntent::Extend
+        );
+        assert_eq!(
+            selection_intent(true, false, 1, shift),
+            SelectionIntent::Extend
+        );
+        let origin = gpui::point(px(10.), px(10.));
+        let cell = SelectionPoint::new(1, 0, SelectionSide::Left);
+        let mut drag = SelectionDrag::new(
+            cell,
+            origin,
+            SelectionKind::Character,
+            SelectionIntent::Preserve,
+        );
+        assert!(!drag.update(origin, cell, 1));
+        assert!(!drag.update(origin + gpui::point(px(1.), px(0.)), cell, 2));
+        assert_eq!(drag.finish(), SelectionFinish::Keep);
+        assert!(drag.update(origin + gpui::point(px(0.), px(10.)), cell, 2));
+        // Starting a drag is decided before scrolling moves the viewport.
+        assert!(std::mem::take(&mut drag.deferred));
+        assert_eq!(drag.finish(), SelectionFinish::Copy);
+        let click =
+            SelectionDrag::new(cell, origin, SelectionKind::Character, SelectionIntent::New);
+        assert_eq!(click.finish(), SelectionFinish::Clear);
+        let shift_click = SelectionDrag::new(
+            cell,
+            origin,
+            SelectionKind::Character,
+            SelectionIntent::Extend,
+        );
+        assert_eq!(shift_click.finish(), SelectionFinish::Copy);
+    }
+
+    #[test]
+    fn pointer_hit_testing_uses_glyph_midpoints_including_wide_characters_and_wrap_padding() {
+        use SelectionSide::{Left, Right};
+        use rustterm::terminal::Terminal;
+        let mut terminal = Terminal::new(8, 4, 30);
+        terminal.feed("a中😀e\u{301}".as_bytes());
+        let snapshot = terminal.snapshot();
+        for (x, column, side) in [
+            (4., 0, Left),
+            (5., 0, Right),
+            (19., 1, Left),
+            (20., 2, Right),
+            (39., 3, Left),
+            (40., 4, Right),
+        ] {
+            assert_eq!(
+                selection_hit(&snapshot, x, 1., 10., 20.),
+                Some(SelectionPoint::new(column, 0, side))
+            );
+        }
+        terminal.begin_selection_at(
+            selection_hit(&snapshot, 20., 1., 10., 20.).unwrap(),
+            SelectionKind::Character,
+            false,
+        );
+        terminal.update_selection_at(selection_hit(&snapshot, 56., 1., 10., 20.).unwrap());
+        assert_eq!(terminal.selected_text().as_deref(), Some("😀e\u{301}"));
+        terminal.feed(b"\x1bc1234567");
+        terminal.feed("中".as_bytes());
+        assert_eq!(
+            selection_hit(&terminal.snapshot(), 79., 1., 10., 20.),
+            Some(SelectionPoint::new(6, 0, Right))
+        );
+    }
+
+    #[test]
+    fn fractional_scroll_hit_testing_tracks_the_partially_visible_rows() {
+        let mut terminal = rustterm::terminal::Terminal::new(16, 3, 20);
+        terminal.feed(b"zero\r\none\r\ntwo\r\nthree\r\nfour");
+        terminal.scroll_fractional(0.5);
+        let snapshot = terminal.snapshot();
+        for (y, row) in [(0., 0), (9., 0), (10., 1), (30., 2), (59., 3)] {
+            assert_eq!(selection_hit(&snapshot, 0., y, 8., 20.).unwrap().row, row);
+        }
+        let start = selection_hit(&snapshot, 0., 59., 8., 20.).unwrap();
+        let end = selection_hit(&snapshot, 32., 59., 8., 20.).unwrap();
+        terminal.begin_selection_at(start, SelectionKind::Character, false);
+        terminal.update_selection_at(end);
+        assert_eq!(terminal.selected_text().as_deref(), Some("four"));
+    }
+
+    #[test]
+    fn drag_scroll_is_reachable_inside_the_window_and_does_not_start_on_click_or_horizontal_selection()
+     {
+        use gpui::{point, size};
+        let bounds = Bounds::new(point(px(50.), px(100.)), size(px(500.), px(400.)));
+        let origin = point(px(200.), px(300.));
+        let drag = SelectionDrag::new(
+            SelectionPoint::new(10, 10, SelectionSide::Left),
+            origin,
+            SelectionKind::Character,
+            SelectionIntent::New,
+        );
+        let distance = |y| drag.scroll_distance(point(origin.x, px(y)), bounds, px(20.));
+        assert_eq!(distance(300.), 0.);
+        let near = distance(139.);
+        let edge = distance(100.);
+        let outside = distance(40.);
+        assert!(
+            near > 0.,
+            "edge scrolling must start before the pointer leaves a maximized window"
+        );
+        assert!(edge > near && outside > edge);
+        assert_eq!(distance(461.), -near);
+        assert_eq!(distance(500.), -edge);
+        assert_eq!(distance(560.), -outside);
+        for kind in [
+            SelectionKind::Character,
+            SelectionKind::Word,
+            SelectionKind::Line,
+        ] {
+            let origin = point(px(200.), px(490.));
+            let drag = SelectionDrag::new(
+                SelectionPoint::new(10, 19, SelectionSide::Left),
+                origin,
+                kind,
+                SelectionIntent::New,
+            );
+            assert_eq!(drag.scroll_distance(origin, bounds, px(20.)), 0.);
+            assert_eq!(
+                drag.scroll_distance(point(px(400.), origin.y), bounds, px(20.)),
+                0.
+            );
+            assert_eq!(
+                drag.scroll_distance(point(origin.x, px(489.)), bounds, px(20.)),
+                0.
+            );
+            assert_eq!(
+                drag.scroll_distance(point(origin.x, px(480.)), bounds, px(20.)),
+                0.,
+                "moving inward must not scroll outward"
+            );
+            assert!(drag.scroll_distance(point(origin.x, px(495.)), bounds, px(20.)) < 0.);
+        }
+    }
+
+    #[test]
+    fn drag_autoscroll_tracks_distance_and_elapsed_time_without_catching_up_after_a_pause() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let travel = |distance, interval: u64| {
+            let mut scroll = DragScroll::default();
+            assert_eq!(scroll.step(distance, start), 0);
+            (1..=960 / interval)
+                .map(|tick| scroll.step(distance, start + Duration::from_millis(tick * interval)))
+                .sum::<i32>()
+        };
+        let near = travel(0.1, 16);
+        let far = travel(6., 16);
+        assert!((3..=5).contains(&near), "near edge: {near}");
+        assert!(far > near * 5 && far <= 120);
+        assert!((far - travel(6., 8)).abs() <= 1);
+        assert_eq!(travel(-6., 16), -far);
+
+        let mut scroll = DragScroll::default();
+        assert_eq!(scroll.step(100., start), 0);
+        assert!((1..=12).contains(&scroll.step(100., start + Duration::from_secs(30))));
+        assert_eq!(scroll.step(-100., start + Duration::from_secs(31)), 0);
+        assert_eq!(scroll.step(0., start + Duration::from_secs(32)), 0);
+        assert_eq!(scroll.step(100., start + Duration::from_secs(33)), 0);
+    }
+
+    #[test]
+    fn enclosed_selection_keeps_the_entire_alt_gesture_local() {
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        for mouse_reporting in [false, true] {
+            for archived in [false, true] {
+                for shift in [false, true] {
+                    let modifiers = Modifiers { shift, ..alt };
+                    for (clicks, kind) in [
+                        (1, SelectionKind::Character),
+                        (2, SelectionKind::Enclosed),
+                        (3, SelectionKind::Line),
+                    ] {
+                        assert_eq!(
+                            local_selection_kind(clicks, modifiers, mouse_reporting, archived),
+                            Some(kind),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selection_gestures_preserve_words_lines_and_application_mouse_input() {
+        for (clicks, kind) in [
+            (1, SelectionKind::Character),
+            (2, SelectionKind::Word),
+            (3, SelectionKind::Line),
+        ] {
+            let plain = Modifiers::default();
+            assert_eq!(
+                local_selection_kind(clicks, plain, false, false),
+                Some(kind)
+            );
+            assert_eq!(local_selection_kind(clicks, plain, true, true), Some(kind));
+            assert_eq!(local_selection_kind(clicks, plain, true, false), None);
+            assert_eq!(
+                local_selection_kind(
+                    clicks,
+                    Modifiers {
+                        shift: true,
+                        ..plain
+                    },
+                    true,
+                    false
+                ),
+                Some(kind),
+            );
+        }
+        for modifiers in [
+            Modifiers {
+                alt: true,
+                control: true,
+                ..Modifiers::default()
+            },
+            Modifiers {
+                alt: true,
+                platform: true,
+                ..Modifiers::default()
+            },
+        ] {
+            assert_eq!(local_selection_kind(2, modifiers, true, false), None);
+            assert_eq!(
+                local_selection_kind(2, modifiers, false, false),
+                Some(SelectionKind::Word)
+            );
+        }
+    }
+
+    #[test]
+    fn a_stationary_press_stays_empty_when_output_scrolls_under_the_pointer() {
+        let mut terminal = rustterm::terminal::Terminal::new(20, 2, 16);
+        terminal.feed(b"alpha\r\nlive");
+        terminal.begin_selection(1, 0, SelectionKind::Character);
+        let position = gpui::point(px(10.), px(10.));
+        let mut drag = SelectionDrag::new(
+            SelectionPoint::new(1, 0, SelectionSide::Left),
+            position,
+            SelectionKind::Character,
+            SelectionIntent::New,
+        );
+        terminal.feed(b"\r\nnext");
+        if drag.update(
+            position,
+            SelectionPoint::new(1, 0, SelectionSide::Left),
+            terminal.snapshot().version,
+        ) {
+            terminal.update_selection(1, 0);
+        }
+        assert!(!terminal.snapshot().has_selection);
+        assert_eq!(terminal.selected_text(), None);
         assert!(!drag.publish);
-        assert!(drag.update(4, 3, 1));
+    }
+
+    #[test]
+    fn selection_drag_coalesces_cell_motion_without_losing_scroll_or_output_updates() {
+        let origin = gpui::point(px(20.), px(30.));
+        let moved = gpui::point(px(40.), px(30.));
+        let mut drag = SelectionDrag::new(
+            SelectionPoint::new(2, 3, SelectionSide::Left),
+            origin,
+            SelectionKind::Character,
+            SelectionIntent::New,
+        );
+        assert!(!drag.update(origin, SelectionPoint::new(2, 3, SelectionSide::Left), 1));
+        assert!(!drag.update(origin, SelectionPoint::new(2, 3, SelectionSide::Left), 2));
+        assert!(!drag.publish);
+        assert!(drag.update(moved, SelectionPoint::new(4, 3, SelectionSide::Left), 2));
         assert!(drag.publish);
-        assert!(!drag.update(4, 3, 1));
-        assert!(drag.update(4, 3, 2));
+        assert!(!drag.update(moved, SelectionPoint::new(4, 3, SelectionSide::Left), 2));
+        assert!(drag.update(moved, SelectionPoint::new(4, 3, SelectionSide::Left), 3));
         drag.scrolled();
-        assert!(drag.update(4, 3, 2));
-        assert!(!drag.update(4, 3, 2));
+        assert!(drag.update(moved, SelectionPoint::new(4, 3, SelectionSide::Left), 3));
+        assert!(!drag.update(moved, SelectionPoint::new(4, 3, SelectionSide::Left), 3));
+    }
+
+    #[test]
+    fn selection_drag_ignores_click_jitter_without_delaying_word_or_enclosed_selection() {
+        let origin = gpui::point(px(29.5), px(39.5));
+        let mut drag = SelectionDrag::new(
+            SelectionPoint::new(2, 3, SelectionSide::Left),
+            origin,
+            SelectionKind::Character,
+            SelectionIntent::New,
+        );
+        let jitter = gpui::point(px(30.5), px(40.5));
+        assert!(!drag.update(jitter, SelectionPoint::new(3, 4, SelectionSide::Left), 1));
+        assert!(!drag.publish);
+        assert!(drag.update(
+            gpui::point(px(33.), px(39.5)),
+            SelectionPoint::new(3, 3, SelectionSide::Left),
+            1
+        ));
+        assert!(drag.publish);
+        // Once dragging, returning to the starting cell is an intentional selection.
+        assert!(drag.update(origin, SelectionPoint::new(2, 3, SelectionSide::Left), 1));
+        for kind in [
+            SelectionKind::Word,
+            SelectionKind::Enclosed,
+            SelectionKind::Line,
+        ] {
+            let mut drag = SelectionDrag::new(
+                SelectionPoint::new(2, 3, SelectionSide::Left),
+                origin,
+                kind,
+                SelectionIntent::New,
+            );
+            assert!(drag.update(origin, SelectionPoint::new(2, 3, SelectionSide::Left), 1));
+            assert!(drag.publish);
+        }
     }
 
     #[test]

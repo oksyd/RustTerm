@@ -8,7 +8,9 @@ if [[ -z ${__RUSTTERM_INTEGRATED-} ]]; then
         path=${path//$'\n'/'%0A'}
         path=${path//$'\r'/'%0D'}
         builtin printf '\e]133;D;%s\a\e]7;file://%s%s\a' "$status" "${HOSTNAME-}" "$path"
-        return "$status"
+        # Bash restores command status for each PROMPT_COMMAND entry. Returning
+        # a failure here would invoke ERR traps again or trigger errexit.
+        return 0
     }
     __rustterm_prompt() {
         builtin printf '\e]133;P;RustTerm=bash\a'

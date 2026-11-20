@@ -60,7 +60,10 @@ impl Terminal {
         self.version = self.version.wrapping_add(1);
     }
 
-    pub(super) fn selection_visible_marks(&self) -> Option<Arc<[bool]>> {
+    pub(super) fn selection_visible_marks(
+        &self,
+        viewport: &super::folding::Viewport,
+    ) -> Option<Arc<[bool]>> {
         if !self.selection_highlight_enabled {
             return None;
         }
@@ -71,14 +74,17 @@ impl Terminal {
         if cache.version != Some(self.version) {
             cache.marks = self
                 .selection_query()
-                .map(|query| self.match_visible(&query).into());
+                .map(|query| self.match_visible(&query, viewport).into());
             cache.version = Some(self.version);
         }
         cache.marks.clone()
     }
 
     fn selection_query(&self) -> Option<Vec<Glyph<'_>>> {
-        if self.selection_kind == Some(SelectionKind::Line) {
+        if matches!(
+            self.selection_kind,
+            Some(SelectionKind::Line | SelectionKind::CommandBlock { .. })
+        ) {
             return None;
         }
         let (first, last) = self.selection_points()?;
@@ -128,11 +134,21 @@ impl Terminal {
         Some(query)
     }
 
-    fn match_visible(&self, query: &[Glyph<'_>]) -> Vec<bool> {
+    fn match_visible(&self, query: &[Glyph<'_>], viewport: &super::folding::Viewport) -> Vec<bool> {
+        let mut marks = vec![false; viewport.lines.len() * usize::from(self.size.columns)];
+        for (row, lines) in viewport.runs() {
+            let run = self.match_run(query, lines);
+            let start = row * usize::from(self.size.columns);
+            marks[start..start + run.len()].copy_from_slice(&run);
+        }
+        marks
+    }
+
+    fn match_run(&self, query: &[Glyph<'_>], lines: std::ops::Range<i32>) -> Vec<bool> {
         let columns = i32::from(self.size.columns);
         let grid = self.term.grid();
-        let view_start = -(grid.display_offset() as i32) * columns;
-        let view_end = view_start + i32::from(self.size.rows) * columns;
+        let view_start = lines.start * columns;
+        let view_end = lines.end * columns;
         // Include enough context for a match crossing either viewport edge,
         // even when each selected glyph occupies two columns.
         let context = (query.len() * 2 + 2) as i32;

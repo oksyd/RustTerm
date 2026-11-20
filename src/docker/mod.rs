@@ -108,6 +108,7 @@ impl Shell {
     }
 }
 struct Inner {
+    protection: crate::session::SessionProtection,
     id: uuid::Uuid,
     exec: ExecClient,
     endpoint: Endpoint,
@@ -118,11 +119,16 @@ struct Inner {
 #[derive(Clone)]
 pub struct DockerClient(Arc<Inner>);
 impl DockerClient {
-    pub(crate) fn new(exec: ExecClient) -> Self {
-        Self::create(exec, Endpoint::System)
+    pub(crate) fn new(exec: ExecClient, protection: crate::session::SessionProtection) -> Self {
+        Self::create(exec, Endpoint::System, protection)
     }
-    fn create(exec: ExecClient, endpoint: Endpoint) -> Self {
+    fn create(
+        exec: ExecClient,
+        endpoint: Endpoint,
+        protection: crate::session::SessionProtection,
+    ) -> Self {
         Self(Arc::new(Inner {
+            protection,
             id: uuid::Uuid::new_v4(),
             exec,
             endpoint,
@@ -132,12 +138,16 @@ impl DockerClient {
         }))
     }
     /// Identity shared by clones, distinct for each SSH session and endpoint selection.
+    pub fn protection(&self) -> crate::session::SessionProtection {
+        self.0.protection
+    }
+
     pub fn id(&self) -> uuid::Uuid {
         self.0.id
     }
 
     pub fn with_endpoint(&self, endpoint: Endpoint) -> Self {
-        Self::create(self.0.exec.clone(), endpoint)
+        Self::create(self.0.exec.clone(), endpoint, self.0.protection)
     }
     pub fn is_connected(&self) -> bool {
         self.0.exec.is_connected()

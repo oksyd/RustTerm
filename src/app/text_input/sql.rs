@@ -170,15 +170,15 @@ impl TextInput {
         alt: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.sql.is_none() || alt {
+        if alt {
             return false;
         }
+        let Some(editor) = &mut self.sql else {
+            return false;
+        };
         if command && key == "space" {
             if !self.read_only {
-                self.sql
-                    .as_mut()
-                    .unwrap()
-                    .complete(&self.content, self.cursor);
+                editor.complete(&self.content, self.cursor);
                 cx.notify();
             }
             return true;
@@ -190,19 +190,13 @@ impl TextInput {
                     anchor: self.anchor,
                     cursor: self.cursor,
                 };
-                if let Some(snapshot) = self
-                    .sql
-                    .as_mut()
-                    .unwrap()
-                    .history
-                    .restore(current, key == "y" || shift)
-                {
+                if let Some(snapshot) = editor.history.restore(current, key == "y" || shift) {
                     self.content = zeroize::Zeroizing::new(snapshot.text);
                     self.anchor = snapshot.anchor;
                     self.cursor = snapshot.cursor;
                     self.reveal_cursor = true;
                     self.validation_error = None;
-                    self.sql.as_mut().unwrap().refresh(&self.content);
+                    editor.refresh(&self.content);
                     cx.emit(InputEvent::Changed);
                     cx.notify();
                 }
@@ -212,11 +206,7 @@ impl TextInput {
         if command || shift {
             return false;
         }
-        let Some(completion) = self
-            .sql
-            .as_mut()
-            .and_then(|editor| editor.completion.as_mut())
-        else {
+        let Some(completion) = editor.completion.as_mut() else {
             return false;
         };
         match key {
@@ -228,7 +218,7 @@ impl TextInput {
                 let index = completion.selected;
                 self.accept_sql_completion(index, cx);
             }
-            "escape" => self.sql.as_mut().unwrap().completion = None,
+            "escape" => editor.completion = None,
             _ => return false,
         }
         cx.notify();

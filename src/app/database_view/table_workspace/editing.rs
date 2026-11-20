@@ -64,18 +64,25 @@ impl DatabaseView {
         else {
             return false;
         };
-        if value
-            .as_deref()
-            .is_some_and(|value| !crate::app::text_input::can_edit_literal(value))
-        {
+        let Some(table) = self.table_workspace() else {
             return false;
-        }
-        let table = self.table_workspace().unwrap();
-        let schema = table.schema.as_ref().unwrap();
-        schema
-            .columns
-            .get(column)
-            .is_some_and(|column| column.editable())
+        };
+        let fits_editor = match table.current_value(row, column) {
+            Some(CellValue::Binary(bytes)) => {
+                bytes.len() <= (crate::app::text_input::MAX_INPUT_BYTES - 2) / 2
+            }
+            _ => value
+                .as_deref()
+                .is_none_or(crate::app::text_input::can_edit_literal),
+        };
+        let Some(schema) = &table.schema else {
+            return false;
+        };
+        fits_editor
+            && schema
+                .columns
+                .get(column)
+                .is_some_and(|column| column.editable())
             && !matches!(table.changes.get(&row), Some(RowChange::Delete { .. }))
             && (matches!(table.changes.get(&row), Some(RowChange::Insert { .. }))
                 || table
@@ -91,6 +98,7 @@ impl DatabaseView {
         column: usize,
     ) -> bool {
         self.can_edit_cell(row, column)
+            && !self.is_binary_cell(row, column)
             && self
                 .current_result()
                 .and_then(|result| result.rows.get(row))
@@ -100,12 +108,25 @@ impl DatabaseView {
                         .as_deref()
                         .is_none_or(crate::app::text_input::can_edit_inline_literal)
                 })
-            && self
-                .table_workspace()
-                .and_then(|table| table.schema.as_ref())
-                .is_some_and(|schema| {
-                    schema.columns[column].kind != rustterm::database::table::ValueKind::Binary
-                })
+    }
+
+    pub(in crate::app::database_view) fn is_binary_cell(&self, row: usize, column: usize) -> bool {
+        self.table_workspace().is_some_and(|table| {
+            table.section == TableAction::Data
+                && table
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| schema.cell_kind(column, table.current_value(row, column)))
+                    == Some(rustterm::database::table::ValueKind::Binary)
+        })
+    }
+
+    pub(in crate::app::database_view) fn opens_value_viewer(
+        &self,
+        row: usize,
+        column: usize,
+    ) -> bool {
+        self.is_binary_cell(row, column) || !self.can_edit_cell(row, column)
     }
 
     pub(in crate::app::database_view) fn cell_color(
@@ -168,7 +189,10 @@ impl DatabaseView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_cell_edit(false, window, cx);
+        let expanded = self.documents[self.active_document]
+            .selected_cell
+            .is_some_and(|(row, column)| self.is_binary_cell(row, column));
+        self.begin_cell_edit(expanded, window, cx);
     }
 
     fn begin_cell_edit(&mut self, expanded: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -185,16 +209,9 @@ impl DatabaseView {
         if !self.can_edit_cell(row, column) {
             return;
         }
-        let table = document.table.as_ref().unwrap();
-        let Some(value) = document
-            .current_result()
-            .and_then(|result| result.rows.get(row))
-            .and_then(|row| row.get(column))
-        else {
+        let Some(table) = &document.table else {
             return;
         };
-        let mode = changes::initial_mode(table.changes.get(&row), column, value.as_deref());
-        let value = value.clone().unwrap_or_default();
         if !expanded && !self.can_edit_inline_cell(row, column) {
             self.documents[self.active_document].error = Some(
                 i18n_key::DATABASE_USE_THE_EXPANDED_EDITOR_FOR_MULTILINE_OR_BINARY_VALUES.into(),
@@ -202,6 +219,10 @@ impl DatabaseView {
             cx.notify();
             return;
         }
+        let value = table
+            .current_value(row, column)
+            .and_then(CellValue::display);
+        let mode = changes::initial_mode(table.changes.get(&row), column, value.as_deref());
         let input = cx.new(|cx| {
             let mut input = TextInput::new(mode.placeholder(), false, cx);
             if expanded {
@@ -210,7 +231,7 @@ impl DatabaseView {
                 input.set_inline_literal(cx);
             }
             if mode == CellMode::Value {
-                input.set_value(value, cx);
+                input.set_value(value.as_deref().unwrap_or_default(), cx);
             }
             input.select_all(cx);
             input
@@ -228,7 +249,9 @@ impl DatabaseView {
         } else {
             self.focus.focus(window);
         }
-        let table = self.documents[self.active_document].table.as_mut().unwrap();
+        let Some(table) = self.table_workspace_mut() else {
+            return;
+        };
         table.edit = Some(edit);
         table.edit_subscription = Some(subscription);
         self.documents[self.active_document].error = None;
@@ -268,7 +291,10 @@ impl DatabaseView {
         }
         if let Some(edit) = self.table_workspace().and_then(|table| table.edit.as_ref()) {
             if (edit.row, edit.column) == (row, column) {
-                if !self.table_workspace().unwrap().focus_edit(window, cx) {
+                if !self
+                    .table_workspace()
+                    .is_some_and(|table| table.focus_edit(window, cx))
+                {
                     self.focus.focus(window);
                 }
                 return true;
@@ -351,7 +377,13 @@ impl DatabaseView {
         if edit.input.read(cx).is_composing() {
             return;
         }
-        let column = &table.schema.as_ref().unwrap().columns[edit.column];
+        let Some(column) = table
+            .schema
+            .as_ref()
+            .and_then(|schema| schema.columns.get(edit.column))
+        else {
+            return;
+        };
         if (mode == CellMode::Null && !column.nullable)
             || (mode == CellMode::Default
                 && !matches!(table.changes.get(&edit.row), Some(RowChange::Insert { .. })))
@@ -384,15 +416,21 @@ impl DatabaseView {
             return false;
         }
         let document = &mut self.documents[self.active_document];
-        let table = document.table.as_mut().unwrap();
+        let Some(table) = &mut document.table else {
+            return false;
+        };
         let Some(edit) = &table.edit else {
             return false;
         };
         if edit.input.read(cx).is_composing() {
             return false;
         }
-        let schema = table.schema.as_ref().unwrap();
-        let column = &schema.columns[edit.column];
+        let Some(schema) = &table.schema else {
+            return false;
+        };
+        let Some(column) = schema.columns.get(edit.column) else {
+            return false;
+        };
         let value = if edit.mode == CellMode::Default {
             Ok(None)
         } else if edit.mode == CellMode::Null {
@@ -432,18 +470,16 @@ impl DatabaseView {
             .page
             .as_ref()
             .map_or(&[][..], |page| page.originals.as_slice());
-        let display = match changes::stage_value(&mut table.changes, originals, row, column, value)
+        let display = value.as_ref().and_then(|value| schema.display_cell(value));
+        if let Err(error) = changes::stage_value(&mut table.changes, originals, row, column, value)
         {
-            Ok(display) => display,
-            Err(error) => {
-                document.error = Some(Message::from_error(error));
-                edit.input
-                    .update(cx, |input, cx| input.set_invalid(true, cx));
-                edit.input.read(cx).focus(window);
-                cx.notify();
-                return false;
-            }
-        };
+            document.error = Some(Message::from_error(error));
+            edit.input
+                .update(cx, |input, cx| input.set_invalid(true, cx));
+            edit.input.read(cx).focus(window);
+            cx.notify();
+            return false;
+        }
         if let Some(output) = &mut document.output {
             Arc::make_mut(output).results[0].rows[row][column] = display;
         }
@@ -465,7 +501,9 @@ impl DatabaseView {
             return;
         }
         let document = &mut self.documents[self.active_document];
-        let table = document.table.as_mut().unwrap();
+        let Some(table) = &mut document.table else {
+            return;
+        };
         let Some(schema) = &table.schema else { return };
         let column = schema.columns.iter().position(|column| column.editable());
         let Some(column) = column else { return };
@@ -499,15 +537,20 @@ impl DatabaseView {
         let Some((row, _)) = document.selected_cell else {
             return;
         };
-        let table = document.table.as_mut().unwrap();
+        let Some(table) = &mut document.table else {
+            return;
+        };
         let originals = table
             .page
             .as_ref()
             .map_or(&[][..], |page| page.originals.as_slice());
         if !matches!(table.changes.get(&row), Some(RowChange::Insert { .. }))
-            && !originals
-                .get(row)
-                .is_some_and(|original| table.schema.as_ref().unwrap().row_editable(original))
+            && !originals.get(row).is_some_and(|original| {
+                table
+                    .schema
+                    .as_ref()
+                    .is_some_and(|schema| schema.row_editable(original))
+            })
         {
             document.error = Some(i18n_key::DATABASE_THIS_ROW_HAS_NO_RELIABLE_UNIQUE_KEY.into());
             cx.notify();
@@ -522,9 +565,8 @@ impl DatabaseView {
                 document.filter_rows(cx);
             }
             Ok(changes::DeleteEffect::ShowOriginal) => {
-                if let Some(output) = &mut document.output {
-                    Arc::make_mut(output).results[0].rows[row] =
-                        originals[row].iter().map(CellValue::display).collect();
+                if let (Some(output), Some(page)) = (&mut document.output, &table.page) {
+                    Arc::make_mut(output).results[0].rows[row].clone_from(&page.result.rows[row]);
                 }
             }
             Err(error) => document.error = Some(Message::from_error(error)),
@@ -581,7 +623,9 @@ impl DatabaseView {
         }
         let Some(client) = &self.client else { return };
         let document = &mut self.documents[self.active_document];
-        let table = document.table.as_mut().unwrap();
+        let Some(table) = &mut document.table else {
+            return;
+        };
         let Some(schema) = &table.schema else { return };
         let changes: Vec<_> = table.changes.values().cloned().collect();
         if changes.is_empty() {
@@ -605,7 +649,9 @@ impl DatabaseView {
             return;
         }
         let document = &self.documents[self.active_document];
-        let table = document.table.as_ref().unwrap();
+        let Some(table) = &document.table else {
+            return;
+        };
         if !table.review || table.changes.is_empty() {
             return;
         }
@@ -637,7 +683,7 @@ impl DatabaseView {
                 let document = &mut this.documents[index];
                 match result {
                     Ok((refreshed, elapsed)) => {
-                        let table = document.table.as_mut().unwrap();
+                        let Some(table) = &mut document.table else { return; };
                         // Submission and refresh are separate outcomes. A failed refresh must never
                         // leave already-applied writes queued for resubmission.
                         table.changes.clear(); table.review = false; table.preview.clear();
@@ -654,8 +700,9 @@ impl DatabaseView {
                         }
                     }
                     Err(error) => {
-                        if matches!(error, DatabaseError::OutcomeUnknown | DatabaseError::Disconnected | DatabaseError::Protocol | DatabaseError::Runtime | DatabaseError::TransactionRecovery) {
-                            document.table.as_mut().unwrap().submission_uncertain = true;
+                        if matches!(error, DatabaseError::OutcomeUnknown | DatabaseError::Disconnected | DatabaseError::Protocol | DatabaseError::Runtime | DatabaseError::TransactionRecovery)
+                            && let Some(table) = &mut document.table {
+                            table.submission_uncertain = true;
                         }
                         document.error = Some(Message::from_error(error));
                     }

@@ -11,7 +11,25 @@ use gpui::{
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 use rustterm::session::Command;
-use rustterm::terminal::SelectionKind;
+use rustterm::terminal::Snapshot;
+
+fn needs_notice(error: bool, snapshot: Option<&Snapshot>) -> bool {
+    error
+        || snapshot.is_some_and(|s| {
+            s.shell.command_insert_blocked
+                || s.shell.command_unavailable
+                || s.viewport_evicted
+                || s.selection_invalidated
+        })
+}
+
+fn history_action(snapshot: &Snapshot) -> Option<&'static str> {
+    (snapshot.display_offset > 0 && !snapshot.alternate_screen).then_some(if snapshot.new_output {
+        i18n_key::TERMINAL_NEW_OUTPUT
+    } else {
+        i18n_key::TERMINAL_SCROLL_TO_BOTTOM
+    })
+}
 
 impl TerminalView {
     pub fn external_header(&mut self, cx: &mut Context<Self>) -> gpui::Entity<TerminalHeader> {
@@ -42,7 +60,9 @@ impl TerminalView {
     }
 
     pub(super) fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search_seed_task.take();
         self.search_open = false;
+        self.search_scope = Default::default();
         self.send(Command::CancelSearch, cx);
     }
 
@@ -53,12 +73,14 @@ impl TerminalView {
         if !self.search_open {
             let query = self.search_input.read(cx).value().to_owned();
             self.send(
-                Command::Search {
+                Command::SearchScoped {
                     query,
+                    scope: self.search_scope,
                     case_sensitive: self.search_case,
                 },
                 cx,
             );
+            self.seed_search(cx);
         }
         self.search_open = true;
         cx.emit(PaneEvent::Focused(self.index));
@@ -68,16 +90,130 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn seed_search(&mut self, cx: &mut Context<Self>) {
+        self.search_seed_task.take();
+        if !self.flush_motion(cx) {
+            return;
+        }
+        let Some(run) = self.runs.get(self.viewed_run) else {
+            return;
+        };
+        let Ok(receipt) = run.selection_search_query() else {
+            return;
+        };
+        let run_id = run.id();
+        let generation = self.generation;
+        let lock_epoch = self.window_state.prompts.lock_epoch();
+        let previous_query = self.search_input.read(cx).value().to_owned();
+        self.search_seed_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(Some(query)) = receipt.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                if !this.search_open
+                    || !this.visible
+                    || this.chrome_blocked(cx)
+                    || this.generation != generation
+                    || this.window_state.prompts.lock_epoch() != lock_epoch
+                    || this.search_input.read(cx).value() != previous_query
+                    || !this
+                        .runs
+                        .get(this.viewed_run)
+                        .is_some_and(|run| run.id() == run_id && !run.is_evicted())
+                {
+                    return;
+                }
+                this.search_input.update(cx, |input, cx| {
+                    input.set_value(&query, cx);
+                    input.select_all(cx);
+                });
+                this.send(
+                    Command::SearchScoped {
+                        query,
+                        scope: this.search_scope,
+                        case_sensitive: this.search_case,
+                    },
+                    cx,
+                );
+                cx.notify();
+            });
+        }));
+    }
+
+    fn history_scrollbar(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let scrollbar_terminal = cx.entity().downgrade();
+        let scrollbar_metrics = scrollbar_terminal.clone();
+        let markers = self.snapshot.as_ref().filter(|snapshot| {
+            self.search_open
+                && !self.show_final_alternate
+                && !snapshot.search_markers.rows.is_empty()
+                && snapshot.search.scope == self.search_scope
+                && snapshot.search.case_sensitive == self.search_case
+                && snapshot.search.query == self.search_input.read(cx).value()
+        });
+        ui::scrollbar(
+            ("terminal-history-scrollbar", self.index),
+            ui::ScrollAxis::Vertical,
+            move |cx| {
+                scrollbar_metrics
+                    .upgrade()
+                    .map(|terminal| {
+                        let terminal = terminal.read(cx);
+                        terminal
+                            .snapshot
+                            .as_ref()
+                            .filter(|snapshot| {
+                                !terminal.show_final_alternate && !snapshot.alternate_screen
+                            })
+                            .map(|snapshot| ui::ScrollMetrics {
+                                viewport: f32::from(snapshot.rows),
+                                content: snapshot.history_size as f32 + f32::from(snapshot.rows),
+                                offset: snapshot
+                                    .history_size
+                                    .saturating_sub(snapshot.display_offset)
+                                    as f32
+                                    + snapshot.scroll_fraction,
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default()
+            },
+            move |offset, _, cx| {
+                let _ = scrollbar_terminal.update(cx, |terminal, cx| {
+                    let Some(snapshot) = terminal.snapshot.as_ref().filter(|snapshot| {
+                        !terminal.show_final_alternate && !snapshot.alternate_screen
+                    }) else {
+                        return;
+                    };
+                    let offset = snapshot
+                        .history_size
+                        .saturating_sub(offset.round() as usize);
+                    terminal.send(Command::ScrollTo(offset), cx);
+                });
+            },
+        )
+        .when_some(markers, |bar, snapshot| {
+            let marks = &snapshot.search_markers;
+            bar.with_vertical_markers(marks.rows.clone(), marks.current)
+        })
+    }
+
     fn search_status_label(&self) -> String {
         let Some(snapshot) = &self.snapshot else {
             return tr(i18n_key::TERMINAL_WAITING_FOR_TERMINAL).into();
         };
         let status = &snapshot.search;
+        if status.scope_unavailable {
+            return tr(i18n_key::TERMINAL_SEARCH_COMMAND_EXPIRED).into();
+        }
         if status.paused {
             return tr(i18n_key::TERMINAL_SEARCH_PAUSED_IN_ALTERNATE_SCREEN).into();
         }
         if status.query.is_empty() {
             return tr(i18n_key::TERMINAL_ENTER_A_QUERY).into();
+        }
+        if status.current_unavailable {
+            return tr(i18n_key::TERMINAL_SEARCH_MATCH_UNAVAILABLE).into();
         }
         if !status.complete {
             return rustterm::trf!(
@@ -104,6 +240,51 @@ impl TerminalView {
 }
 
 impl TerminalView {
+    fn header_notice(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if !needs_notice(self.error.is_some(), self.snapshot.as_deref()) {
+            return None;
+        }
+        let text = self
+            .feedback_text()
+            .filter(|text| self.dismissed_feedback.as_ref() != Some(text))?;
+        Some(
+            div()
+                .flex()
+                .min_w_0()
+                .max_w(gpui::relative(0.4))
+                .items_center()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    ui::icon_button(
+                        ("feedback-details", self.index),
+                        Icon::Warning,
+                        i18n_key::TERMINAL_CONNECTION_AND_STATUS_DETAILS,
+                    )
+                    .when(!self.compact_header, |button| {
+                        button
+                            .w_auto()
+                            .min_w_0()
+                            .flex_shrink()
+                            .px_1()
+                            .gap_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(self.status_color()))
+                            .child(div().min_w_0().truncate().child(text))
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| this.show_feedback(window, cx))),
+                )
+                .child(
+                    pane_button("feedback-dismiss", self.index, Icon::Close).on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.dismissed_feedback = this.feedback_text();
+                            cx.notify();
+                        },
+                    )),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let focused = self.focus.is_focused(window)
             || self.menu_focus.is_focused(window)
@@ -117,6 +298,14 @@ impl TerminalView {
         }
         .clone();
         let mut detail = self.display_name.clone();
+        if self.production_protected() {
+            detail.push('\n');
+            detail.push_str(tr(i18n_key::CONNECTIONS_PRODUCTION_DESCRIPTION));
+        }
+        if self.protection_pending() {
+            detail.push('\n');
+            detail.push_str(tr(i18n_key::CONNECTIONS_PRODUCTION_PENDING));
+        }
         if self.kind == TerminalKind::Local
             && let Some(directory) = &self.target
         {
@@ -147,6 +336,50 @@ impl TerminalView {
                 )
                 .flex_1()
                 .min_w_0(),
+            )
+            .when(self.production_protected(), |header| {
+                header.child(ui::production_badge())
+            })
+            .when(self.protection_pending(), |header| {
+                header.child(ui::protection_pending_badge())
+            })
+            .children(self.header_notice(cx))
+            .when_some(
+                self.snapshot
+                    .as_deref()
+                    .and_then(history_action)
+                    .filter(|_| !self.show_final_alternate),
+                |header, label| {
+                    header.child(
+                        ui::icon_button_enabled(
+                            ("bottom", pane_index),
+                            Icon::ChevronDown,
+                            if label == i18n_key::TERMINAL_NEW_OUTPUT {
+                                label
+                            } else {
+                                i18n_key::TERMINAL_SCROLL_TO_BOTTOM_AND_RESUME_FOLLOWING
+                            },
+                            self.visible && !self.chrome_blocked(cx),
+                        )
+                        .when(label == i18n_key::TERMINAL_NEW_OUTPUT, |button| {
+                            button.bg(rgb(ui::colors().selected))
+                        })
+                        .when(!self.compact_header, |button| {
+                            button
+                                .w_auto()
+                                .px_2()
+                                .gap_1()
+                                .text_size(px(11.))
+                                .child(tr(label))
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.visible && !this.chrome_blocked(cx) {
+                                this.send(Command::ScrollToBottom, cx);
+                            }
+                        })),
+                    )
+                },
             )
             .child(self.header_actions(cx))
             .child(
@@ -204,31 +437,63 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let paint_entity = entity.clone();
-        let scrollbar_terminal = entity.downgrade();
-        let scrollbar_metrics = scrollbar_terminal.clone();
         let pane_index = self.index;
-        let mut body = div().relative().flex_1().min_h_0().overflow_hidden();
+        let mut body = div()
+            .id(("terminal-body", self.index))
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .overflow_hidden();
         if self.visible && self.window_state.visibility.is_visible() {
             body = body
                 .pr(px(ui::SCROLLBAR_WIDTH))
-                .cursor(CursorStyle::IBeam)
+                .when_some(self.hovered_link.as_ref(), |body, link| {
+                    let target = match link {
+                        rustterm::terminal::TerminalLink::Url(value)
+                        | rustterm::terminal::TerminalLink::RemotePath(value) => {
+                            value.chars().take(512).collect::<String>()
+                        }
+                    };
+                    let hint = rustterm::trf!(i18n_key::TERMINAL_OPEN_LINK_HINT, target = target);
+                    body.tooltip(move |_, cx| cx.new(|_| ui::Tooltip(hint.clone())).into())
+                })
+                .cursor(if self.hovered_link.is_some() {
+                    CursorStyle::PointingHand
+                } else {
+                    CursorStyle::IBeam
+                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                        let intent = super::input::selection_intent(
+                            this.focus.is_focused(window),
+                            this.selection_contains(event.position),
+                            event.click_count,
+                            event.modifiers,
+                        );
                         this.focus.focus(window);
                         if this.show_final_alternate {
                             return;
                         }
-                        if event.modifiers.shift
-                            || !this.snapshot.as_ref().is_some_and(|s| s.mouse_reporting)
-                            || this.viewed_run + 1 < this.runs.len()
-                        {
-                            let kind = match event.click_count {
-                                2 => SelectionKind::Word,
-                                3.. => SelectionKind::Line,
-                                _ => SelectionKind::Character,
-                            };
-                            this.begin_selection(event.position, kind, cx);
+                        if this.begin_link(event.position, event.modifiers, cx) {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            return;
+                        }
+                        let kind = if intent == super::input::SelectionIntent::Preserve {
+                            Some(rustterm::terminal::SelectionKind::Character)
+                        } else {
+                            super::input::local_selection_kind(
+                                event.click_count,
+                                event.modifiers,
+                                this.snapshot.as_ref().is_some_and(|s| s.mouse_reporting),
+                                this.viewed_run + 1 < this.runs.len(),
+                            )
+                        };
+                        if let Some(kind) = kind {
+                            this.begin_selection_with_intent(event.position, kind, intent, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
                         } else {
                             this.mouse(event.position, 0, true, false, event.modifiers, cx);
                         }
@@ -238,11 +503,7 @@ impl Render for TerminalView {
                 .on_mouse_up(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                        if this.selection_drag.is_some() {
-                            this.drag_selection(event.position, true, cx);
-                        } else {
-                            this.mouse(event.position, 0, false, false, event.modifiers, cx);
-                        }
+                        this.mouse(event.position, 0, false, false, event.modifiers, cx);
                     }),
                 )
                 .on_mouse_down(
@@ -291,11 +552,7 @@ impl Render for TerminalView {
                 .on_mouse_up_out(
                     MouseButton::Left,
                     cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                        if this.selection_drag.is_some() {
-                            this.drag_selection(event.position, true, cx);
-                        } else {
-                            this.mouse(event.position, 0, false, false, event.modifiers, cx);
-                        }
+                        this.mouse(event.position, 0, false, false, event.modifiers, cx);
                     }),
                 )
                 .on_mouse_up_out(
@@ -311,9 +568,16 @@ impl Render for TerminalView {
                     }),
                 )
                 .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                    if this.selection_drag.is_some() {
-                        this.drag_selection(event.position, false, cx);
-                        return;
+                    let link = if super::links::link_modifier(event.modifiers)
+                        && event.pressed_button.is_none()
+                    {
+                        this.link_at_position(event.position, cx)
+                    } else {
+                        None
+                    };
+                    if this.hovered_link != link {
+                        this.hovered_link = link;
+                        cx.notify();
                     }
                     let button = match event.pressed_button {
                         Some(MouseButton::Left) => 0,
@@ -338,6 +602,7 @@ impl Render for TerminalView {
                         },
                         move |bounds, _, window, cx| {
                             paint_entity.update(cx, |this, cx| {
+                                this.capture_selection_input(window, cx);
                                 window.handle_input(
                                     &this.focus,
                                     ElementInputHandler::new(bounds, paint_entity.clone()),
@@ -349,60 +614,26 @@ impl Render for TerminalView {
                     )
                     .size_full(),
                 )
-                .child(ui::scrollbar(
-                    ("terminal-history-scrollbar", pane_index),
-                    ui::ScrollAxis::Vertical,
-                    move |cx| {
-                        scrollbar_metrics
-                            .upgrade()
-                            .map(|terminal| {
-                                let terminal = terminal.read(cx);
-                                terminal
-                                    .snapshot
-                                    .as_ref()
-                                    .filter(|snapshot| {
-                                        !terminal.show_final_alternate && !snapshot.alternate_screen
-                                    })
-                                    .map(|snapshot| ui::ScrollMetrics {
-                                        viewport: f32::from(snapshot.rows),
-                                        content: snapshot.history_size as f32
-                                            + f32::from(snapshot.rows),
-                                        offset: snapshot
-                                            .history_size
-                                            .saturating_sub(snapshot.display_offset)
-                                            as f32,
-                                    })
-                                    .unwrap_or_default()
-                            })
-                            .unwrap_or_default()
-                    },
-                    move |offset, _, cx| {
-                        let _ = scrollbar_terminal.update(cx, |terminal, cx| {
-                            let Some(snapshot) = terminal.snapshot.as_ref().filter(|snapshot| {
-                                !terminal.show_final_alternate && !snapshot.alternate_screen
-                            }) else {
-                                return;
-                            };
-                            let offset = snapshot
-                                .history_size
-                                .saturating_sub(offset.round() as usize);
-                            terminal.send(Command::ScrollTo(offset), cx);
-                        });
-                    },
-                ))
+                .child(self.history_scrollbar(cx))
                 .children(self.render_context_menu(cx).map(gpui::deferred));
+            body = body
+                .children(self.render_command_guides(cx))
+                .children(self.render_command_results())
+                .children(self.render_sticky_command(cx));
         } else {
             body = body
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(ui::colors().muted))
+                .text_color(rgb(
+                    super::colors::OverlayColors::new(&self.settings.theme).muted
+                ))
                 .text_size(px(12.))
                 .child(tr(
                     i18n_key::TERMINAL_THE_TERMINAL_IS_RUNNING_IN_THE_BACKGROUND,
                 ));
         }
-        let mut root = div()
+        let root = div()
             .relative()
             .flex()
             .flex_col()
@@ -416,6 +647,13 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .capture_key_down(cx.listener(Self::search_key))
             .on_key_down(cx.listener(Self::key_down))
+            .on_modifiers_changed(
+                cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, _| {
+                    if !super::links::link_modifier(event.modifiers) {
+                        this.link_press = None;
+                    }
+                }),
+            )
             .when(!self.header_external, |root| {
                 root.child(self.render_header(window, cx))
             })
@@ -446,6 +684,7 @@ impl Render for TerminalView {
                                 .text_size(px(10.))
                                 .child(self.search_status_label()),
                         )
+                        .child(self.render_search_scope(cx))
                         .child(
                             div()
                                 .id(("case", pane_index))
@@ -479,8 +718,9 @@ impl Render for TerminalView {
                                     this.search_case = !this.search_case;
                                     let query = this.search_input.read(cx).value().to_owned();
                                     this.send(
-                                        Command::Search {
+                                        Command::SearchScoped {
                                             query,
+                                            scope: this.search_scope,
                                             case_sensitive: this.search_case,
                                         },
                                         cx,
@@ -514,85 +754,10 @@ impl Render for TerminalView {
                 )
             })
             .child(body);
-        // Feedback overlays the canvas so entering scrollback or an alternate
-        // screen cannot itself resize the PTY and invalidate a text selection.
-        let needs_notice = self.error.is_some()
-            || self.snapshot.as_ref().is_some_and(|s| {
-                s.shell.command_insert_blocked
-                    || s.shell.command_unavailable
-                    || s.viewport_evicted
-                    || s.selection_invalidated
-                    || (!self.show_final_alternate && s.display_offset > 0)
-            });
-        if needs_notice
-            && let Some(feedback) = self.feedback_text()
-            && self.dismissed_feedback.as_ref() != Some(&feedback)
-        {
-            root = root.child(
-                div()
-                    .absolute()
-                    .occlude()
-                    .bottom_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(ui::STATUS_HEIGHT))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .bg(rgb(ui::colors().surface))
-                    .border_t_1()
-                    .border_color(rgb(ui::colors().border))
-                    .text_size(px(10.))
-                    .text_color(rgb(self.status_color()))
-                    .child(
-                        div()
-                            .id(("feedback-text", pane_index))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(feedback),
-                    )
-                    .child(
-                        ui::text_button(
-                            ("feedback-details", pane_index),
-                            i18n_key::COMMON_DETAILS,
-                            ui::ButtonStyle::Neutral,
-                        )
-                        .tab_index(0)
-                        .h(px(ui::STATUS_HEIGHT - 2.))
-                        .py(px(0.))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.show_feedback(window, cx)),
-                        ),
-                    )
-                    .when(
-                        !self.show_final_alternate
-                            && self.snapshot.as_ref().is_some_and(|s| s.display_offset > 0),
-                        |d| {
-                            d.child(
-                                pane_button("bottom", pane_index, Icon::ChevronDown)
-                                    .h(px(ui::STATUS_HEIGHT - 2.))
-                                    .child(tr(i18n_key::TERMINAL_SCROLL_TO_BOTTOM))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.send(Command::ScrollToBottom, cx)
-                                    })),
-                            )
-                        },
-                    )
-                    .child(
-                        pane_button("feedback-dismiss", pane_index, Icon::Close)
-                            .h(px(ui::STATUS_HEIGHT - 2.))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.dismissed_feedback = this.feedback_text();
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
         root.when(!self.header_external, |root| {
             root.children(self.render_menu(cx))
         })
+        .children(self.render_paste_preview(cx))
     }
 }
 
@@ -624,5 +789,44 @@ impl Render for TerminalHeader {
             .when_some(content, |root, (header, menu)| {
                 root.child(header).children(menu.map(gpui::deferred))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::terminal::{SearchHighlight, Terminal};
+
+    #[test]
+    fn navigating_to_a_match_on_the_last_row_keeps_history_out_of_canvas_notices() {
+        let mut terminal = Terminal::new(12, 3, 32);
+        terminal.feed(b"match 0\r\nmatch 1\r\nmatch 2\r\nmatch 3\r\nmatch 4\r\nmatch 5");
+        terminal.scroll_to(2);
+        terminal.start_search("match".into(), true);
+        assert!(terminal.search_step(32).complete);
+        assert!(terminal.search_next(true));
+        assert!(terminal.search_next(true));
+        assert!(terminal.search_next(false));
+        for output in [b"".as_slice(), b"\r\nfresh"] {
+            terminal.feed(output);
+            let snapshot = terminal.snapshot();
+            assert!(snapshot.display_offset > 0);
+            assert_eq!(snapshot.new_output, !output.is_empty());
+            assert_eq!(
+                snapshot.lines[2].cells[0].search_highlight,
+                Some(SearchHighlight::Current)
+            );
+            assert!(!needs_notice(false, Some(&snapshot)));
+            assert_eq!(
+                history_action(&snapshot),
+                Some(if output.is_empty() {
+                    i18n_key::TERMINAL_SCROLL_TO_BOTTOM
+                } else {
+                    i18n_key::TERMINAL_NEW_OUTPUT
+                })
+            );
+        }
+        terminal.scroll_to_bottom();
+        assert!(history_action(&terminal.snapshot()).is_none());
     }
 }

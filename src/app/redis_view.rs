@@ -1259,11 +1259,8 @@ impl RedisView {
                 "d" => cx.emit(PaneEvent::Split(Axis::Horizontal)),
                 "e" => cx.emit(PaneEvent::Split(Axis::Vertical)),
                 "enter" => cx.emit(PaneEvent::Zoom),
-                "f" => self.open_search(window, cx),
                 _ => return,
             }
-        } else if modifiers.control && !modifiers.alt && !modifiers.platform && key == "tab" {
-            cx.emit(PaneEvent::NextTab);
         } else if modifiers.control
             && !modifiers.shift
             && !modifiers.alt

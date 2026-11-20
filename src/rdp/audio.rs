@@ -116,7 +116,8 @@ impl Playback {
             Item::Samples(chunk) => chunk.samples.data.len(),
             Item::Close => 0,
         };
-        if self.shared.failed.load(Ordering::Acquire)
+        if (matches!(item, Item::Samples(_)) && self.shared.muted.load(Ordering::Acquire))
+            || self.shared.failed.load(Ordering::Acquire)
             || self.shared.stopped.load(Ordering::Acquire)
             || queue.items.len() >= MAX_EVENTS + usize::from(closing)
             || length > MAX_BYTES.saturating_sub(queue.bytes)

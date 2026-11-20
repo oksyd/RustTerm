@@ -341,7 +341,7 @@ impl RedisClient {
         }
         match self.request(0, Operation::Subscribe(pattern)).await? {
             Response::Subscription(subscription) => Ok(subscription),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     pub async fn slow_log(&self) -> Result<RedisValue> {
@@ -353,7 +353,7 @@ impl RedisClient {
             .await?
         {
             Response::Value(value) => Ok(value),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     pub async fn publish(&self, channel: Vec<u8>, payload: Vec<u8>) -> Result<RedisValue> {
@@ -368,7 +368,7 @@ impl RedisClient {
             .await?
         {
             Response::Value(value) => Ok(value),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     pub async fn connect(config: RedisConfig, secret: Option<Secret>) -> Result<Self> {
@@ -482,7 +482,7 @@ impl RedisClient {
             .await?
         {
             Response::Keys(page) => Ok(page),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     pub async fn inspect(&self, database: u32, key: &[u8], page: PageRequest) -> Result<KeyInfo> {
@@ -501,14 +501,14 @@ impl RedisClient {
             .await?
         {
             Response::Key(info) => Ok(info),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     pub async fn command(&self, database: u32, args: Vec<Vec<u8>>) -> Result<RedisValue> {
         console::validate(&args)?;
         match self.request(database, Operation::Command(args)).await? {
             Response::Value(value) => Ok(value),
-            _ => unreachable!(),
+            _ => Err(RedisError::Protocol),
         }
     }
     async fn request(&self, database: u32, operation: Operation) -> Result<Response> {

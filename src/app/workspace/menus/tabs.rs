@@ -240,7 +240,7 @@ fn close_targets(
         };
     }
     let Target::Tab(id) = target else {
-        unreachable!()
+        return Vec::new();
     };
     let Some(index) = tabs.iter().position(|tab| tab.id == id) else {
         // A stale target must not turn "close others" into "close everything".

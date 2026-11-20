@@ -1102,7 +1102,7 @@ impl Session {
                         changed |= self.graphics_update(code, &fragment.bytes, events, on_frame)?;
                     }
                 }
-                _ => unreachable!(),
+                _ => return Err(Error::Invalid("fast-path fragmentation")),
             }
         }
         Ok(changed)

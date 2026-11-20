@@ -5,7 +5,7 @@ use crate::app::ui;
 use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, MouseButton, Window, div, px, relative, rgb, rgba};
-use rustterm::config::Connection;
+use rustterm::config::{Connection, ShortcutAction};
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 
@@ -48,18 +48,20 @@ impl Workspace {
                     .children(
                         [
                             (tr(i18n_key::WORKSPACE_NEW_LOCAL_TERMINAL), "Ctrl+Shift+T"),
-                            (tr(i18n_key::WORKSPACE_COMMAND_PALETTE), "Ctrl+Shift+P"),
+                            (tr(i18n_key::WORKSPACE_COMMAND_PALETTE), self.config.settings.shortcuts.label(ShortcutAction::Palette)),
+                            (tr(i18n_key::WORKSPACE_QUICK_OPEN_CONNECTION), self.config.settings.shortcuts.label(ShortcutAction::QuickOpen)),
                             (tr(i18n_key::COMMON_SETTINGS_DIALOG), "Ctrl+,"),
                             (tr(i18n_key::SETTINGS_LOCK_RUSTTERM), "Ctrl+Shift+L"),
                             (tr(i18n_key::WORKSPACE_CLOSE_CURRENT_PANE), "Ctrl+Shift+W"),
                             (tr(i18n_key::TERMINAL_RECONNECT_ENDED_SESSION), "Ctrl+Shift+R"),
                             (tr(i18n_key::WORKSPACE_COPY_PASTE), "Ctrl+Shift+C / V"),
-                            (tr(i18n_key::WORKSPACE_SEARCH_OUTPUT), "Ctrl+Shift+F"),
+                            (tr(i18n_key::TERMINAL_SELECT_ENCLOSED), tr(i18n_key::TERMINAL_SELECT_ENCLOSED_SHORTCUT)),
+                            (tr(i18n_key::WORKSPACE_SEARCH_OUTPUT), self.config.settings.shortcuts.label(ShortcutAction::Search)),
                             (tr(i18n_key::WORKSPACE_SFTP_FILE_MANAGER), "Ctrl+Shift+S"),
                             (tr(i18n_key::WORKSPACE_SPLIT_HORIZONTALLY_VERTICALLY), "Ctrl+Shift+D / E"),
                             (tr(i18n_key::WORKSPACE_NEXT_PANE), "Ctrl+Shift+J"),
                             (tr(i18n_key::WORKSPACE_ZOOM_RESTORE_PANE), "Ctrl+Shift+Enter"),
-                            (tr(i18n_key::WORKSPACE_SHOW_CONNECTION_SIDEBAR), "Ctrl+Shift+B"),
+                            (tr(i18n_key::WORKSPACE_SHOW_CONNECTION_SIDEBAR), self.config.settings.shortcuts.label(ShortcutAction::Sidebar)),
                             (tr(i18n_key::WORKSPACE_PANE_ACTIONS), "Shift+F10"),
                             (tr(i18n_key::WORKSPACE_NEXT_TAB), "Ctrl+Tab"),
                             (
@@ -73,7 +75,7 @@ impl Workspace {
                                 .flex()
                                 .justify_between()
                                 .child(label)
-                                .child(div().text_color(rgb(ui::colors().muted)).child(key))
+                                .child(div().text_color(rgb(ui::colors().muted)).child(key.to_owned()))
                         }),
                     )
                     .child(
@@ -211,7 +213,9 @@ impl Workspace {
                             i18n_key::DATABASE_THIS_DATABASE_SELECTION_APPLIES_TO_THIS_PANE_CREDENTIALS_ARE_USED,
                         )))
                         .when_some(tunnel.as_ref(), |content, tunnel| {
-                            let Connection::Ssh(ssh) = &tunnel.profile.connection else { unreachable!("validated SSH route") };
+                            let Connection::Ssh(ssh) = &tunnel.profile.connection else {
+                                return content.child(div().text_color(rgb(ui::colors().danger)).child(tr(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE)));
+                            };
                             content.child(div().w_full().min_w_0().border_t_1().border_color(rgb(ui::colors().border)).pt_3()
                                 .flex().flex_col().gap_3()
                                 .child(rustterm::trf!(i18n_key::REDIS_SSH_TUNNEL_VIA_NAME_USER_HOST_PORT,

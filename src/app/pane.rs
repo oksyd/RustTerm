@@ -23,7 +23,6 @@ pub enum PaneEvent {
     Close(usize),
     NewTab,
     Split(Axis),
-    NextTab,
     NextPane,
     Files,
     Commands,
@@ -37,7 +36,16 @@ pub enum PaneEvent {
         run: rustterm::config::Uuid,
         command: rustterm::terminal::ShellCommand,
     },
-    DirectoryChanged(usize, String),
+    DirectoryChanged(usize),
+    RevealRemotePath {
+        index: usize,
+        run: rustterm::config::Uuid,
+        path: String,
+    },
+    RdpViewChanged {
+        index: usize,
+        view: rustterm::config::RdpViewState,
+    },
     RdpCertificateTrusted {
         index: usize,
         fingerprint: String,

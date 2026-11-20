@@ -125,6 +125,7 @@ mod tests {
         let session = || {
             let (commands, _) = tokio::sync::mpsc::channel(1);
             Session {
+                protection: Default::default(),
                 commands,
                 shared: Shared::new(&Terminal::new(80, 24, 100)),
             }

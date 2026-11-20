@@ -22,6 +22,8 @@ const SCRIPT: &str = include_str!("resources/collect.sh");
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceError {
+    #[error("{}", crate::i18n::tr(i18n_key::CONNECTIONS_PRODUCTION_BLOCKED))]
+    Protected,
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::CONNECTIONS_THE_SSH_CONNECTION_IS_DISCONNECTED)

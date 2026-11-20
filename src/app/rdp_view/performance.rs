@@ -2,7 +2,85 @@ use super::WindowState;
 use rustterm::rdp::{RdpFrame, RdpPerformance};
 use std::time::{Duration, Instant};
 
-#[derive(Default)]
+use rustterm::i18n::{messages as i18n_key, tr};
+
+pub(super) struct Quality {
+    sample: RdpPerformance,
+    received: Instant,
+    paint: Timing,
+    paint_calls: u64,
+    age: Timing,
+    painted_frames: u64,
+}
+
+fn timing_label(count: u64, total: Duration, max: Duration) -> String {
+    if count == 0 {
+        return "—".into();
+    }
+    rustterm::trf!(
+        i18n_key::RDP_QUALITY_TIMING,
+        mean = format!("{:.1}", total.as_secs_f64() * 1000. / count as f64),
+        max = format!("{:.1}", max.as_secs_f64() * 1000.)
+    )
+}
+
+impl Quality {
+    pub(super) fn rows(&self) -> Vec<(&'static str, String)> {
+        let sample = &self.sample;
+        let rate = if sample.interval.is_zero() {
+            "—".into()
+        } else {
+            format!(
+                "{:.1}",
+                sample.server_graphics_updates as f64 / sample.interval.as_secs_f64()
+            )
+        };
+        vec![
+            (
+                i18n_key::RDP_QUALITY_SAMPLE_AGE,
+                rustterm::trf!(
+                    i18n_key::RDP_QUALITY_SECONDS_AGO,
+                    seconds = self.received.elapsed().as_secs()
+                ),
+            ),
+            (i18n_key::RDP_QUALITY_SERVER_UPDATES, rate),
+            (
+                i18n_key::RDP_QUALITY_INPUT_QUEUE,
+                timing_label(
+                    sample.command_latency.samples,
+                    sample.command_latency.total,
+                    sample.command_latency.max,
+                ),
+            ),
+            (
+                i18n_key::RDP_QUALITY_WRITE_QUEUE,
+                timing_label(
+                    sample.writer_latency.samples,
+                    sample.writer_latency.total,
+                    sample.writer_latency.max,
+                ),
+            ),
+            (
+                i18n_key::RDP_QUALITY_PROCESSING,
+                timing_label(sample.packets, sample.process_time, sample.max_process_time),
+            ),
+            (
+                i18n_key::RDP_QUALITY_PAINT,
+                timing_label(self.paint_calls, self.paint.total, self.paint.maximum),
+            ),
+            (
+                i18n_key::RDP_QUALITY_FRAME_AGE,
+                timing_label(self.painted_frames, self.age.total, self.age.maximum),
+            ),
+            (
+                i18n_key::RDP_QUALITY_NOTE,
+                tr(i18n_key::RDP_QUALITY_EXPLANATION).into(),
+            ),
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Default)]
 struct Timing {
     total: Duration,
     maximum: Duration,
@@ -44,6 +122,17 @@ pub(super) struct Performance {
 }
 
 impl Performance {
+    pub(super) fn quality(&self, sample: RdpPerformance) -> Quality {
+        Quality {
+            sample,
+            received: Instant::now(),
+            paint: self.paint,
+            paint_calls: self.paint_calls,
+            age: self.age,
+            painted_frames: self.painted_frames,
+        }
+    }
+
     pub fn cursor_painted(&mut self, stats: super::cursor::PaintStats) {
         self.cursor_uploads += stats.uploads;
         self.cursor_bytes += stats.bytes;
@@ -240,6 +329,14 @@ fn micros(duration: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absent_samples_are_not_reported_as_zero_latency() {
+        assert_eq!(timing_label(0, Duration::ZERO, Duration::ZERO), "—");
+        let text = timing_label(2, Duration::from_millis(8), Duration::from_millis(6));
+        assert!(text.contains("4.0"));
+        assert!(text.contains("6.0"));
+    }
 
     #[test]
     fn repainting_a_frame_does_not_inflate_fps_or_count_the_initial_gap() {

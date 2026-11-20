@@ -57,8 +57,7 @@ impl Catalog {
         let pattern = message.value()?;
         let mut errors = Vec::new();
         let text = self.bundle.format_pattern(pattern, arguments, &mut errors);
-        debug_assert!(errors.is_empty(), "invalid Fluent message {id}: {errors:?}");
-        Some(text.into_owned())
+        errors.is_empty().then(|| text.into_owned())
     }
 }
 
@@ -129,6 +128,16 @@ macro_rules! msg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_message_arguments_fall_back_without_panicking() {
+        let catalog = Catalog::new("en", &["message = { $required }"], &[]);
+        assert!(catalog.format("message", None).is_none());
+        assert_eq!(
+            format_in(Language::English, messages::COMMON_TIME_MINUTES_AGO, &[]),
+            messages::COMMON_TIME_MINUTES_AGO
+        );
+    }
 
     #[test]
     fn fluent_uses_locale_plural_rules_and_literal_parameter_values() {

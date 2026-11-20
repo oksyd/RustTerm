@@ -100,3 +100,32 @@ settings-connection-list = Connection list
 settings-show-connection-details = Show connection details
 
 settings-show-connection-details-help = Show the type and address below each connection name. Turn off for a compact, single-line list.
+
+settings-shortcuts = Shortcuts
+settings-toggle-connection-sidebar = Toggle connection sidebar
+settings-shortcut-record = Press a shortcut…
+settings-shortcut-unassigned = Unassigned
+settings-shortcut-clear = Clear shortcut
+settings-shortcut-default = Restore default
+settings-shortcut-hint = Select a shortcut and press the new keys. Press Esc to cancel.
+settings-shortcut-unsupported = Press a modified key or a function key.
+settings-shortcut-conflict = { $shortcut } is assigned to “{ $action }”.
+settings-shortcut-fixed = { $shortcut } is reserved for “{ $action }”.
+settings-shortcut-replace = Replace binding
+settings-shortcut-invalid = The keyboard shortcuts contain a duplicate or reserved binding.
+settings-text-editing = Text editing
+
+settings-tab-switch-order = Tab switching order
+settings-tab-switch-help = Applies to Ctrl+Tab and Ctrl+Shift+Tab.
+settings-tab-switch-bar = Tab bar order
+settings-tab-switch-recent = Recently used
+
+settings-word-delimiters = Double-click word delimiters
+settings-word-delimiters-help = Each character marks a word boundary. Spaces and tabs always separate words.
+settings-word-delimiters-preview = Double-click the sample to try your selection rules.
+
+settings-quick-open-order = Quick open order
+settings-quick-open-order-help = Used when the connection search is empty.
+settings-sftp-follow-directory = Follow the terminal directory by default
+settings-sftp-follow-directory-help = When the SSH session reports its directory, show it in the file panel. You can toggle this for each session.
+settings-word-delimiters-invalid = Word delimiters must fit in 256 bytes and contain no control characters.

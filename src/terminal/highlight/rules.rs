@@ -46,10 +46,14 @@ static RULES: LazyLock<Rules> = LazyLock::new(|| {
 pub(super) fn spans(text: &str, theme: &Theme) -> Vec<Span> {
     let rules = &*RULES;
     let mut colors = vec![None; text.len()];
+    let mut underlines = vec![false; text.len()];
 
     for found in rules.url.find_iter(text) {
         let range = trimmed_token(text, found.range(), false);
         if left_boundary(text, range.start, "./\\@-") && valid_url(&text[range.clone()]) {
+            if super::super::links::is_web_url(&text[range.clone()]) {
+                underlines[range.clone()].fill(true);
+            }
             paint(&mut colors, range, theme.url);
         }
     }
@@ -93,22 +97,24 @@ pub(super) fn spans(text: &str, theme: &Theme) -> Vec<Span> {
 
     let words: Vec<_> = rules.word.find_iter(text).collect();
     for (index, word) in words.iter().enumerate() {
-        if !is_negation(word.as_str()) || !word_boundary(text, &word.range()) {
+        if !word_boundary(text, &word.range()) {
             continue;
         }
-        paint(&mut colors, word.range(), theme.error);
-        if let Some(next) = words.get(index + 1) {
-            let gap = &text[word.end()..next.start()];
-            if !gap.is_empty()
-                && gap.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
-                && word_boundary(text, &next.range())
-            {
-                paint(&mut colors, word.end()..next.end(), theme.error);
-            }
-        }
-    }
-    for (index, word) in words.iter().enumerate() {
-        if !word_boundary(text, &word.range()) {
+        // Negation is ordinary prose, not a failure signal. In particular,
+        // do not turn "not healthy" green or "not unhealthy" red.
+        if (word.as_str().eq_ignore_ascii_case("healthy")
+            || word.as_str().eq_ignore_ascii_case("unhealthy"))
+            && index
+                .checked_sub(1)
+                .and_then(|i| words.get(i))
+                .is_some_and(|previous| {
+                    is_negation(previous.as_str())
+                        && !text[previous.end()..word.start()].is_empty()
+                        && text[previous.end()..word.start()]
+                            .chars()
+                            .all(|c| matches!(c, ' ' | '\t'))
+                })
+        {
             continue;
         }
         if word.as_str().eq_ignore_ascii_case("starting") && index > 0 {
@@ -128,17 +134,11 @@ pub(super) fn spans(text: &str, theme: &Theme) -> Vec<Span> {
             "WARN" => theme.warn,
             "ERROR" => theme.error,
             "FATAL" => theme.fatal,
-            value
-                if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("healthy") =>
-            {
-                theme.info
+            value if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") => {
+                theme.debug
             }
-            value
-                if value.eq_ignore_ascii_case("false")
-                    || value.eq_ignore_ascii_case("unhealthy") =>
-            {
-                theme.error
-            }
+            value if value.eq_ignore_ascii_case("healthy") => theme.info,
+            value if value.eq_ignore_ascii_case("unhealthy") => theme.error,
             _ => continue,
         };
         paint(&mut colors, word.range(), color);
@@ -152,9 +152,11 @@ pub(super) fn spans(text: &str, theme: &Theme) -> Vec<Span> {
         let value = found.as_str();
         let prefixed = value.starts_with("0x") || value.starts_with("0X");
         if token_boundary(text, &found.range(), ":/\\@-", ":/\\@-")
-            && (prefixed || value.len() == 8 || value.bytes().any(|byte| byte.is_ascii_digit()))
+            && (prefixed
+                || (value.bytes().any(|byte| byte.is_ascii_alphabetic())
+                    && (value.len() == 8 || value.bytes().any(|byte| byte.is_ascii_digit()))))
         {
-            paint(&mut colors, found.range(), theme.warn);
+            paint(&mut colors, found.range(), theme.debug);
         }
     }
 
@@ -166,12 +168,16 @@ pub(super) fn spans(text: &str, theme: &Theme) -> Vec<Span> {
             continue;
         };
         let mut end = start + 1;
-        while end < colors.len() && colors[end] == Some(color) {
+        while end < colors.len()
+            && colors[end] == Some(color)
+            && underlines[end] == underlines[start]
+        {
             end += 1;
         }
         spans.push(Span {
             range: start..end,
             color,
+            underline: underlines[start],
         });
         start = end;
     }
@@ -369,7 +375,7 @@ mod tests {
                 ("/tmp/ERROR", theme.path),
                 ("user@example.com", theme.url),
                 ("--output", theme.debug),
-                ("false", theme.error),
+                ("false", theme.debug),
             ]
         );
     }
@@ -385,19 +391,18 @@ mod tests {
     }
 
     #[test]
-    fn negation_networks_hex_and_options_use_semantic_colors() {
+    fn syntax_and_networks_are_colored_without_interpreting_negated_prose() {
         let theme = Theme::default();
         assert_eq!(
             tokens(
                 "not found TRUE false 0xFACE DEAD1234 DEADBEEF -v fe80::1%eth0 2001:db8::1 00:11:22:aa:bb:cc"
             ),
             vec![
-                ("not found", theme.error),
-                ("TRUE", theme.info),
-                ("false", theme.error),
-                ("0xFACE", theme.warn),
-                ("DEAD1234", theme.warn),
-                ("DEADBEEF", theme.warn),
+                ("TRUE", theme.debug),
+                ("false", theme.debug),
+                ("0xFACE", theme.debug),
+                ("DEAD1234", theme.debug),
+                ("DEADBEEF", theme.debug),
                 ("-v", theme.debug),
                 ("fe80::1%eth0", theme.address),
                 ("2001:db8::1", theme.address),
@@ -475,7 +480,6 @@ mod tests {
         assert_eq!(
             tokens("not healthy /tmp/healthy https://example.com/unhealthy healthy@example.com"),
             vec![
-                ("not healthy", theme.error),
                 ("/tmp/healthy", theme.path),
                 ("https://example.com/unhealthy", theme.url),
                 ("healthy@example.com", theme.url),

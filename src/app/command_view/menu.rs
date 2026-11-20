@@ -82,13 +82,7 @@ impl CommandHistoryView {
             Action::Insert if !terminal.can_insert_history_command(menu.run) => {
                 Some(i18n_key::TERMINAL_INSERT_REQUIRES_A_SINGLE_LINE_COMMAND_AND_AN_IDLE_SHELL)
             }
-            Action::CopyOutput if command.output.is_none() => {
-                Some(if command.output_cache_disabled {
-                    i18n_key::TERMINAL_COMMAND_OUTPUT_CACHE_WAS_DISABLED
-                } else {
-                    i18n_key::TERMINAL_COMMAND_OUTPUT_IS_NO_LONGER_RETAINED_OR_EXCEEDS_64_KIB
-                })
-            }
+            Action::CopyOutput => super::command_output(command).err(),
             _ => None,
         }
     }
@@ -114,11 +108,14 @@ impl CommandHistoryView {
         };
         match action {
             Action::CopyCommand => {
-                cx.write_to_clipboard(ClipboardItem::new_string(command.command.clone()));
+                crate::app::clipboard::write(
+                    cx,
+                    ClipboardItem::new_string(command.command.clone()),
+                );
             }
             Action::CopyOutput => {
-                if let Some(output) = &command.output {
-                    cx.write_to_clipboard(ClipboardItem::new_string(output.to_string()));
+                if let Ok(output) = super::command_output(command) {
+                    crate::app::clipboard::write(cx, ClipboardItem::new_string(output.to_string()));
                 }
             }
             Action::Reveal | Action::Insert => {}

@@ -8,7 +8,9 @@ impl DatabaseView {
         &self,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let table = self.table_workspace().unwrap();
+        let Some(table) = self.table_workspace() else {
+            return div().into_any_element();
+        };
         let enabled = self.available();
         let editable = self.table_editable() && !table.editing();
         let toolbar = div()
@@ -258,7 +260,9 @@ impl DatabaseView {
     }
 
     fn render_table_filter(&self, cx: &Context<Self>) -> AnyElement {
-        let table = self.table_workspace().unwrap();
+        let Some(table) = self.table_workspace() else {
+            return div().into_any_element();
+        };
         let enabled = self.available() && table.schema.is_some() && !table.has_local_edit();
         let column = table
             .schema
@@ -290,9 +294,10 @@ impl DatabaseView {
                     .child(div().min_w_0().truncate().child(column))
                     .child(ui::icon(Icon::ChevronDown))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if enabled {
-                            let table =
-                                this.documents[this.active_document].table.as_mut().unwrap();
+                        if enabled && this.available() {
+                            let Some(table) = this.table_workspace_mut() else {
+                                return;
+                            };
                             table.picker = if table.picker == Some(Picker::Column) {
                                 None
                             } else {
@@ -318,9 +323,10 @@ impl DatabaseView {
                     .child(tr(table.filter_operator.label()))
                     .child(ui::icon(Icon::ChevronDown))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if enabled {
-                            let table =
-                                this.documents[this.active_document].table.as_mut().unwrap();
+                        if enabled && this.available() {
+                            let Some(table) = this.table_workspace_mut() else {
+                                return;
+                            };
                             table.picker = if table.picker == Some(Picker::Operator) {
                                 None
                             } else {
@@ -411,8 +417,12 @@ impl DatabaseView {
                         .hover(|style| style.bg(rgb(ui::colors().hover)))
                         .child(label)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            let table =
-                                this.documents[this.active_document].table.as_mut().unwrap();
+                            if !this.available() {
+                                return;
+                            }
+                            let Some(table) = this.table_workspace_mut() else {
+                                return;
+                            };
                             match picker {
                                 Picker::Column => table.filter_column = index,
                                 Picker::Operator => {
@@ -429,7 +439,9 @@ impl DatabaseView {
     }
 
     fn render_table_pagination(&self, cx: &Context<Self>) -> AnyElement {
-        let table = self.table_workspace().unwrap();
+        let Some(table) = self.table_workspace() else {
+            return div().into_any_element();
+        };
         let enabled = self.available() && !table.has_local_edit();
         let offset = table.page.as_ref().map_or(0, |page| page.offset);
         let count = table.page.as_ref().map_or(0, |page| page.result.rows.len());
@@ -550,9 +562,19 @@ impl DatabaseView {
     }
 
     fn render_cell_editor(&self, cx: &Context<Self>) -> AnyElement {
-        let table = self.table_workspace().unwrap();
-        let edit = table.edit.as_ref().unwrap();
-        let column = &table.schema.as_ref().unwrap().columns[edit.column];
+        let Some(table) = self.table_workspace() else {
+            return div().into_any_element();
+        };
+        let Some(edit) = &table.edit else {
+            return div().into_any_element();
+        };
+        let Some(column) = table
+            .schema
+            .as_ref()
+            .and_then(|schema| schema.columns.get(edit.column))
+        else {
+            return div().into_any_element();
+        };
         div()
             .flex_1()
             .min_h_0()
@@ -677,8 +699,12 @@ impl DatabaseView {
     }
 
     fn render_change_review(&self, cx: &Context<Self>) -> AnyElement {
-        let table = self.table_workspace().unwrap();
-        let schema = table.schema.as_ref().unwrap();
+        let Some(table) = self.table_workspace() else {
+            return div().into_any_element();
+        };
+        let Some(schema) = &table.schema else {
+            return div().into_any_element();
+        };
         let mut rows = Vec::new();
         for (row, change) in &table.changes {
             let label = match change {
@@ -700,7 +726,7 @@ impl DatabaseView {
                     for (column, value) in values {
                         let before = match change {
                             RowChange::Update { original, .. } => super::super::render::preview(
-                                original[*column].display().as_deref(),
+                                schema.display_cell(&original[*column]).as_deref(),
                                 200,
                             ),
                             _ => "DEFAULT".into(),
@@ -715,7 +741,10 @@ impl DatabaseView {
                                     "{}: {} → {}",
                                     schema.columns[*column].name,
                                     before,
-                                    super::super::render::preview(value.display().as_deref(), 200)
+                                    super::super::render::preview(
+                                        schema.display_cell(value).as_deref(),
+                                        200
+                                    )
                                 )),
                         );
                     }
@@ -726,7 +755,7 @@ impl DatabaseView {
                             "{} = {}",
                             schema.columns[column].name,
                             super::super::render::preview(
-                                original[column].display().as_deref(),
+                                schema.display_cell(&original[column]).as_deref(),
                                 200
                             )
                         )));
@@ -783,11 +812,10 @@ impl DatabaseView {
                             ButtonStyle::Neutral,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.documents[this.active_document]
-                                .table
-                                .as_mut()
-                                .unwrap()
-                                .review = false;
+                            let Some(table) = this.table_workspace_mut() else {
+                                return;
+                            };
+                            table.review = false;
                             cx.notify();
                         })),
                     )
@@ -848,7 +876,10 @@ impl DatabaseView {
                             if this.interactive()
                                 && let Some(sql) = &sql
                             {
-                                cx.write_to_clipboard(ClipboardItem::new_string(sql.clone()));
+                                crate::app::clipboard::write(
+                                    cx,
+                                    ClipboardItem::new_string(sql.clone()),
+                                );
                             }
                         })),
                     ),

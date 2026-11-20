@@ -15,6 +15,14 @@ impl FileTransferView {
     }
 
     pub(super) fn navigate(&mut self, requested: String, cx: &mut Context<Self>) {
+        self.navigate_requested(requested, false, cx);
+    }
+
+    pub fn reveal_path(&mut self, requested: String, cx: &mut Context<Self>) {
+        self.navigate_requested(requested, true, cx);
+    }
+
+    fn navigate_requested(&mut self, requested: String, reveal: bool, cx: &mut Context<Self>) {
         if self.closed
             || !self.client.is_connected()
             || self.mutating
@@ -37,7 +45,7 @@ impl FileTransferView {
         self.path_dirty = false;
         self.path_input
             .update(cx, |input, cx| input.set_value(&requested, cx));
-        self.load_directory(requested, cx);
+        self.load_directory(requested, reveal, cx);
     }
 
     pub(super) fn refresh_directory(&mut self, cx: &mut Context<Self>) {
@@ -51,10 +59,10 @@ impl FileTransferView {
         {
             return;
         }
-        self.load_directory(self.directory.clone(), cx);
+        self.load_directory(self.directory.clone(), false, cx);
     }
 
-    fn load_directory(&mut self, requested: String, cx: &mut Context<Self>) {
+    fn load_directory(&mut self, requested: String, reveal: bool, cx: &mut Context<Self>) {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         self.loading = true;
@@ -63,9 +71,24 @@ impl FileTransferView {
         let client = self.client.clone();
         let path = resolve_path(&self.directory, &requested);
         let task = cx.background_executor().spawn(async move {
-            let directory = client.canonicalize(&path).await?;
+            let resolved = client.canonicalize(&path).await?;
+            let (directory, selected) = if reveal && !client.is_dir(&resolved).await? {
+                let (parent, name) = resolved
+                    .rsplit_once('/')
+                    .ok_or_else(|| rustterm::session::SftpError::InvalidPath(resolved.clone()))?;
+                (
+                    if parent.is_empty() {
+                        "/".into()
+                    } else {
+                        parent.to_owned()
+                    },
+                    Some(name.to_owned()),
+                )
+            } else {
+                (resolved, None)
+            };
             let entries = client.list_dir(&directory).await?;
-            Ok::<_, rustterm::session::SftpError>((directory, entries))
+            Ok::<_, rustterm::session::SftpError>((directory, entries, selected))
         });
         self.listing_task = Some(cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -75,7 +98,7 @@ impl FileTransferView {
                 }
                 this.loading = false;
                 match result {
-                    Ok((directory, entries)) => {
+                    Ok((directory, entries, selected)) => {
                         if this.path_input.read(cx).value() == requested
                             && !this.path_input.read(cx).is_composing()
                         {
@@ -83,6 +106,16 @@ impl FileTransferView {
                                 .update(cx, |input, cx| input.set_value(&directory, cx));
                         }
                         this.replace_listing(directory, entries);
+                        if let Some(name) = selected
+                            && let Some(index) =
+                                this.entries.iter().position(|entry| entry.name == name)
+                        {
+                            this.selected = BTreeSet::from([index]);
+                            this.cursor = Some(index);
+                            this.anchor = Some(index);
+                            this.scroll
+                                .scroll_to_item_strict(index, ScrollStrategy::Center);
+                        }
                         this.directory_ready = this.client.is_connected();
                     }
                     Err(error) => {
@@ -100,7 +133,8 @@ impl FileTransferView {
                         ));
                     }
                 }
-                this.path_dirty = this.path_input.read(cx).value() != this.directory;
+                let input = this.path_input.read(cx).value();
+                this.path_dirty = input != this.directory && input != requested;
                 this.refresh_completed_uploads(cx);
                 cx.notify();
             });

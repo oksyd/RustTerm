@@ -304,7 +304,7 @@ impl ElasticsearchView {
     }
     pub fn copy_json(&self, cx: &mut Context<Self>) {
         if !self.window_state.is_locked() && !self.json.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(self.json.as_ref().clone()));
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(self.json.as_ref().clone()));
         }
     }
     pub fn focus_query(&self, window: &mut Window, cx: &App) {

@@ -60,6 +60,17 @@ pub struct AuthenticationChallenge {
     pub cancelled: CancellationToken,
 }
 
+// Keep network credit separate from queued application output. The library's
+// receive-window default supports high-bandwidth links; queued SSH messages
+// remain bounded to one MiB of maximum-size data packets per channel.
+pub(super) fn receive_config() -> client::Config {
+    client::Config {
+        channel_buffer_size: 32,
+        maximum_packet_size: 32 * 1024,
+        ..Default::default()
+    }
+}
+
 pub(super) type SshResult<T> = std::result::Result<T, (FailureKind, String)>;
 #[derive(Clone)]
 pub(in crate::session) enum Ui {
@@ -364,6 +375,7 @@ pub(super) async fn connect_authenticated(
             keepalive_secs: options.keepalive_secs,
             keepalive_max: options.keepalive_max,
             shell_integration: false,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
             auto_forward: Default::default(),
@@ -454,14 +466,11 @@ async fn connect_one(
         Box::new(stream)
     };
     let config = Arc::new(client::Config {
-        channel_buffer_size: 32,
-        window_size: 256 * 1024,
-        maximum_packet_size: 32 * 1024,
         keepalive_interval: (options.keepalive_secs > 0)
             .then(|| Duration::from_secs(options.keepalive_secs)),
         keepalive_max: options.keepalive_max.max(1),
         nodelay: true,
-        ..Default::default()
+        ..receive_config()
     });
     let verification = Arc::new(Verification {
         ui,
@@ -1089,6 +1098,7 @@ mod tests {
             keepalive_secs: 30,
             keepalive_max: 3,
             shell_integration: false,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
             auto_forward: Default::default(),
@@ -1372,6 +1382,7 @@ mod tests {
             let mut verifier = terminal_verifier(&shared);
             let (commands, _receive) = mpsc::channel(1);
             let session = Session {
+                protection: Default::default(),
                 commands,
                 shared: shared.clone(),
             };

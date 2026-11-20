@@ -286,7 +286,7 @@ impl ApplicationWindow {
         );
     }
 
-    pub fn refresh_images(&mut self, window: &mut Window) {
+    pub fn refresh_images(&mut self, window: &mut Window) -> Result<(), rustterm::rdp::RdpError> {
         let mut retired = Vec::new();
         if self.images.len() > self.surface.tiles.len() {
             retired.extend(
@@ -304,9 +304,15 @@ impl ApplicationWindow {
             {
                 continue;
             }
-            let image = Arc::new(RenderImage::new(vec![image::Frame::new(
-                super::super::render::tile_buffer(tile),
-            )]));
+            let buffer = match super::super::render::tile_buffer(tile) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    self.clear_images(window);
+                    super::super::render::retire_images(window, retired);
+                    return Err(error);
+                }
+            };
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
             if let Some(previous) = self.images.get_mut(index) {
                 retired.push(std::mem::replace(previous, (source, image)).1);
             } else {
@@ -314,6 +320,7 @@ impl ApplicationWindow {
             }
         }
         super::super::render::retire_images(window, retired);
+        Ok(())
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {

@@ -206,13 +206,10 @@ fn synthesize(low: &[i32], high: &[i32], reduced: bool, output: &mut [i32]) {
     let even_count = output.len().div_ceil(2);
     for index in 0..even_count {
         let left = high[index.saturating_sub(1)];
-        let right = high.get(index).copied().unwrap_or_else(|| {
-            if low.len() > high.len() + 1 {
-                0
-            } else {
-                *high.last().unwrap()
-            }
-        });
+        let right = high
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| if low.len() > high.len() + 1 { 0 } else { left });
         output[index * 2] =
             narrow(i64::from(low[index]) - half(i64::from(left) + i64::from(right)));
     }

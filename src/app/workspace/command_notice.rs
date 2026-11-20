@@ -120,7 +120,7 @@ impl Workspace {
                             return;
                         };
                         if !this.lock_screen.locked {
-                            this.left_tool = None;
+                            this.dock_tool = None;
                             this.tools.clear();
                             this.focus_pane(notice.pane, window, cx);
                             if let Some(Pane::Terminal(terminal)) = this.panes.get(&notice.pane) {

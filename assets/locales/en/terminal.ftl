@@ -44,8 +44,6 @@ terminal-closing = Closing
 
 terminal-columns-rows-utf-8-line-numbers-line-numbers-timestamps-timestamps-highlight-highlight = { $columns } × { $rows }  ·  UTF-8  ·  Line numbers: { $line_numbers }  ·  Time: { $timestamps }  ·  Highlight: { $highlight }
 
-terminal-command-finished-in-seconds-s-exit-code = Command finished in { $seconds }s · Exit { $code }
-
 terminal-command-finished-name-seconds-s-exit-status = Command finished · { $name } · { $seconds }s · Exit { $status }
 
 terminal-command-output-is-no-longer-retained-or-exceeds-64-kib = Command output is no longer retained or exceeds 64 KiB.
@@ -71,6 +69,8 @@ terminal-continue-transfers = Continue transfers
 terminal-control-characters-were-removed = Control characters were removed.
 
 terminal-copy-failed-error = Copy failed: { $error }
+terminal-copy-interrupted = Copy failed: reading the selection was interrupted. Please try again.
+terminal-copy-selection-unavailable = Copy failed: the selected text is no longer available. Please select it again.
 
 terminal-copy-last-command-output = Copy last command output
 
@@ -140,7 +140,6 @@ terminal-final-alternate-screen-snapshot-read-only = Final alternate screen snap
 
 terminal-final-screen = Final screen
 
-terminal-find-output-ctrl-shift-f = Find output · Ctrl+Shift+F
 
 terminal-first-connection-verify-the-host-key = First connection: verify the host key
 
@@ -378,14 +377,12 @@ terminal-zmodem-select-a-download-folder = ZMODEM: select a download folder
 
 terminal-zmodem-select-files-to-upload = ZMODEM: select files to upload
 
-terminal-status-editing = { " " }· Editing command
-terminal-status-awaiting-input = { " " }· Awaiting input
 terminal-reconnect-in-this-tab = Reconnect (Ctrl+Shift+R) in this tab; previous output remains available in earlier connections.
 terminal-reconnect-ended-session = Reconnect the disconnected terminal session
 terminal-status-executing = { " " }· Running command
 terminal-status-history-search = { " " }· Searching history
-terminal-interaction-history-supported = Shows prompt readiness, command execution and incremental history search in Bash and Zsh. See Help for common shell shortcuts.
-terminal-interaction-history-unavailable = This shell integration reports prompt readiness and command execution, but cannot distinguish command editing from history search. Awaiting input covers both. See Help for common shell shortcuts.
+terminal-interaction-history-supported = The status bar can show incremental history search in this shell.
+terminal-interaction-history-unavailable = This shell does not report incremental history search.
 terminal-shell-shortcuts = Shell shortcuts
 terminal-shell-search-history = Search command history backward
 terminal-shell-kill-to-start = Cut to line start / cut whole line (shell-dependent)
@@ -393,4 +390,33 @@ terminal-shell-kill-to-end = Cut from cursor to line end
 terminal-shell-yank = Paste previously cut text
 terminal-shell-line-start-end = Move to line start / end
 terminal-shell-shortcuts-note = Common Emacs editing bindings; your shell, editing mode or plugins may change them. RustTerm passes these keys through without notifications.
-terminal-shell-status-support = The status bar follows the active terminal. Bash and Fish show Awaiting input or Running command. Zsh can also distinguish command editing from built-in incremental history search when its hooks are available. Fullscreen programs use the alternate-screen status.
+terminal-shell-status-support = The status bar shows when a command is running or the shell reports an incremental history search. Fullscreen programs that use the alternate screen show the alternate-screen status.
+terminal-collapse-command-output = Collapse command output ({ $count } lines)
+terminal-expand-command-output = Expand command output ({ $count } lines)
+terminal-select-command-block = Select command and output
+terminal-select-command-block-hint = Double-click to select the command and its output
+
+terminal-return-to-command = Return to command
+
+terminal-search-command = Current command
+
+terminal-search-session = Entire session
+
+terminal-search-command-expired = Command no longer retained
+terminal-search-match-unavailable = Previous match changed or is no longer retained
+
+terminal-new-output = New output · Jump to latest
+
+terminal-search-scope-help = Limit search to the selected command or the command being viewed. Requires retained shell integration command boundaries.
+
+terminal-block-running = Running
+terminal-block-result = Exit { $status } · { $duration } s
+terminal-remove-trailing-newlines = Remove trailing newlines
+terminal-open-link-hint = Ctrl+click to open { $target }
+
+terminal-production-paste-review = Review and confirm this multi-line paste before sending it to the production session.
+
+terminal-invalid-shell-action = Unsupported shell or invalid shell action.
+
+terminal-select-enclosed = Select inside brackets or quotes
+terminal-select-enclosed-shortcut = Alt + double-click

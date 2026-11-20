@@ -51,7 +51,7 @@ jobs:
         run: |
           RUST_VERSION="$(python -c "from tools.release.artifacts import package_info; print(package_info()['rust-version'])")"
           echo "rust=$RUST_VERSION" >> "$GITHUB_OUTPUT"
-          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --target "$BUILD_TARGET"
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy --target "$BUILD_TARGET"
           rustup override set "$RUST_VERSION"
       # Keep registry sources with target so their modification times survive
       # restoration. Cache the compiled Rust and native-code dependencies too.
@@ -84,6 +84,11 @@ jobs:
         env:
           RUSTTERM_TEST_ZSH: zsh
         run: cargo test --locked --test pty shell_interaction
+      - name: Check production Rust safety
+        if: runner.os == 'Linux'
+        run: |
+          cargo clippy --locked --lib --bins -p rustterm -p rustrdp
+          cargo clippy --manifest-path crates/rustrdp/Cargo.toml --target-dir target --lib --all-features
       - name: Test and package Ubuntu
         if: runner.os == 'Linux'
         run: |
@@ -94,6 +99,7 @@ jobs:
           cargo test --locked --bin rustterm app::rdp_view::
           cargo test --locked --lib update::
           cargo test --locked --lib config::
+          cargo test --locked --lib i18n::
           cargo test --locked --test startup
           cargo test --locked --lib terminal::
           cargo test --locked --lib session::actor::
@@ -105,6 +111,7 @@ jobs:
           cargo test --locked --test ssh
           cargo test --locked --test ssh_tunnel
           cargo test --locked --lib database::
+          cargo test --locked --bin rustterm app::database_view::
           cargo test --locked --test database
           cargo test --locked --lib docker::
           cargo test --locked --test docker
@@ -127,6 +134,8 @@ jobs:
           choco install nasm --no-progress --yes
           if ($LASTEXITCODE -ne 0) { throw 'NASM installation failed' }
           $env:PATH = "${env:ProgramFiles}\NASM;$env:PATH"
+          cargo clippy --locked --lib --bins -p rustterm -p rustrdp
+          if ($LASTEXITCODE -ne 0) { throw 'Rust safety checks failed' }
           cargo test --locked -p rustrdp
           if ($LASTEXITCODE -ne 0) { throw 'RDP protocol tests failed' }
           cargo test --locked --bin rustterm app::rdp_view::file_clipboard::
@@ -137,8 +146,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Update tests failed' }
           cargo test --locked --lib config::credential_process::tests
           if ($LASTEXITCODE -ne 0) { throw 'Credential worker tests failed' }
+          cargo test --locked --lib i18n::
+          if ($LASTEXITCODE -ne 0) { throw 'Localization tests failed' }
           cargo test --locked --lib database::
           if ($LASTEXITCODE -ne 0) { throw 'Database tests failed' }
+          cargo test --locked --bin rustterm app::database_view::
+          if ($LASTEXITCODE -ne 0) { throw 'Database UI tests failed' }
           cargo test --locked --test ssh_tunnel
           if ($LASTEXITCODE -ne 0) { throw 'SSH tunnel tests failed' }
           cargo test --locked --test database

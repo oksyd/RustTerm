@@ -20,8 +20,8 @@ impl ResizeScheduler {
             not_before: None,
         }
     }
-    pub fn request(&mut self, size: GridSize) {
-        self.desired = size;
+    pub fn request(&mut self, size: GridSize) -> bool {
+        std::mem::replace(&mut self.desired, size) != size
     }
     pub fn next(&self, now: Instant) -> Option<GridSize> {
         (self.desired != self.sent
@@ -48,6 +48,17 @@ impl ResizeScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_layout_during_a_stalled_resize_does_not_wake_the_view_again() {
+        let mut resize = ResizeScheduler::new((80, 24));
+        assert!(resize.request((100, 30)));
+        resize.sent((100, 30), Instant::now());
+        assert!(resize.is_pending());
+        assert!(!resize.request((100, 30)));
+        assert!(resize.request((120, 40)));
+        assert!(!resize.request((120, 40)));
+    }
 
     #[test]
     fn pending_resize_covers_cooldown_and_in_flight_receipts() {

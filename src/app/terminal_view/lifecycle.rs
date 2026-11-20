@@ -17,6 +17,18 @@ use std::time::{Duration, Instant};
 
 type SessionChanges = Option<(rustterm::config::Uuid, tokio::sync::watch::Receiver<u64>)>;
 
+fn apply_view_settings(session: &Session, settings: &Settings) {
+    let _ = session.send(Command::SetHighlight(settings.highlight));
+    let _ = session.send(Command::SetSelectionHighlight(
+        settings.highlight_selection_matches,
+    ));
+    let _ = session.send(Command::SetWordDelimiters(settings.word_delimiters.clone()));
+    let _ = session.send(Command::SetCommandOutputCache(
+        settings.cache_command_output,
+    ));
+    let _ = session.send(Command::SetTheme(settings.theme.clone()));
+}
+
 fn visible_shell_interaction(
     state: Option<SessionState>,
     blocked: bool,
@@ -35,6 +47,14 @@ fn visible_shell_interaction(
         })
 }
 
+fn shell_status_key(interaction: ShellInteraction) -> Option<&'static str> {
+    match interaction {
+        ShellInteraction::Executing => Some(i18n_key::TERMINAL_STATUS_EXECUTING),
+        ShellInteraction::HistorySearch => Some(i18n_key::TERMINAL_STATUS_HISTORY_SEARCH),
+        ShellInteraction::Prompt | ShellInteraction::Editing | ShellInteraction::Unknown => None,
+    }
+}
+
 fn observe_session(changes: &mut SessionChanges, session: Option<&Session>) {
     if changes.as_ref().map(|(id, _)| *id) != session.map(Session::id) {
         *changes = session.map(|session| (session.id(), session.subscribe_changes()));
@@ -51,22 +71,6 @@ async fn session_changed(changes: &mut SessionChanges) {
     } else {
         std::future::pending::<()>().await;
     }
-}
-
-fn poll_intervals(visible: bool, focused: bool, continuous: bool) -> (Duration, Duration) {
-    let frame = Duration::from_millis(if !visible {
-        250
-    } else if focused {
-        16
-    } else {
-        34
-    });
-    let maintenance = if visible && continuous {
-        frame
-    } else {
-        Duration::from_millis(250)
-    };
-    (frame, maintenance)
 }
 
 impl TerminalView {
@@ -94,14 +98,7 @@ impl TerminalView {
         let font = terminal_font(&settings.font_family);
         let font_size = settings.font_size;
         if let Some(session) = &session {
-            let _ = session.send(Command::SetHighlight(settings.highlight));
-            let _ = session.send(Command::SetSelectionHighlight(
-                settings.highlight_selection_matches,
-            ));
-            let _ = session.send(Command::SetCommandOutputCache(
-                settings.cache_command_output,
-            ));
-            let _ = session.send(Command::SetTheme(settings.theme.clone()));
+            apply_view_settings(session, settings);
             let _ = session.send(Command::SetHistoryBudget {
                 lines: settings.history_lines,
                 bytes: settings.history_bytes,
@@ -118,10 +115,12 @@ impl TerminalView {
         let search_subscription = cx.subscribe(&search_input, |this, _input, event, cx| {
             match event {
                 InputEvent::Changed if this.search_open => {
+                    this.search_seed_task.take();
                     let query = this.search_input.read(cx).value().to_owned();
                     this.send(
-                        Command::Search {
+                        Command::SearchScoped {
                             query,
+                            scope: this.search_scope,
                             case_sensitive: this.search_case,
                         },
                         cx,
@@ -171,8 +170,10 @@ impl TerminalView {
         let poll = cx.spawn_in(window, async move |this, cx| {
             let mut viewed_changes = None;
             let mut live_changes = None;
+            let frame_pending = std::rc::Rc::new(std::cell::Cell::new(false));
+            let frame_ready = std::sync::Arc::new(tokio::sync::Notify::new());
             loop {
-                let Ok(Ok((frame, maintenance))) = cx.update(|window, cx| {
+                let Ok(Ok((visible, await_frame))) = cx.update(|window, cx| {
                     this.update(cx, |this, cx| {
                         this.prune_evicted(window, cx);
                         let viewed = this.runs.get(this.viewed_run);
@@ -183,28 +184,37 @@ impl TerminalView {
                                 viewed.is_none_or(|viewed| viewed.id() != live.id())
                             }),
                         );
+                        let revision = this.observed_view_revision;
                         this.poll(window, cx);
-                        poll_intervals(
-                            this.surface_visible,
-                            this.focus.is_focused(window),
-                            this.selection_scroll_direction() != 0
+                        let await_frame = this.surface_visible
+                            && (revision != this.observed_view_revision
+                                || this.selection_scroll_distance() != 0.
                                 || (!this.show_final_alternate
                                     && this.runs.get(this.viewed_run).is_some()
-                                    && this.resize.is_pending()),
-                        )
+                                    && this.resize.is_pending()));
+                        if await_frame && !frame_pending.replace(true) {
+                            let pending = frame_pending.clone();
+                            let ready = frame_ready.clone();
+                            window.on_next_frame(move |_, _| {
+                                pending.set(false);
+                                ready.notify_one();
+                            });
+                        }
+                        (this.surface_visible, await_frame)
                     })
                 }) else {
                     break;
                 };
-                let next_frame = Instant::now() + frame;
+                // First output after idle is handled immediately. Subsequent bursts
+                // coalesce at the window's actual frame cadence, including high Hz.
+                // Keep one callback if an occluded window stops delivering frames.
                 tokio::select! {
-                    _ = session_changed(&mut viewed_changes) => {},
-                    _ = session_changed(&mut live_changes) => {},
+                    _ = session_changed(&mut viewed_changes), if visible && !await_frame => {},
+                    _ = session_changed(&mut live_changes), if visible && !await_frame => {},
+                    _ = frame_ready.notified(), if await_frame => {},
                     _ = wake.notified() => {},
-                    _ = Timer::after(maintenance) => continue,
+                    _ = Timer::after(Duration::from_millis(250)) => {},
                 }
-                // Coalesce a burst without polling the UI on every output batch.
-                Timer::after(next_frame.saturating_duration_since(Instant::now())).await;
             }
         });
         let output_activity = super::activity::OutputActivity::new(
@@ -216,6 +226,7 @@ impl TerminalView {
         let mut view = Self {
             runs: session.into_iter().collect(),
             viewed_run: 0,
+            awaiting_reconnect: false,
             generation: 0,
             settings: settings.clone(),
             unread: false,
@@ -223,6 +234,7 @@ impl TerminalView {
             observed_view_revision: 0,
             observed_insert_ready: false,
             observed_directory: None,
+            sftp_follow_override: None,
             trust_prompt: false,
             zmodem_prompt: None,
             zmodem: None,
@@ -230,21 +242,30 @@ impl TerminalView {
             selection_drag: None,
             selection_pointer: None,
             search_input,
+            search_seed_task: None,
             search_open: false,
             search_case: false,
+            search_scope: Default::default(),
             show_final_alternate: false,
             _search_subscription: search_subscription,
             snapshot,
             snapshot_task: None,
+            row_cache: Default::default(),
+            gutter_cache: Default::default(),
             command_task: None,
             focus,
             menu_focus,
             menu_open: false,
             context_menu_position: None,
-            menu_index: 0,
+            context_block: None,
+            selected_pane_action: super::chrome::PaneMenuAction::Split(
+                crate::app::layout::Axis::Horizontal,
+            ),
+            context_menu_index: 0,
             menu_scroll: ScrollHandle::default(),
             _menu_blur: menu_blur,
             index,
+            configured_production: false,
             display_name: shell.clone(),
             shell,
             target: None,
@@ -274,12 +295,15 @@ impl TerminalView {
             surface_visible: true,
             preedit: String::new(),
             preedit_selection: 0..0,
-            paste_pending: false,
+            hovered_link: None,
+            link_press: None,
+            paste_preview: None,
             copy_task: None,
             primary_copy_task: None,
             mouse_button: None,
             last_mouse: (0, 0),
             wheel: Default::default(),
+            frame_motion: Default::default(),
             poll_wake,
             _poll: poll,
             _focus: on_focus,
@@ -299,11 +323,18 @@ impl TerminalView {
         self.runs.last().is_some_and(|s| s.state().is_running())
     }
 
+    fn status_session(&self) -> Option<&Session> {
+        if self.awaiting_reconnect {
+            self.runs.last()
+        } else {
+            self.runs.get(self.viewed_run)
+        }
+    }
+
     /// Short, stable status for the workspace's shared status bar.
     pub fn status_text(&self) -> String {
         let mut label = self
-            .runs
-            .get(self.viewed_run)
+            .status_session()
             .map(|run| state_label(run.state()))
             .unwrap_or_else(|| tr(&self.state).to_owned());
         if self.error.is_some() {
@@ -325,17 +356,8 @@ impl TerminalView {
             && self.snapshot.as_ref().is_some_and(|s| s.alternate_screen)
         {
             label.push_str(tr(i18n_key::TERMINAL_STATUS_ALTERNATE_SCREEN));
-        } else {
-            let key = match self.shell_interaction() {
-                ShellInteraction::Prompt => Some(i18n_key::TERMINAL_STATUS_AWAITING_INPUT),
-                ShellInteraction::Editing => Some(i18n_key::TERMINAL_STATUS_EDITING),
-                ShellInteraction::Executing => Some(i18n_key::TERMINAL_STATUS_EXECUTING),
-                ShellInteraction::HistorySearch => Some(i18n_key::TERMINAL_STATUS_HISTORY_SEARCH),
-                ShellInteraction::Unknown => None,
-            };
-            if let Some(key) = key {
-                label.push_str(tr(key));
-            }
+        } else if let Some(key) = shell_status_key(self.shell_interaction()) {
+            label.push_str(tr(key));
         }
         if let Some(snapshot) = &self.snapshot {
             if snapshot.viewport_evicted {
@@ -364,8 +386,7 @@ impl TerminalView {
     pub fn status_color(&self) -> u32 {
         if self.error.is_some()
             || self
-                .runs
-                .get(self.viewed_run)
+                .status_session()
                 .is_some_and(|run| matches!(run.state(), SessionState::Failed { .. }))
         {
             ui::colors().danger
@@ -436,15 +457,12 @@ impl TerminalView {
             details.push('\n');
             details.push_str(tr(key));
         }
-        if let Some(command) = self.command_status() {
-            format!("{command}  ·  {details}")
-        } else {
-            details
-        }
+        details
     }
 
     pub fn may_auto_reconnect(&self) -> bool {
         if self.manually_disconnected
+            || self.protection_pending()
             || matches!(self.kind, TerminalKind::Local | TerminalKind::Container)
         {
             return false;
@@ -517,6 +535,7 @@ impl TerminalView {
             self.mouse_button = None;
             self.release_input();
             self.viewed_run = self.runs.len().saturating_sub(1);
+            self.paste_preview = None;
             self.generation += 1;
             self.trust_prompt = false;
             self.show_final_alternate = false;
@@ -554,7 +573,9 @@ impl TerminalView {
         self.poll_wake.notify_one();
         self.copy_task.take();
         self.primary_copy_task.take();
+        self.frame_motion.discard();
         self.reset_search(cx);
+        self.link_press = None;
         self.selection_drag = None;
         self.selection_pointer = None;
         if self.show_final_alternate {
@@ -593,8 +614,15 @@ impl TerminalView {
         if self.visible == visible {
             return;
         }
+        if !visible {
+            self.flush_motion(cx);
+        }
         self.release_input();
         if !visible {
+            self.search_seed_task.take();
+            self.row_cache.clear();
+            self.gutter_cache = Default::default();
+            self.paste_preview = None;
             self.report_focus(false);
         }
         self.visible = visible;
@@ -635,14 +663,7 @@ impl TerminalView {
         self.font_size = settings.font_size;
         self.initial_font_size = settings.font_size;
         for run in &self.runs {
-            let _ = run.send(Command::SetHighlight(settings.highlight));
-            let _ = run.send(Command::SetSelectionHighlight(
-                settings.highlight_selection_matches,
-            ));
-            let _ = run.send(Command::SetCommandOutputCache(
-                settings.cache_command_output,
-            ));
-            let _ = run.send(Command::SetTheme(settings.theme.clone()));
+            apply_view_settings(run, settings);
         }
         self.apply_history_budget();
         self.requested_revision = 0;
@@ -662,26 +683,25 @@ impl TerminalView {
         for run in &self.runs {
             run.set_visible(false);
         }
+        self.paste_preview = None;
         self.generation += 1;
         if self.runs.len() >= 8 {
             self.runs.remove(0).close();
+            self.viewed_run = self.viewed_run.saturating_sub(1);
         }
         session.set_visible(
             self.visible
                 && self.window_state.visibility.is_visible()
                 && !self.window_state.is_locked(),
         );
-        let _ = session.send(Command::SetHighlight(self.settings.highlight));
-        let _ = session.send(Command::SetSelectionHighlight(
-            self.settings.highlight_selection_matches,
-        ));
-        let _ = session.send(Command::SetCommandOutputCache(
-            self.settings.cache_command_output,
-        ));
-        let _ = session.send(Command::SetTheme(self.settings.theme.clone()));
+        apply_view_settings(&session, &self.settings);
         self.runs.push(session);
         self.observe_output(cx);
-        self.viewed_run = self.runs.len() - 1;
+        self.awaiting_reconnect = self.runs.len() > 1;
+        if !self.awaiting_reconnect {
+            self.viewed_run = 0;
+        }
+        self.runs[self.viewed_run].set_visible(self.visible && !self.window_state.is_locked());
         self.snapshot = Some(self.runs[self.viewed_run].snapshot());
         self.requested_revision = 0;
         self.observed_view_revision = 0;
@@ -698,11 +718,13 @@ impl TerminalView {
     }
 
     pub(super) fn choose_run(&mut self, run: usize, window: &Window, cx: &mut Context<Self>) {
+        self.awaiting_reconnect = false;
         self.poll_wake.notify_one();
         self.reset_search(cx);
         self.release_input();
         self.report_focus(false);
         self.show_final_alternate = false;
+        self.paste_preview = None;
         self.generation += 1;
         self.trust_prompt = false;
         self.viewed_run = run.min(self.runs.len().saturating_sub(1));
@@ -729,6 +751,10 @@ impl TerminalView {
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
+        self.frame_motion.discard();
+        self.search_seed_task.take();
+        self.paste_preview = None;
+        self.link_press = None;
         self.copy_task.take();
         self.primary_copy_task.take();
         self.selection_drag = None;
@@ -754,7 +780,20 @@ impl TerminalView {
     }
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.awaiting_reconnect
+            && self.runs.last().is_some_and(|run| {
+                matches!(
+                    run.state(),
+                    SessionState::Connected | SessionState::WaitingHostKey { .. }
+                )
+            })
+        {
+            self.choose_run(self.runs.len() - 1, window, cx);
+        }
         if self.window_state.is_locked() {
+            self.search_seed_task.take();
+            self.paste_preview = None;
+            self.link_press = None;
             self.copy_task.take();
             self.primary_copy_task.take();
             self.menu_open = false;
@@ -769,6 +808,11 @@ impl TerminalView {
             && !self.window_state.is_locked();
         if surface_visible != self.surface_visible {
             self.surface_visible = surface_visible;
+            if !surface_visible {
+                self.frame_motion.discard();
+                self.row_cache.clear();
+                self.gutter_cache = Default::default();
+            }
             for (index, run) in self.runs.iter().enumerate() {
                 run.set_visible(surface_visible && index == self.viewed_run);
             }
@@ -784,7 +828,10 @@ impl TerminalView {
         let Some(session) = self.runs.get(self.viewed_run) else {
             return;
         };
-        let session_state = session.state();
+        let session_state = self
+            .status_session()
+            .map(Session::state)
+            .unwrap_or_else(|| session.state());
         let previous_status = self.status_text();
         let state = state_label(session_state.clone());
         let state_changed = state != self.state;
@@ -797,13 +844,13 @@ impl TerminalView {
             !self.window_state.is_locked() && directory != self.observed_directory;
         if directory_changed {
             self.observed_directory = directory;
-            if self.viewed_run + 1 == self.runs.len()
-                && let Some((_, path)) = &self.observed_directory
-            {
-                if self.previous_directory.as_ref() == Some(path) {
+            if self.viewed_run + 1 == self.runs.len() {
+                if let Some((_, path)) = &self.observed_directory
+                    && self.previous_directory.as_ref() == Some(path)
+                {
                     self.previous_directory = None;
                 }
-                cx.emit(PaneEvent::DirectoryChanged(self.index, path.clone()));
+                cx.emit(PaneEvent::DirectoryChanged(self.index));
             }
         }
         let mut changed =
@@ -859,35 +906,44 @@ impl TerminalView {
             })
             .detach();
         }
-        let direction = self.selection_scroll_direction();
+        let distance = self.selection_scroll_distance();
+        let direction = self
+            .selection_drag
+            .as_mut()
+            .map_or(0, |drag| drag.scroll.step(distance, Instant::now()));
         if direction != 0
             && let Some(pointer) = self.selection_pointer
         {
-            if self.snapshot.as_ref().is_some_and(|snapshot| {
-                !snapshot.alternate_screen
-                    && if direction > 0 {
-                        snapshot.display_offset < snapshot.history_size
-                    } else {
-                        snapshot.display_offset > 0
-                    }
-            }) && let Some(drag) = &mut self.selection_drag
-            {
+            if let Some(drag) = &mut self.selection_drag {
                 drag.scrolled();
             }
             self.send(Command::Scroll(direction), cx);
-            self.extend_selection(pointer, cx);
+            if let Some(point) = self.selection_endpoint(pointer, cx) {
+                self.send(Command::UpdateSelectionAt(point), cx);
+            }
         }
         self.flush_resize();
     }
 
-    fn selection_scroll_direction(&self) -> i32 {
-        if self.window_state.is_locked() || self.selection_drag.is_none() {
-            return 0;
+    pub(super) fn selection_scroll_distance(&self) -> f32 {
+        if !self.visible || self.window_state.is_locked() || self.show_final_alternate {
+            return 0.;
         }
-        match (self.selection_pointer, self.bounds) {
-            (Some(pointer), Some(bounds)) if pointer.y < bounds.top() => 3,
-            (Some(pointer), Some(bounds)) if pointer.y > bounds.bottom() => -3,
-            _ => 0,
+        let Some(snapshot) = self.snapshot.as_ref().filter(|s| !s.alternate_screen) else {
+            return 0.;
+        };
+        let distance = match (&self.selection_drag, self.selection_pointer, self.bounds) {
+            (Some(drag), Some(pointer), Some(bounds)) => {
+                drag.scroll_distance(pointer, bounds, self.line_height)
+            }
+            _ => 0.,
+        };
+        if (distance > 0. && snapshot.display_offset < snapshot.history_size)
+            || (distance < 0. && snapshot.display_offset > 0)
+        {
+            distance
+        } else {
+            0.
         }
     }
 
@@ -914,16 +970,27 @@ impl TerminalView {
             self.resize.sent((columns, rows), now);
             self.resize_receipt = Some(receipt);
         }
-        if self.resize.is_pending() {
-            // Layout can change inside the resize cooldown, before there is an
-            // actor command to publish a revision. Keep its final size timely.
-            self.poll_wake.notify_one();
-        }
     }
 
     pub(super) fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        self.flush_motion(cx);
+        self.send_input(command, false, cx);
+    }
+
+    pub(super) fn send_confirmed_paste(&mut self, text: String, cx: &mut Context<Self>) {
+        self.flush_motion(cx);
+        self.send_input(Command::Paste(text), true, cx);
+    }
+
+    pub(super) fn send_input(
+        &mut self,
+        command: Command,
+        confirmed: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.window_state.is_locked() {
-            return;
+            self.paste_preview = None;
+            return false;
         }
         if self.show_final_alternate
             && matches!(
@@ -935,19 +1002,26 @@ impl TerminalView {
                     | Command::InsertCommandDraft { .. }
                     | Command::Mouse { .. }
                     | Command::BeginSelection { .. }
+                    | Command::BeginSelectionAt { .. }
+                    | Command::UpdateSelectionAt(..)
                     | Command::SelectAll
                     | Command::UpdateSelection { .. }
                     | Command::Search { .. }
+                    | Command::SearchScoped { .. }
+                    | Command::RevealCommandBlock { .. }
                     | Command::NextMatch { .. }
                     | Command::Scroll(_)
+                    | Command::ScrollFractional(_)
                     | Command::ScrollTo(_)
                     | Command::ScrollToBottom
                     | Command::NavigateCommand { .. }
                     | Command::SelectCommandOutput { .. }
                     | Command::RevealCommand { .. }
+                    | Command::ToggleCommandFold { .. }
+                    | Command::SelectCommandBlock { .. }
             )
         {
-            return;
+            return false;
         }
         if self.viewed_run + 1 < self.runs.len()
             && matches!(
@@ -960,10 +1034,15 @@ impl TerminalView {
                     | Command::Mouse { .. }
             )
         {
-            return;
+            return false;
         }
         if let Some(session) = self.runs.get(self.viewed_run) {
-            if let Err(error) = session.send(command) {
+            let result = match command {
+                Command::Paste(text) if confirmed => session.paste_confirmed(text),
+                command => session.send(command),
+            };
+            let accepted = result.is_ok();
+            if let Err(error) = result {
                 self.error = Some(rustterm::i18n::Message::with_arg(
                     i18n_key::TERMINAL_INPUT_WAS_NOT_ACCEPTED_ERROR,
                     "error",
@@ -975,7 +1054,9 @@ impl TerminalView {
                 cx.emit(PaneEvent::Activity);
                 cx.notify();
             }
+            return accepted;
         }
+        false
     }
 }
 
@@ -1057,6 +1138,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn status_bar_only_names_shell_modes_that_change_what_the_user_can_do() {
+        for mode in [
+            ShellInteraction::Prompt,
+            ShellInteraction::Editing,
+            ShellInteraction::Unknown,
+        ] {
+            assert_eq!(shell_status_key(mode), None);
+        }
+        assert_eq!(
+            shell_status_key(ShellInteraction::HistorySearch),
+            Some(i18n_key::TERMINAL_STATUS_HISTORY_SEARCH)
+        );
+        assert_eq!(
+            shell_status_key(ShellInteraction::Executing),
+            Some(i18n_key::TERMINAL_STATUS_EXECUTING)
+        );
+    }
+
+    #[test]
     fn shell_mode_is_hidden_by_disconnect_errors_archives_and_fullscreen_programs() {
         let mut terminal = rustterm::terminal::Terminal::new(80, 24, 100);
         terminal.feed(b"\x1b]133;P;RustTerm=zsh\x07\x1b]133;P;RustTermHistorySearch=1\x07\x1b]133;B\x07\x1b]133;P;RustTermInput=history-search\x07");
@@ -1093,26 +1193,5 @@ mod tests {
             ),
             ShellInteraction::Unknown
         );
-    }
-
-    #[test]
-    fn idle_panes_keep_only_the_maintenance_timer() {
-        for (visible, focused, frame) in [(true, true, 16), (true, false, 34), (false, true, 250)] {
-            assert_eq!(
-                poll_intervals(visible, focused, false),
-                (Duration::from_millis(frame), Duration::from_millis(250)),
-            );
-        }
-    }
-
-    #[test]
-    fn selection_and_resize_keep_the_frame_interval_only_while_visible() {
-        for (visible, focused, period) in [(true, true, 16), (true, false, 34), (false, true, 250)]
-        {
-            assert_eq!(
-                poll_intervals(visible, focused, true),
-                (Duration::from_millis(period), Duration::from_millis(period)),
-            );
-        }
     }
 }

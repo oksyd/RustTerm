@@ -1056,3 +1056,57 @@ fn saved_commands_have_an_aggregate_storage_budget() {
     config.quick_commands[0].command.push('x');
     assert!(config.validate().is_err());
 }
+
+#[test]
+fn rdp_view_preferences_round_trip_separately_from_connection_settings() {
+    let mut config = AppConfig::default();
+    let id = Uuid::new_v4();
+    let view = RdpViewState {
+        mode: RdpViewMode::Actual,
+        pan: (32768, 65535),
+        toolbar_pinned: true,
+    };
+    config.rdp_views.insert(id, view);
+    let encoded = toml::to_string(&config).unwrap();
+    let decoded: AppConfig = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded.rdp_views[&id], view);
+    let older: AppConfig = toml::from_str("schema_version = 1").unwrap();
+    assert!(older.rdp_views.is_empty());
+}
+
+#[test]
+fn recent_connections_move_reopened_profiles_to_the_front() {
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut recent = RecentConnections::default();
+    assert!(recent.remember(first));
+    assert!(!recent.remember(first));
+    assert!(recent.remember(second));
+    assert!(recent.remember(first));
+    assert_eq!(recent.ids(), [first, second]);
+    recent.forget(first);
+    assert_eq!(recent.ids(), [second]);
+}
+
+#[test]
+fn interaction_preferences_keep_legacy_defaults_and_round_trip() {
+    let mut settings: Settings = toml::from_str("").unwrap();
+    assert_eq!(settings.quick_open_order, QuickOpenOrder::RecentlyUsed);
+    assert!(!settings.sftp_follow_directory);
+    assert_eq!(
+        settings.word_delimiters,
+        crate::terminal::default_word_delimiters()
+    );
+    settings.quick_open_order = QuickOpenOrder::ConnectionList;
+    settings.sftp_follow_directory = true;
+    settings.word_delimiters = "-/；".into();
+    let saved: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+    saved.validate().unwrap();
+    assert_eq!(saved.word_delimiters, "-/；");
+    assert!(saved.sftp_follow_directory);
+    assert_eq!(saved.quick_open_order, QuickOpenOrder::ConnectionList);
+    settings.word_delimiters.clear();
+    assert!(settings.validate().is_ok());
+    settings.word_delimiters = "a\nb".into();
+    assert!(settings.validate().is_err());
+}

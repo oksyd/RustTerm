@@ -128,7 +128,7 @@ pub struct FileTransferView {
     mutating: bool,
     native_pending: bool,
     closed: bool,
-    follow_directory: bool,
+    followed_directory: Option<String>,
     actions_open: bool,
     editor: Option<NameEditor>,
     error: Option<rustterm::i18n::Message>,
@@ -151,6 +151,7 @@ impl EventEmitter<FileTransferEvent> for FileTransferView {}
 impl FileTransferView {
     pub fn new(
         client: SftpClient,
+        followed_directory: Option<String>,
         prompts: PromptGate,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -212,7 +213,7 @@ impl FileTransferView {
             mutating: false,
             native_pending: false,
             closed: false,
-            follow_directory: false,
+            followed_directory,
             actions_open: false,
             editor: None,
             error: None,
@@ -229,7 +230,12 @@ impl FileTransferView {
             preview: None,
             preview_task: None,
         };
-        view.navigate(".".into(), cx);
+        view.navigate(
+            view.followed_directory
+                .clone()
+                .unwrap_or_else(|| ".".into()),
+            cx,
+        );
         view.focus.focus(window);
         view
     }
@@ -238,26 +244,19 @@ impl FileTransferView {
         self.focus.focus(window);
     }
 
-    pub fn navigate_to(&mut self, path: String, cx: &mut Context<Self>) {
-        if self.closed || self.prompts.is_blocked() {
-            return;
-        }
-        if path.is_empty() || path.len() > 16 * 1024 || path.contains('\0') {
-            self.error = Some(i18n_key::TERMINAL_ENTER_A_VALID_REMOTE_PATH.into());
-            cx.notify();
-            return;
-        }
-        self.pending_directory = Some(path);
-        self.navigate_pending(cx);
+    pub fn followed_directory(&self) -> Option<&str> {
+        self.followed_directory.as_deref()
     }
 
-    pub fn cancel_pending_navigation(&mut self) {
-        self.pending_directory = None;
+    pub fn follow_directory(&mut self, directory: Option<String>, cx: &mut Context<Self>) {
+        self.pending_directory.clone_from(&directory);
+        self.followed_directory = directory;
+        self.navigate_pending(cx);
+        cx.notify();
     }
 
     fn navigate_pending(&mut self, cx: &mut Context<Self>) {
-        if self.pending_directory.is_none()
-            || self.closed
+        if self.closed
             || self.loading
             || self.mutating
             || self.native_pending
@@ -270,8 +269,9 @@ impl FileTransferView {
         {
             return;
         }
-        let path = self.pending_directory.take().expect("pending path checked");
-        if !self.directory_ready || path != self.directory {
+        if let Some(path) = self.pending_directory.take()
+            && (!self.directory_ready || path != self.directory)
+        {
             self.navigate(path, cx);
         }
     }
@@ -310,10 +310,34 @@ impl FileTransferView {
     }
 
     pub fn active_transfer_count(&self) -> usize {
+        self.active_transfers().count()
+    }
+
+    fn active_transfers(&self) -> impl Iterator<Item = &TransferRow> {
         self.transfers
             .iter()
             .filter(|row| !finished(&row.progress.state))
-            .count()
+    }
+
+    pub fn append_close_warnings(&self, warnings: &mut Vec<&'static str>, cx: &App) {
+        for row in self.active_transfers() {
+            let key = match row.direction {
+                Direction::Upload => i18n_key::WORKSPACE_CLOSE_UPLOADS,
+                Direction::Download => i18n_key::WORKSPACE_CLOSE_DOWNLOADS,
+            };
+            if !warnings.contains(&key) {
+                warnings.push(key);
+            }
+        }
+        if self.mutating {
+            warnings.push(i18n_key::WORKSPACE_CLOSE_FILE_OPERATION);
+        }
+        if self.preview_dirty(cx) {
+            warnings.push(i18n_key::WORKSPACE_CLOSE_FILE_EDITS);
+        }
+        if self.editor.is_some() {
+            warnings.push(i18n_key::WORKSPACE_CLOSE_FILENAME);
+        }
     }
 
     pub fn has_failed_transfers(&self) -> bool {
@@ -324,13 +348,6 @@ impl FileTransferView {
 
     pub fn has_pending_edits(&self, cx: &App) -> bool {
         self.editor.is_some() || self.preview_dirty(cx)
-    }
-
-    pub fn set_follow_directory(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if self.follow_directory != enabled {
-            self.follow_directory = enabled;
-            cx.notify();
-        }
     }
 
     pub fn is_busy(&self) -> bool {
@@ -1680,13 +1697,13 @@ impl Render for FileTransferView {
                 )
                 .tab_index(0)
                 .flex_shrink_0()
-                .when(self.follow_directory, |button| {
+                .when(self.followed_directory.is_some(), |button| {
                     button
                         .bg(rgb(ui::colors().selected))
                         .text_color(rgb(ui::colors().accent))
                 })
                 .tooltip({
-                    let label = if self.follow_directory {
+                    let label = if self.followed_directory.is_some() {
                         i18n_key::WORKSPACE_STOP_FOLLOWING_TERMINAL_DIRECTORY
                     } else {
                         i18n_key::WORKSPACE_FOLLOW_TERMINAL_DIRECTORY_IN_SFTP

@@ -116,12 +116,34 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ssh = tunnel.map(|(profile, secret)| {
-            let Connection::Ssh(config) = profile.connection else {
-                unreachable!("validated SSH route")
-            };
-            ssh_options(&config, &secret, self.path.join("known_hosts.toml"))
-        });
+        if let Connection::Ssh(config) = &profile.connection
+            && let Some(crate::app::pane::Pane::Terminal(view)) = self.panes.get(&id)
+            && view.read(cx).production_protected() != config.production_protection
+        {
+            self.error = Some(i18n_key::CONNECTIONS_PRODUCTION_PENDING.into());
+            cx.notify();
+            return;
+        }
+        let ssh = tunnel
+            .map(|(profile, secret)| {
+                let Connection::Ssh(config) = profile.connection else {
+                    return Err(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE);
+                };
+                Ok(ssh_options(
+                    &config,
+                    &secret,
+                    self.path.join("known_hosts.toml"),
+                ))
+            })
+            .transpose();
+        let ssh = match ssh {
+            Ok(ssh) => ssh,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
+            }
+        };
         match &profile.connection {
             Connection::Ssh(config) => {
                 // Automatic recovery never opens an interactive authentication prompt.
@@ -150,6 +172,7 @@ impl Workspace {
             }
             Connection::Rdp(config) => {
                 let launch = RdpLaunch {
+                    view: self.config.rdp_views.get(&profile.id).copied(),
                     ssh,
                     config: config.clone(),
                     secret,
@@ -168,11 +191,68 @@ impl Workspace {
                 self.add_database(profile, launch, Some(id), None, window, cx);
             }
             Connection::Telnet(_) => self.open_profile(profile, Some(id), window, cx),
-            Connection::Local(_) => unreachable!("local sessions do not automatically reconnect"),
+            Connection::Local(_) => (),
         }
     }
 
     pub(super) fn open_profile_at(
+        &mut self,
+        profile: Profile,
+        reconnect: Option<usize>,
+        split: Option<(usize, Axis)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing || self.window_state.is_locked() || self.modal.is_some() {
+            return;
+        }
+        let restart = match &profile.connection {
+            Connection::Ssh(config) => self.ports.registry.get(profile.id).filter(|controller| {
+                controller.protection().is_production() != config.production_protection
+                    && (controller.settings().automatic.enabled
+                        || controller.settings().rules.iter().any(|rule| rule.enabled))
+            }),
+            _ => None,
+        };
+        if let Some(controller) = restart {
+            let Some(permit) = self.window_state.prompts.acquire() else {
+                return;
+            };
+            let detail = rustterm::trf!(
+                i18n_key::CONNECTIONS_PRODUCTION_TUNNEL_RESTART,
+                name = profile.name.clone()
+            );
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                tr(i18n_key::CONNECTIONS_SSH_PRODUCTION_PROTECTION),
+                Some(&detail),
+                &[tr(i18n_key::COMMON_CANCEL), tr(i18n_key::COMMON_CONNECT)],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                let accepted = answer.await == Ok(1);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let valid = permit.is_valid();
+                    drop(permit);
+                    if accepted
+                        && valid
+                        && this
+                            .ports
+                            .registry
+                            .get(profile.id)
+                            .is_some_and(|current| current.same_instance(&controller))
+                    {
+                        this.open_profile_confirmed(profile, reconnect, split, window, cx);
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        self.open_profile_confirmed(profile, reconnect, split, window, cx);
+    }
+
+    fn open_profile_confirmed(
         &mut self,
         profile: Profile,
         reconnect: Option<usize>,
@@ -434,23 +514,33 @@ impl Workspace {
         if remember && self.can_save_connection_credential(&profile) && !value.expose().is_empty() {
             self.remember_credential(&profile, Secret::new(value.expose().to_owned()), cx);
         }
-        let ssh = tunnel.map(|tunnel| {
-            let secret = Secret::new(tunnel.secret.read(cx).value().to_owned());
-            tunnel.secret.update(cx, |field, cx| field.clear(cx));
-            if tunnel.remember && !secret.expose().is_empty() {
-                self.remember_credential(
-                    &tunnel.profile,
-                    Secret::new(secret.expose().to_owned()),
-                    cx,
-                );
+        let ssh = tunnel
+            .map(|tunnel| {
+                let secret = Secret::new(tunnel.secret.read(cx).value().to_owned());
+                tunnel.secret.update(cx, |field, cx| field.clear(cx));
+                if tunnel.remember && !secret.expose().is_empty() {
+                    self.remember_credential(
+                        &tunnel.profile,
+                        Secret::new(secret.expose().to_owned()),
+                        cx,
+                    );
+                }
+                let Connection::Ssh(config) = &tunnel.profile.connection else {
+                    return Err(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE);
+                };
+                let mut options = ssh_options(config, &secret, self.path.join("known_hosts.toml"));
+                options.authentication = Some(self.window_state.authentication.clone());
+                Ok(options)
+            })
+            .transpose();
+        let ssh = match ssh {
+            Ok(ssh) => ssh,
+            Err(error) => {
+                self.error = Some(error.into());
+                cx.notify();
+                return;
             }
-            let Connection::Ssh(config) = &tunnel.profile.connection else {
-                unreachable!("validated SSH route")
-            };
-            let mut options = ssh_options(config, &secret, self.path.join("known_hosts.toml"));
-            options.authentication = Some(self.window_state.authentication.clone());
-            options
-        });
+        };
         self.dismiss_modal(cx);
         self.popup_return_focus = None;
         match &profile.connection {
@@ -485,6 +575,7 @@ impl Workspace {
             }
             Connection::Rdp(config) => {
                 let launch = RdpLaunch {
+                    view: self.config.rdp_views.get(&profile.id).copied(),
                     ssh,
                     config: config.clone(),
                     secret: value,
@@ -517,7 +608,7 @@ impl Workspace {
                 self.add_session(profile, session, reconnect, split, window, cx);
             }
             Connection::Local(_) => {
-                unreachable!("local sessions do not use a credential dialog")
+                self.open_profile(profile, reconnect, window, cx);
             }
         }
         self.restore_focus(window, cx);
@@ -761,6 +852,7 @@ pub(super) fn ssh_options(
         keepalive_secs: config.keepalive_secs,
         keepalive_max: config.keepalive_max,
         shell_integration: config.shell_integration,
+        production_protection: config.production_protection,
         jump_hosts: config.jump_hosts.clone(),
         forwards: config.forwards.clone(),
         auto_forward: config.auto_forward.clone(),

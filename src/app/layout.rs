@@ -16,29 +16,57 @@ impl WorkspaceLayout {
         utility_open: bool,
     ) -> Self {
         let width = width.max(0.);
-        let content_minimum = content_minimum.max(360.);
-        let sidebar_width = settings.sidebar_width.max(240.).min((width - 80.).max(0.));
-        let sidebar_fits = width >= sidebar_width + 5. + content_minimum;
+        let sidebar_width = settings
+            .sidebar_width
+            .max(DockPanel::Connections.width_limits().0)
+            .min((width - 80.).max(0.));
+        let sidebar_fits = Self::dock_space(width, content_minimum) >= sidebar_width;
         let sidebar_inline = sidebar_fits && settings.sidebar_visible && !utility_open;
         let sidebar_visible =
             !utility_open && (sidebar_inline || (!sidebar_fits && sidebar_overlay));
         let available = width
             - if sidebar_inline {
-                sidebar_width + 5.
+                sidebar_width + Self::DIVIDER_WIDTH
             } else {
                 0.
             };
-        let files_docked = available >= content_minimum + 365.;
+        let tools_space = Self::dock_space(available, content_minimum);
+        let tools_min = DockPanel::Tools.width_limits().0;
+        let files_docked = tools_space >= tools_min;
         Self {
             sidebar_fits,
             sidebar_visible,
             sidebar_inline,
             sidebar_width,
             files_docked,
-            files_width: settings
-                .files_width
-                .min((available - content_minimum - 5.).max(360.)),
+            files_width: settings.files_width.min(tools_space.max(tools_min)),
         }
+    }
+
+    pub(super) const DIVIDER_WIDTH: f32 = 5.;
+
+    pub(super) fn dock_space(width: f32, content_minimum: f32) -> f32 {
+        width - content_minimum.max(360.) - Self::DIVIDER_WIDTH
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum DockPanel {
+    Connections,
+    Tools,
+}
+
+impl DockPanel {
+    fn width_limits(self) -> (f32, f32) {
+        match self {
+            Self::Connections => (240., 400.),
+            Self::Tools => (360., 800.),
+        }
+    }
+
+    pub(super) fn resized_width(self, start_width: f32, delta_x: f32, available: f32) -> f32 {
+        let (min, max) = self.width_limits();
+        (start_width - delta_x).clamp(min, available.clamp(min, max))
     }
 }
 
@@ -234,7 +262,21 @@ impl PaneNode {
 mod tests {
     use super::*;
     #[test]
-    fn library_and_tools_share_one_left_panel() {
+    fn dragging_the_right_panel_divider_keeps_the_grab_point_and_room_for_the_session() {
+        for (panel, width, min, max) in [
+            (DockPanel::Connections, 300., 240., 400.),
+            (DockPanel::Tools, 480., 360., 800.),
+        ] {
+            assert_eq!(panel.resized_width(width, 0., max), width);
+            assert_eq!(panel.resized_width(width, -25., max), width + 25.);
+            assert_eq!(panel.resized_width(width, 25., max), width - 25.);
+            assert_eq!(panel.resized_width(width, -500., width + 8.), width + 8.);
+            assert_eq!(panel.resized_width(width, -500., 1600.), max);
+            assert_eq!(panel.resized_width(width, 500., max), min);
+        }
+    }
+    #[test]
+    fn library_and_tools_share_one_right_panel() {
         let settings = rustterm::config::Settings::default();
         let terminal_only = WorkspaceLayout::new(900., &settings, false, 460., false);
         assert!(terminal_only.sidebar_inline);

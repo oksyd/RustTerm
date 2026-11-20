@@ -200,7 +200,17 @@ impl Workspace {
                 }
                 _ => item.label.as_ref(),
             };
-            let shortcut = if action == MenuAction::Disconnect
+            use rustterm::config::ShortcutAction;
+            let configurable = match action {
+                MenuAction::Palette => Some(ShortcutAction::Palette),
+                MenuAction::QuickOpen => Some(ShortcutAction::QuickOpen),
+                MenuAction::Sidebar => Some(ShortcutAction::Sidebar),
+                MenuAction::Search => Some(ShortcutAction::Search),
+                _ => None,
+            };
+            let shortcut = if let Some(binding) = configurable {
+                self.config.settings.shortcuts.label(binding)
+            } else if action == MenuAction::Disconnect
                 && matches!(self.panes.get(&self.focused), Some(Pane::Terminal(view)) if !view.read(cx).is_running())
             {
                 "Ctrl+Shift+R"
@@ -298,7 +308,7 @@ impl Workspace {
                                 .text_size(px(10.))
                                 .flex_shrink_0()
                                 .text_color(rgb(ui::colors().muted))
-                                .child(shortcut),
+                                .child(shortcut.to_owned()),
                         )
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {

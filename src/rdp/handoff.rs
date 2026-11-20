@@ -100,10 +100,12 @@ fn take<'a>(data: &mut &'a [u8], length: usize) -> Result<&'a [u8]> {
     Ok(value)
 }
 fn u16(data: &mut &[u8]) -> Result<u16> {
-    Ok(u16::from_le_bytes(take(data, 2)?.try_into().unwrap()))
+    let bytes = take(data, 2)?;
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 fn u32(data: &mut &[u8]) -> Result<u32> {
-    Ok(u32::from_le_bytes(take(data, 4)?.try_into().unwrap()))
+    let bytes = take(data, 4)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 fn field<'a>(data: &mut &'a [u8], limit: usize) -> Result<&'a [u8]> {
     let length = u32(data)? as usize;

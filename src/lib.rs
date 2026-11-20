@@ -3,7 +3,18 @@
 //! The desktop application lives in the binary target. These shared modules
 //! also provide the library target used by integration tests.
 
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable
+    )
+)]
+
 pub mod app_lock;
+pub mod color;
 pub mod config;
 pub mod connection_probe;
 mod connection_route;

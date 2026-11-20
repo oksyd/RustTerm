@@ -2,10 +2,11 @@ use super::{Modal, Tab, Workspace};
 use crate::app::layout::{Axis, PaneNode};
 use crate::app::pane::Pane;
 use crate::app::text_input::TextInput;
-use gpui::{Context, Entity, Window};
+use crate::app::{pane::PaneEvent, ui};
+use gpui::{AnyElement, Context, Entity, MouseButton, Window, div, prelude::*, px, rgb};
 use rustterm::config::{
     AuthMethod, Connection, CredentialRef, CredentialStore, ProcessCredentialStore, Profile,
-    RedisTopology, Secret, SshConfig,
+    RedisTopology, Secret, SshConfig, Uuid,
 };
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::{Message, tr};
@@ -38,6 +39,13 @@ struct Retry {
     due: Instant,
     connecting: bool,
     credentials: Option<gpui::Task<()>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RetryProgress {
+    Waiting { attempt: u32, seconds: u64 },
+    Connecting { attempt: u32 },
+    Stopped,
 }
 
 enum ReconnectCredential {
@@ -81,6 +89,26 @@ fn reconnect_credential(connection: &Connection) -> Option<ReconnectCredential> 
 }
 
 impl Recovery {
+    fn progress(&self, id: usize, now: Instant) -> Option<RetryProgress> {
+        if let Some(retry) = self.retries.get(&id) {
+            return Some(if retry.connecting || retry.credentials.is_some() {
+                RetryProgress::Connecting {
+                    attempt: retry.attempts + u32::from(!retry.connecting),
+                }
+            } else {
+                RetryProgress::Waiting {
+                    attempt: retry.attempts + 1,
+                    seconds: retry
+                        .due
+                        .saturating_duration_since(now)
+                        .as_millis()
+                        .div_ceil(1000) as u64,
+                }
+            });
+        }
+        self.stopped.contains(&id).then_some(RetryProgress::Stopped)
+    }
+
     fn stop_reconnect(&mut self, id: usize) {
         self.retries.remove(&id);
         self.stopped.insert(id);
@@ -130,6 +158,122 @@ impl Recovery {
 }
 
 impl Workspace {
+    pub(super) fn render_reconnect_progress(
+        &self,
+        id: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pane = self.panes.get(&id)?;
+        if !matches!(pane, Pane::Terminal(_) | Pane::Rdp(_))
+            || pane.diagnostic_state(cx) == "connected"
+        {
+            return None;
+        }
+        let progress = self.recovery.progress(id, Instant::now())?;
+        let text = match progress {
+            RetryProgress::Waiting { attempt, seconds } => rustterm::trf!(
+                i18n_key::WORKSPACE_RETRY_COUNTDOWN,
+                attempt = attempt,
+                seconds = seconds
+            ),
+            RetryProgress::Connecting { attempt } => {
+                rustterm::trf!(i18n_key::WORKSPACE_RETRY_CONNECTING, attempt = attempt)
+            }
+            RetryProgress::Stopped => tr(i18n_key::WORKSPACE_RETRY_STOPPED).into(),
+        };
+        let detail = if matches!(pane, Pane::Terminal(_)) {
+            i18n_key::WORKSPACE_RETRY_SSH_DETAIL
+        } else {
+            i18n_key::WORKSPACE_RETRY_RDP_DETAIL
+        };
+        let running = pane.is_running(cx);
+        Some(
+            div()
+                .id(("reconnect-progress", id))
+                .absolute()
+                .occlude()
+                .left(px(8.))
+                .right(px(8.))
+                .bottom(px(30.))
+                .p(px(8.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(rgb(ui::colors().border))
+                .bg(rgb(ui::colors().raised))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(11.))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(140.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(text)
+                        .child(div().text_color(rgb(ui::colors().muted)).child(tr(detail))),
+                )
+                .when(
+                    !running && !matches!(progress, RetryProgress::Connecting { .. }),
+                    |d| {
+                        d.child(
+                            ui::text_button(
+                                ("retry-now", id),
+                                i18n_key::WORKSPACE_RETRY_NOW,
+                                ui::ButtonStyle::Neutral,
+                            )
+                            .tab_index(0)
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    if this.panes.get(&id).is_some_and(|pane| !pane.is_running(cx))
+                                    {
+                                        this.pane_event(&PaneEvent::Reconnect(id), window, cx);
+                                    }
+                                },
+                            )),
+                        )
+                    },
+                )
+                .when(!matches!(progress, RetryProgress::Stopped), |d| {
+                    d.child(
+                        ui::text_button(
+                            ("retry-stop", id),
+                            i18n_key::WORKSPACE_RETRY_STOP,
+                            ui::ButtonStyle::Neutral,
+                        )
+                        .tab_index(0)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let connecting = this
+                                .recovery
+                                .retries
+                                .get(&id)
+                                .is_some_and(|retry| retry.connecting);
+                            this.recovery.stop_reconnect(id);
+                            if connecting
+                                && let Some(pane) = this.panes.get(&id)
+                                && pane.is_running(cx)
+                            {
+                                match pane {
+                                    Pane::Terminal(view) => {
+                                        view.update(cx, |view, cx| view.disconnect_or_reconnect(cx))
+                                    }
+                                    Pane::Rdp(view) => {
+                                        view.update(cx, |view, cx| view.disconnect_or_reconnect(cx))
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            cx.notify();
+                        })),
+                    )
+                })
+                .into_any_element(),
+        )
+    }
+
     fn pause_reconnect_for_authentication(
         &mut self,
         id: usize,
@@ -469,6 +613,8 @@ impl Workspace {
         }
         restored_tabs.append(&mut self.tabs);
         self.tabs = restored_tabs;
+        self.tab_history
+            .sync_open(self.tabs.iter().map(|tab| tab.id));
         self.focus_pane(id, window, cx);
     }
 
@@ -533,6 +679,22 @@ impl Workspace {
         true
     }
 
+    pub(super) fn remember_opened_connection(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if !self.opening_initial_tabs
+            && self.recovery.restoring.is_none()
+            && self.config.profiles.iter().any(|profile| profile.id == id)
+            && self.config.recent_connections.remember(id)
+        {
+            self.palette.invalidate_connections();
+            self.mark_workspace_dirty(cx);
+        }
+    }
+
+    pub(super) fn mark_workspace_dirty(&mut self, cx: &mut Context<Self>) {
+        self.recovery.pending_save = true;
+        self.schedule_workspace_persistence(cx);
+    }
+
     pub(super) fn persist_workspace(&mut self, cx: &mut Context<Self>) {
         self.capture_workspace(cx);
         if self.recovery.pending_save {
@@ -575,6 +737,9 @@ impl Workspace {
         {
             return;
         }
+        self.config
+            .rdp_views
+            .retain(|id, _| self.config.profiles.iter().any(|p| p.id == *id));
         let mut panes = Vec::new();
         let mut positions = HashMap::new();
         for tab in &self.tabs {
@@ -735,7 +900,7 @@ impl Workspace {
             cx.notify();
             break;
         }
-        if previous_count != self.recovery.retries.len() {
+        if previous_count != self.recovery.retries.len() || !self.recovery.retries.is_empty() {
             cx.notify();
         }
 
@@ -858,6 +1023,33 @@ fn rebuild_layout(
 mod tests {
     use super::*;
     use rustterm::config::LocalConfig;
+
+    #[test]
+    fn retry_progress_tracks_countdown_attempts_and_explicit_stop() {
+        let mut recovery = Recovery::default();
+        let now = Instant::now();
+        assert_eq!(recovery.progress(1, now), None);
+        recovery.retry_ready(1, false, false, true, now);
+        assert_eq!(
+            recovery.progress(1, now + Duration::from_millis(1100)),
+            Some(RetryProgress::Waiting {
+                attempt: 1,
+                seconds: 1
+            })
+        );
+        let retry = recovery.retries.get_mut(&1).unwrap();
+        retry.attempts = 1;
+        retry.connecting = true;
+        assert_eq!(
+            recovery.progress(1, now),
+            Some(RetryProgress::Connecting { attempt: 1 })
+        );
+        recovery.stop_reconnect(1);
+        assert_eq!(recovery.progress(1, now), Some(RetryProgress::Stopped));
+        assert!(!recovery.retry_ready(1, false, false, true, now + Duration::from_secs(60)));
+        recovery.retry_ready(1, true, true, false, now);
+        assert_eq!(recovery.progress(1, now), None);
+    }
 
     #[test]
     fn automatic_reconnect_requires_saved_or_noninteractive_credentials() {

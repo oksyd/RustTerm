@@ -1,5 +1,6 @@
 use super::{
-    Collector, DatabaseError, MAX_COLUMNS, MAX_RESULT_BYTES, MAX_SQL_BYTES, Result, ResultSet,
+    Collector, DatabaseError, MAX_COLUMNS, MAX_RESULT_BYTES, MAX_SQL_BYTES, QueryRows, Result,
+    ResultSet,
 };
 use crate::config::SqliteConfig;
 use rusqlite::{
@@ -44,27 +45,31 @@ impl Connection {
     pub(super) async fn execute(
         &mut self,
         sql: &str,
-        limit: usize,
+        rows: QueryRows,
         cancel: CancellationToken,
     ) -> Result<Vec<ResultSet>> {
         let connection = self.connection.take().ok_or(DatabaseError::Disconnected)?;
         let sql = sql.to_owned();
         let stop = self.stop.clone();
-        self.pending = Some(super::runtime()?.spawn_blocking(move || {
-            let progress_stop = stop.clone();
-            let progress_cancel = cancel.clone();
-            let result = connection
-                .progress_handler(
-                    1000,
-                    Some(move || progress_stop.is_cancelled() || progress_cancel.is_cancelled()),
-                )
-                .map_err(classify)
-                .and_then(|_| execute(&connection, &sql, limit, &stop, &cancel));
-            (connection, result)
-        }));
+        let pending = self
+            .pending
+            .insert(super::runtime()?.spawn_blocking(move || {
+                let progress_stop = stop.clone();
+                let progress_cancel = cancel.clone();
+                let result = connection
+                    .progress_handler(
+                        1000,
+                        Some(move || {
+                            progress_stop.is_cancelled() || progress_cancel.is_cancelled()
+                        }),
+                    )
+                    .map_err(classify)
+                    .and_then(|_| execute(&connection, &sql, rows, &stop, &cancel));
+                (connection, result)
+            }));
         // Keep the JoinHandle in self: if the actor cancels this future, shutdown
         // can still interrupt and join the actual SQLite worker before replying.
-        let work = self.pending.as_mut().unwrap().await;
+        let work = pending.await;
         self.pending = None;
         let (connection, result) = work.map_err(|_| DatabaseError::Runtime)?;
         self.connection = Some(connection);
@@ -226,12 +231,12 @@ fn read_only_action(context: AuthContext<'_>) -> Authorization {
 fn execute(
     connection: &NativeConnection,
     sql: &str,
-    limit: usize,
+    rows: QueryRows,
     stop: &CancellationToken,
     cancel: &CancellationToken,
 ) -> Result<Vec<ResultSet>> {
     let mut batch = Batch::new(connection, sql);
-    let mut output = Collector::new(limit);
+    let mut output = Collector::new(rows.limit());
     while let Some(mut statement) = batch.next().map_err(classify)? {
         if stop.is_cancelled() || cancel.is_cancelled() {
             return Err(DatabaseError::Cancelled);
@@ -248,9 +253,10 @@ fn execute(
             statement.execute([]).map_err(classify)?;
         } else {
             let count = statement.column_count();
-            let mut rows = statement.query([]).map_err(classify)?;
-            while let Some(row) = rows.next().map_err(classify)? {
+            let mut cursor = statement.query([]).map_err(classify)?;
+            while let Some(row) = cursor.next().map_err(classify)? {
                 let mut values = Vec::with_capacity(count);
+                let mut storage = Vec::new();
                 for index in 0..count {
                     let value = row.get_ref(index).map_err(classify)?;
                     if matches!(value, ValueRef::Blob(bytes) if bytes.len() > MAX_RESULT_BYTES / 2)
@@ -258,14 +264,28 @@ fn execute(
                         output.current.truncated = true;
                         break;
                     }
-                    values.push(match value {
-                        ValueRef::Null => None,
-                        ValueRef::Integer(value) => Some(value.to_string()),
-                        ValueRef::Real(value) => Some(value.to_string()),
-                        ValueRef::Text(value) => Some(super::display_bytes(value)),
-                        ValueRef::Blob(value) => Some(format!("0x{}", super::hex(value))),
-                    });
+                    let (cell, kind) = match (rows, value) {
+                        (_, ValueRef::Null) => (None, "null"),
+                        (_, ValueRef::Integer(value)) => (Some(value.to_string()), "integer"),
+                        (_, ValueRef::Real(value)) => (Some(value.to_string()), "real"),
+                        (QueryRows::Table(_), ValueRef::Text(bytes)) => {
+                            match std::str::from_utf8(bytes) {
+                                Ok(text) => (Some(text.to_owned()), "text"),
+                                Err(_) => (Some(super::hex(bytes)), "invalid text"),
+                            }
+                        }
+                        (QueryRows::Table(_), ValueRef::Blob(bytes)) => {
+                            (Some(super::hex(bytes)), "blob")
+                        }
+                        (_, ValueRef::Text(bytes)) => (Some(super::display_bytes(bytes)), "text"),
+                        (_, ValueRef::Blob(bytes)) => (Some(super::display_blob(bytes)), "blob"),
+                    };
+                    values.push(cell);
+                    if matches!(rows, QueryRows::Table(_)) {
+                        storage.push(Some(kind.to_owned()));
+                    }
                 }
+                values.append(&mut storage);
                 if output.current.truncated {
                     break;
                 }

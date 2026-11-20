@@ -11,7 +11,7 @@ pub(super) struct ValueView {
 
 impl DatabaseView {
     fn selected_value(&self) -> Option<(&str, Option<&str>)> {
-        let (row, column) = self.documents[self.active_document].selected_cell?;
+        let (row, column) = self.documents.get(self.active_document)?.selected_cell?;
         let result = self.current_result()?;
         Some((
             result.columns.get(column)?.as_str(),
@@ -72,11 +72,16 @@ impl DatabaseView {
     }
 
     pub(super) fn render_value(&self, cx: &Context<Self>) -> AnyElement {
-        let viewer = self.documents[self.active_document]
-            .value_view
-            .as_ref()
-            .unwrap();
-        let (column, value) = self.selected_value().unwrap();
+        let Some(viewer) = self
+            .documents
+            .get(self.active_document)
+            .and_then(|d| d.value_view.as_ref())
+        else {
+            return div().into_any_element();
+        };
+        let Some((column, value)) = self.selected_value() else {
+            return div().into_any_element();
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -132,16 +137,25 @@ impl DatabaseView {
                         list(
                             viewer.scroll.clone(),
                             cx.processor(|this, index: usize, _, _| {
-                                let view = this.documents[this.active_document]
-                                    .value_view
-                                    .as_ref()
-                                    .unwrap();
-                                let (_, value) = this.selected_value().unwrap();
+                                let Some(view) = this
+                                    .documents
+                                    .get(this.active_document)
+                                    .and_then(|d| d.value_view.as_ref())
+                                else {
+                                    return div().into_any_element();
+                                };
+                                let Some((_, value)) = this.selected_value() else {
+                                    return div().into_any_element();
+                                };
                                 let text = value.unwrap_or("NULL");
-                                let range = &view.chunks[index];
+                                let Some(range) = view.chunks.get(index) else {
+                                    return div().into_any_element();
+                                };
                                 // Each list item is small even for a single multi-megabyte line.
                                 // The list lazily remeasures its visible items when width changes.
-                                let chunk = &text[range.clone()];
+                                let Some(chunk) = text.get(range.clone()) else {
+                                    return div().into_any_element();
+                                };
                                 let chunk = if range.end < text.len() {
                                     chunk.strip_suffix('\n').unwrap_or(chunk)
                                 } else {

@@ -100,3 +100,32 @@ settings-connection-list = 连接列表
 settings-show-connection-details = 显示连接详情
 
 settings-show-connection-details-help = 在连接名称下方显示类型和地址。关闭后使用紧凑的单行列表。
+
+settings-shortcuts = 快捷键
+settings-toggle-connection-sidebar = 显示或隐藏连接栏
+settings-shortcut-record = 请按下快捷键…
+settings-shortcut-unassigned = 未绑定
+settings-shortcut-clear = 清除快捷键
+settings-shortcut-default = 恢复默认
+settings-shortcut-hint = 点击当前快捷键后按下新的组合键，按 Esc 取消。
+settings-shortcut-unsupported = 请按下带修饰键的组合键或功能键。
+settings-shortcut-conflict = { $shortcut } 已分配给「{ $action }」。
+settings-shortcut-fixed = { $shortcut } 已由「{ $action }」使用，该操作的快捷键固定。
+settings-shortcut-replace = 替换绑定
+settings-shortcut-invalid = 快捷键设置包含重复或已被占用的组合键。
+settings-text-editing = 文本编辑
+
+settings-tab-switch-order = 标签切换顺序
+settings-tab-switch-help = 适用于 Ctrl+Tab 和 Ctrl+Shift+Tab。
+settings-tab-switch-bar = 标签栏顺序
+settings-tab-switch-recent = 最近使用
+
+settings-word-delimiters = 双击选词分隔符
+settings-word-delimiters-help = 每个字符都是一个选词边界。空格和制表符始终分隔单词。
+settings-word-delimiters-preview = 双击示例文字，预览选词范围。
+
+settings-quick-open-order = 快速打开连接的顺序
+settings-quick-open-order-help = 打开连接面板且搜索框为空时生效。
+settings-sftp-follow-directory = 默认跟随终端目录
+settings-sftp-follow-directory-help = SSH 会话报告当前目录时，在文件面板中打开该目录。可在各会话中单独切换。
+settings-word-delimiters-invalid = 分隔符最多 256 字节，且不能包含控制字符。

@@ -57,6 +57,17 @@
 //! GDI drawing orders and Gateway are unsupported. Optional codecs
 //! and CAL exchanges still need broader real-server interoperability validation.
 #![forbid(unsafe_code)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable,
+        clippy::unwrap_used,
+        clippy::expect_used
+    )
+)]
 
 mod channels;
 mod clipboard;

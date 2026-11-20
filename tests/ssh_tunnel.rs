@@ -251,6 +251,7 @@ impl Fixture {
             keepalive_secs: 0,
             keepalive_max: 2,
             shell_integration: false,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
             auto_forward: Default::default(),

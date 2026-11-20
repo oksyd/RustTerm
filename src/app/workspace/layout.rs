@@ -1,12 +1,12 @@
 use super::{DragTarget, Modal, Tab, Workspace};
-use crate::app::layout::{Axis, PaneNode, WorkspaceLayout};
+use crate::app::layout::{Axis, DockPanel, PaneNode, WorkspaceLayout};
 use crate::app::pane::Pane;
 use crate::app::ui;
 use crate::app::window_frame::WindowFrame;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, CursorStyle, KeyDownEvent, MouseButton, MouseMoveEvent, Window,
-    canvas, div, px, relative, rgb,
+    AnyElement, App, Context, CursorStyle, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Window, canvas, div, px, relative, rgb,
 };
 
 impl Workspace {
@@ -50,6 +50,10 @@ impl Workspace {
             self.restore_focus(window, cx);
         }
     }
+    pub(super) fn sidebar_overlay_active(&self) -> bool {
+        self.sidebar_overlay_requested && !self.utility_is_open()
+    }
+
     pub(super) fn restore_focus(&self, window: &mut Window, cx: &App) {
         if self.lock_screen.locked {
             self.focus_lock_password(window, cx);
@@ -76,7 +80,7 @@ impl Workspace {
             self.focus_palette(window, cx);
             return;
         }
-        if self.sidebar_overlay_open {
+        if self.sidebar_overlay_active() {
             self.focus_library(window, cx);
             return;
         }
@@ -109,6 +113,9 @@ impl Workspace {
         }
     }
     pub(super) fn visible_ids(&self) -> Vec<usize> {
+        if let Some(id) = self.immersive_rdp {
+            return vec![id];
+        }
         if let Some(id) = self.zoomed {
             return vec![id];
         }
@@ -182,10 +189,17 @@ impl Workspace {
         }
         self.focused = id;
         self.tabs[tab].focused = id;
-        self.sidebar_overlay_open = false;
+        self.sidebar_overlay_requested = false;
         self.set_active(tab, window, cx);
     }
     pub(super) fn set_active(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(index, window, cx);
+        if let Some(tab) = self.tabs.get(self.active) {
+            self.tab_history.visit(tab.id);
+        }
+    }
+
+    pub(super) fn show_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let requested = self
             .tabs
             .get(index.min(self.tabs.len().saturating_sub(1)))
@@ -230,7 +244,7 @@ impl Workspace {
             ids[0]
         };
         self.tabs[self.active].focused = self.focused;
-        self.follow_left_tool(window, cx);
+        self.follow_dock_tool(window, cx);
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
         self.utility_overlay = self.utility_is_open()
@@ -241,7 +255,7 @@ impl Workspace {
                         .width,
                 ),
                 &self.config.settings,
-                self.sidebar_overlay_open,
+                self.sidebar_overlay_requested,
                 self.preferred_content_minimum(cx).0,
                 self.utility_is_open(),
             )
@@ -275,7 +289,7 @@ impl Workspace {
         {
             return;
         }
-        let had_tool = self.left_tool.take().is_some();
+        let had_tool = self.dock_tool.take().is_some();
         self.tools.clear();
         self.utility_overlay = false;
         self.release_rdp_control(cx);
@@ -289,13 +303,13 @@ impl Workspace {
                     .width,
             ),
             &self.config.settings,
-            self.sidebar_overlay_open,
+            self.sidebar_overlay_requested,
             self.preferred_content_minimum(cx).0,
             self.utility_is_open(),
         );
         if !layout.sidebar_fits {
-            self.sidebar_overlay_open = had_tool || !self.sidebar_overlay_open;
-            if self.sidebar_overlay_open {
+            self.sidebar_overlay_requested = had_tool || !self.sidebar_overlay_requested;
+            if self.sidebar_overlay_requested {
                 self.focus_library(window, cx);
             } else {
                 self.restore_focus(window, cx);
@@ -349,29 +363,34 @@ impl Workspace {
             Axis::Vertical => size.1 >= 2. * minimum.1 + 5. && size.0 >= minimum.0,
         }
     }
-    /// Activation reuses an existing pane; explicit new-tab/split commands always
-    /// create another session. Prefer the current context in a stable order.
     pub(super) fn drag_resize(
         &mut self,
         event: &MouseMoveEvent,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let bounds = WindowFrame::new(window).content_bounds(window.viewport_size());
-        match self.dragging {
-            Some(DragTarget::Sidebar) => {
-                self.config.settings.sidebar_width =
-                    f32::from(event.position.x - bounds.left()).clamp(240., 400.);
-                cx.notify();
-                return;
+        if let Some(DragTarget::Panel {
+            panel,
+            start_x,
+            start_width,
+        }) = self.dragging
+        {
+            let viewport = WindowFrame::new(window).content_size(window.viewport_size());
+            let available = WorkspaceLayout::dock_space(
+                f32::from(viewport.width),
+                self.preferred_content_minimum(cx).0,
+            );
+            let width = panel.resized_width(
+                start_width,
+                f32::from(event.position.x - start_x),
+                available,
+            );
+            match panel {
+                DockPanel::Connections => self.config.settings.sidebar_width = width,
+                DockPanel::Tools => self.config.settings.files_width = width,
             }
-            Some(DragTarget::Files) => {
-                self.config.settings.files_width =
-                    f32::from(event.position.x - bounds.left()).clamp(360., 800.);
-                cx.notify();
-                return;
-            }
-            _ => {}
+            cx.notify();
+            return;
         }
         if let Some(DragTarget::Split(id)) = self.dragging
             && let Some((axis, bounds)) = self.split_bounds.get(&id)
@@ -395,18 +414,23 @@ impl Workspace {
             cx.notify();
         }
         if let Some(Pane::Terminal(p)) = self.panes.get(&self.focused) {
-            p.update(cx, |p, cx| p.drag_selection(event.position, false, cx));
+            p.update(cx, |p, cx| {
+                p.drag_selection(event.position, false, window, cx)
+            });
         }
     }
     pub(super) fn panel_divider(
         &self,
-        id: &'static str,
-        target: DragTarget,
+        panel: DockPanel,
+        width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
-            .id(id)
-            .w(px(5.))
+            .id(match panel {
+                DockPanel::Connections => "sidebar-divider",
+                DockPanel::Tools => "files-divider",
+            })
+            .w(px(WorkspaceLayout::DIVIDER_WIDTH))
             .h_full()
             .flex_shrink_0()
             .bg(rgb(ui::colors().bg))
@@ -414,8 +438,12 @@ impl Workspace {
             .hover(|style| style.bg(rgb(ui::colors().accent)))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, _, cx| {
-                    this.dragging = Some(target);
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.dragging = Some(DragTarget::Panel {
+                        panel,
+                        start_x: event.position.x,
+                        start_width: width,
+                    });
                     cx.stop_propagation();
                 }),
             )
@@ -487,10 +515,12 @@ impl Workspace {
     ) -> AnyElement {
         match node {
             PaneNode::Leaf(id) => div()
+                .relative()
                 .size_full()
                 .min_w_0()
                 .min_h_0()
                 .child(self.panes[id].element(size, cx))
+                .children(self.render_reconnect_progress(*id, cx))
                 .into_any_element(),
             PaneNode::Split {
                 id,

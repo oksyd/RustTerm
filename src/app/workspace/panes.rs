@@ -8,7 +8,7 @@ use crate::app::rdp_view::{RdpLaunch, RdpView};
 use crate::app::redis_view::{RedisLaunch, RedisView};
 use crate::app::terminal_view::TerminalView;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, PromptLevel, Window};
+use gpui::{App, Context, Entity, Window};
 use rustterm::config::{Connection, LocalConfig, Profile, SqlEngine};
 use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::{Message, tr};
@@ -29,6 +29,16 @@ impl Workspace {
             // The view receives display metadata; the saved profile stays intact.
             let mut display = profile.clone();
             display.name = self.session_names.name(id, &profile.name);
+            if let Connection::Ssh(display) = &mut display.connection
+                && let Some(saved) = self
+                    .config
+                    .profiles
+                    .iter()
+                    .find(|saved| saved.id == profile.id)
+                && let Connection::Ssh(saved) = &saved.connection
+            {
+                display.production_protection = saved.production_protection;
+            }
             view.update(cx, |view, cx| view.set_profile(&display, cx));
         }
     }
@@ -61,7 +71,7 @@ impl Workspace {
     pub(super) fn open_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.select_tool(SessionTool::Files, cx);
         if let Some(files) = self.files.get(&self.focused) {
-            self.tools.insert(self.focused, SessionTool::Files);
+            self.sync_file_directory(self.focused, files, cx);
             files.read(cx).focus(window);
             cx.notify();
             return;
@@ -73,8 +83,16 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let files = cx
-            .new(|cx| FileTransferView::new(client, self.window_state.prompts.clone(), window, cx));
+        let directory = pane.read(cx).followed_sftp_directory().map(str::to_owned);
+        let files = cx.new(|cx| {
+            FileTransferView::new(
+                client,
+                directory,
+                self.window_state.prompts.clone(),
+                window,
+                cx,
+            )
+        });
         let pane_id = self.focused;
         let subscription = cx.subscribe_in(&files, window, move |this, _, event, window, cx| {
             if matches!(event, FileTransferEvent::Updated) {
@@ -95,7 +113,7 @@ impl Workspace {
                 if this.tools.get(&pane_id) == Some(&SessionTool::Files) {
                     this.tools.remove(&pane_id);
                 }
-                if this.focused == pane_id && this.left_tool == Some(SessionTool::Files) {
+                if this.focused == pane_id && this.dock_tool == Some(SessionTool::Files) {
                     this.close_utility_panel(window, cx);
                 } else if this.focused == pane_id {
                     if !this.utility_is_open() {
@@ -114,6 +132,21 @@ impl Workspace {
         self.menu = None;
         cx.notify();
     }
+    pub(super) fn profile_open_action(&self, profile: &Profile) -> ProfileOpen {
+        ProfileOpen::resolve(
+            profile,
+            std::iter::once(self.focused)
+                .chain(
+                    self.tabs
+                        .get(self.active)
+                        .into_iter()
+                        .flat_map(|tab| tab.layout.leaves()),
+                )
+                .chain(self.tabs.iter().flat_map(|tab| tab.layout.leaves()))
+                .filter_map(|id| self.pane_profiles.get(&id).map(|profile| (id, profile))),
+        )
+    }
+
     pub(super) fn open_or_focus_profile(
         &mut self,
         profile: Profile,
@@ -128,20 +161,9 @@ impl Workspace {
         {
             return;
         }
-        let existing = reusable_profile_pane(
-            &profile,
-            std::iter::once(self.focused)
-                .chain(
-                    self.tabs
-                        .get(self.active)
-                        .into_iter()
-                        .flat_map(|tab| tab.layout.leaves()),
-                )
-                .chain(self.tabs.iter().flat_map(|tab| tab.layout.leaves()))
-                .filter_map(|id| self.pane_profiles.get(&id).map(|profile| (id, profile))),
-        );
-        if let Some(id) = existing {
-            self.sidebar_overlay_open = false;
+        if let ProfileOpen::Focus(id) = self.profile_open_action(&profile) {
+            self.remember_opened_connection(profile.id, cx);
+            self.sidebar_overlay_requested = false;
             self.focus_pane(id, window, cx);
         } else {
             self.connect_profile(profile, None, window, cx);
@@ -204,7 +226,7 @@ impl Workspace {
                 return;
             }
         }
-        self.sidebar_overlay_open = false;
+        self.sidebar_overlay_requested = false;
         self.open_profile_at(
             profile,
             None,
@@ -454,7 +476,7 @@ impl Workspace {
     pub(super) fn add_rdp(
         &mut self,
         profile: Profile,
-        launch: RdpLaunch,
+        mut launch: RdpLaunch,
         reconnect: Option<usize>,
         split: Option<(usize, Axis)>,
         window: &mut Window,
@@ -465,17 +487,30 @@ impl Workspace {
         }
         let id = reconnect.unwrap_or_else(|| self.id());
         let refocus = self.replacement_has_focus(id, window, cx);
+        let (preview, audio_muted) = match self.panes.get(&id) {
+            Some(Pane::Rdp(previous)) => previous.update(cx, |view, _| {
+                launch.view = Some(view.view_state());
+                (
+                    view.take_desktop_preview(&launch.config),
+                    view.manually_muted(),
+                )
+            }),
+            _ => (None, false),
+        };
         let view = cx.new(|cx| {
             RdpView::new(
                 id,
                 profile.name.clone(),
                 launch,
-                &self.config.settings,
+                audio_muted,
                 self.window_state.clone(),
                 window,
                 cx,
             )
         });
+        if let Some(preview) = preview {
+            view.update(cx, |view, cx| view.restore_desktop_preview(preview, cx));
+        }
         let subscription = cx.subscribe_in(&view, window, |this, _, event, window, cx| {
             this.pane_event(event, window, cx)
         });
@@ -550,6 +585,15 @@ impl Workspace {
         }
         cx.notify();
     }
+    fn discard_unplaced_pane(&mut self, id: usize, error: &'static str, cx: &mut Context<Self>) {
+        self.error = Some(error.into());
+        if let Some(pane) = self.panes.remove(&id) {
+            pane.close(cx);
+        }
+        self.subscriptions.remove(&id);
+        cx.notify();
+    }
+
     fn place_pane(
         &mut self,
         id: usize,
@@ -565,21 +609,20 @@ impl Workspace {
                     .iter()
                     .position(|tab| tab.layout.leaves().contains(&target))
                 else {
-                    self.error = Some(
-                        i18n_key::WORKSPACE_THE_TARGET_PANE_WAS_CLOSED_CHOOSE_A_DESTINATION_AND_CONNECT
-                            .into(),
+                    self.discard_unplaced_pane(
+                        id,
+                        i18n_key::WORKSPACE_THE_TARGET_PANE_WAS_CLOSED_CHOOSE_A_DESTINATION_AND_CONNECT,
+                        cx,
                     );
-                    if let Some(pane) = self.panes.remove(&id) {
-                        pane.close(cx);
-                    }
-                    self.subscriptions.remove(&id);
-                    cx.notify();
                     return;
                 };
-                let extent = self
+                let Some(extent) = self
                     .fitted_layout(&self.tabs[tab], cx)
                     .pane_size(target, self.terminal_size)
-                    .expect("validated target belongs to tab");
+                else {
+                    self.discard_unplaced_pane(id, i18n_key::WORKSPACE_THE_TARGET_PANE_WAS_CLOSED_CHOOSE_A_DESTINATION_AND_CONNECT, cx);
+                    return;
+                };
                 let existing = self.panes[&target].minimum_size(cx);
                 let incoming = self.panes[&id].minimum_size(cx);
                 let ratio = if self.terminal_size == (0., 0.) {
@@ -589,42 +632,47 @@ impl Workspace {
                     split_ratio(axis, extent, existing, incoming)
                 };
                 let Some(ratio) = ratio else {
-                    self.error = Some(
-                        i18n_key::REDIS_THIS_PANE_IS_TOO_SMALL_TO_SPLIT_ENLARGE_THE_WINDOW.into(),
+                    self.discard_unplaced_pane(
+                        id,
+                        i18n_key::REDIS_THIS_PANE_IS_TOO_SMALL_TO_SPLIT_ENLARGE_THE_WINDOW,
+                        cx,
                     );
-                    if let Some(pane) = self.panes.remove(&id) {
-                        pane.close(cx);
-                    }
-                    self.subscriptions.remove(&id);
-                    cx.notify();
                     return;
                 };
                 Some((tab, target, axis, ratio))
             }
             None => None,
         };
-        let saved_number = self.restoring_session_number(profile.id);
-        self.session_names.assign(id, &profile, saved_number);
-        self.pane_profiles.insert(id, profile.clone());
-        self.refresh_session_name(id, cx);
         let destination = if let Some((tab, target, axis, ratio)) = split_destination {
             let split_id = self.id();
             let inserted = self.tabs[tab]
                 .layout
                 .split(target, id, split_id, axis, ratio);
-            debug_assert!(inserted, "validated split target belongs to tab");
+            if !inserted {
+                self.discard_unplaced_pane(
+                    id,
+                    i18n_key::WORKSPACE_THE_TARGET_PANE_WAS_CLOSED_CHOOSE_A_DESTINATION_AND_CONNECT,
+                    cx,
+                );
+                return;
+            }
             tab
         } else {
             let tab_id = self.id();
             self.tabs.push(Tab {
                 id: tab_id,
-                title: profile.name,
+                title: profile.name.clone(),
                 pinned: false,
                 layout: PaneNode::Leaf(id),
                 focused: id,
             });
             self.tabs.len() - 1
         };
+        self.remember_opened_connection(profile.id, cx);
+        let saved_number = self.restoring_session_number(profile.id);
+        self.session_names.assign(id, &profile, saved_number);
+        self.pane_profiles.insert(id, profile);
+        self.refresh_session_name(id, cx);
         self.zoomed = None;
         self.focused = id;
         self.tabs[destination].focused = id;
@@ -666,11 +714,19 @@ impl Workspace {
                     command: command.clone(),
                 });
             }
-            PaneEvent::DirectoryChanged(id, directory) => {
-                if self.files_follow.contains(id)
-                    && let Some(files) = self.files.get(id)
+            PaneEvent::RevealRemotePath { index, run, path } => {
+                if self.focused == *index
+                    && matches!(self.panes.get(index), Some(Pane::Terminal(pane)) if pane.read(cx).history_run() == Some(*run))
                 {
-                    files.update(cx, |files, cx| files.navigate_to(directory.clone(), cx));
+                    self.open_files(window, cx);
+                    if let Some(files) = self.files.get(index) {
+                        files.update(cx, |files, cx| files.reveal_path(path.clone(), cx));
+                    }
+                }
+            }
+            PaneEvent::DirectoryChanged(id) => {
+                if *id != self.focused || self.active_files().is_none() {
+                    return;
                 }
             }
             PaneEvent::Focused(id) => {
@@ -692,9 +748,6 @@ impl Workspace {
                         Profile::local(tr(i18n_key::COMMON_LOCAL_TERMINAL), LocalConfig::default())
                     });
                 self.open_profile(profile, None, window, cx);
-            }
-            PaneEvent::NextTab => {
-                self.set_active((self.active + 1) % self.tabs.len().max(1), window, cx)
             }
             PaneEvent::NextPane => {
                 let ids = self
@@ -745,6 +798,14 @@ impl Workspace {
                     }
                 }
             }
+            PaneEvent::RdpViewChanged { index, view } => {
+                if let Some(profile) = self.pane_profiles.get(index)
+                    && matches!(profile.connection, Connection::Rdp(_))
+                {
+                    self.config.rdp_views.insert(profile.id, *view);
+                    self.mark_workspace_dirty(cx);
+                }
+            }
             PaneEvent::RdpCertificateTrusted { index, fingerprint } => {
                 self.remember_rdp_certificate(*index, fingerprint, cx);
             }
@@ -765,81 +826,13 @@ impl Workspace {
             self.connect_profile(profile, Some(axis), window, cx);
         }
     }
-    pub(super) fn confirm_close(
+    pub(super) fn remove_panes(
         &mut self,
-        ids: Vec<usize>,
+        ids: &[usize],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.confirming_close {
-            return;
-        }
-        let running = ids
-            .iter()
-            .filter(|id| self.panes.get(id).is_some_and(|p| p.is_running(cx)))
-            .count();
-        let unsaved = ids.iter().any(|id| {
-            self.panes
-                .get(id)
-                .is_some_and(|pane| pane.has_unsaved_changes(cx))
-        });
-        let files_busy = ids.iter().any(|id| {
-            self.files.get(id).is_some_and(|files| {
-                files.read(cx).is_busy() || files.read(cx).has_pending_edits(cx)
-            })
-        });
-        if running == 0 && !unsaved && !files_busy {
-            self.remove_panes(&ids, window, cx);
-            return;
-        }
-        let Some(permit) = self.window_state.prompts.acquire() else {
-            return;
-        };
-        self.confirming_close = true;
-        let contains_container = ids.iter().any(|id| matches!(self.panes.get(id), Some(Pane::Terminal(view)) if view.read(cx).is_container()));
-        let mut close_detail =
-            tr(i18n_key::REDIS_CONNECTIONS_AND_TRANSFERS_WILL_CLOSE_UNSAVED_DATA_EDITS_AND_PANE)
-                .to_owned();
-        if contains_container {
-            close_detail.push_str("\n\n");
-            close_detail.push_str(tr(i18n_key::DOCKER_CONSOLE_CLOSE_HINT));
-        }
-        let response = window.prompt(
-            PromptLevel::Warning,
-            &rustterm::trf!(
-                i18n_key::WORKSPACE_CLOSE_PANES_CONFIRMATION,
-                count = ids.len()
-            ),
-            Some(&close_detail),
-            &[
-                tr(i18n_key::COMMON_CANCEL),
-                tr(if contains_container {
-                    i18n_key::DOCKER_DISCONNECT_CLOSE
-                } else {
-                    i18n_key::WORKSPACE_END_AND_CLOSE
-                }),
-            ],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            let yes = response.await == Ok(1);
-            let _ = cx.update(|window, cx| {
-                this.update(cx, |this, cx| {
-                    let valid = permit.is_valid();
-                    drop(permit);
-                    this.confirming_close = false;
-                    if yes && valid {
-                        this.remove_panes(&ids, window, cx);
-                    }
-                    cx.notify();
-                })
-            });
-        })
-        .detach();
-    }
-    fn remove_panes(&mut self, ids: &[usize], window: &mut Window, cx: &mut Context<Self>) {
-        self.files_follow.retain(|id| !ids.contains(id));
-        let active_id = self.tabs.get(self.active).map(|tab| tab.id);
+        let previous_tabs: Vec<_> = self.tabs.iter().map(|tab| tab.id).collect();
         for id in ids {
             self.tools.remove(id);
             self.command_views.remove(id);
@@ -870,23 +863,64 @@ impl Workspace {
             .collect();
         self.split_bounds.clear();
         self.dragging = None;
+        let active_id = self.tab_history.after_close(
+            self.config.settings.tab_switch_order,
+            &previous_tabs,
+            self.active,
+            self.tabs.iter().map(|tab| tab.id),
+        );
         self.active = active_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
-            .unwrap_or_else(|| self.active.min(self.tabs.len().saturating_sub(1)));
+            .unwrap_or(0);
         self.set_active(self.active, window, cx);
         cx.notify();
     }
 }
-fn reusable_profile_pane<'a>(
-    profile: &Profile,
-    panes: impl IntoIterator<Item = (usize, &'a Profile)>,
-) -> Option<usize> {
-    if matches!(profile.connection, Connection::Ssh(_)) {
-        return None;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProfileOpen {
+    New,
+    AnotherSsh(usize),
+    Focus(usize),
+}
+
+impl ProfileOpen {
+    fn resolve<'a>(
+        profile: &Profile,
+        panes: impl IntoIterator<Item = (usize, &'a Profile)>,
+    ) -> Self {
+        let mut matching = panes
+            .into_iter()
+            .filter_map(|(id, opened)| (opened.id == profile.id).then_some(id));
+        let Some(first) = matching.next() else {
+            return Self::New;
+        };
+        if matches!(profile.connection, Connection::Ssh(_)) {
+            // The focus-first iterator also visits these panes in tab order.
+            let distinct: std::collections::HashSet<_> =
+                std::iter::once(first).chain(matching).collect();
+            Self::AnotherSsh(distinct.len())
+        } else {
+            Self::Focus(first)
+        }
     }
-    panes
-        .into_iter()
-        .find_map(|(id, opened)| (opened.id == profile.id).then_some(id))
+
+    pub(super) fn hint(self, connection: &Connection) -> Option<String> {
+        match self {
+            Self::New => None,
+            Self::AnotherSsh(count) => Some(rustterm::trf!(
+                i18n_key::WORKSPACE_QUICK_OPEN_ANOTHER_SSH,
+                count = count
+            )),
+            Self::Focus(_) => Some(
+                tr(if matches!(connection, Connection::Rdp(_)) {
+                    i18n_key::WORKSPACE_QUICK_OPEN_SWITCH_DESKTOP
+                } else {
+                    i18n_key::WORKSPACE_QUICK_OPEN_SWITCH_SESSION
+                })
+                .to_owned(),
+            ),
+        }
+    }
 }
 
 fn profile_for_launch(original: &Profile, profiles: &[Profile]) -> Profile {
@@ -921,12 +955,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn quick_open_explains_the_same_action_that_enter_will_perform() {
+        let ssh = Profile::ssh("shared", Default::default());
+        let rdp = Profile::rdp("shared", Default::default());
+        let panes = [(4, &ssh), (4, &ssh), (8, &ssh), (9, &rdp)];
+        let ssh_action = ProfileOpen::resolve(&ssh, panes);
+        assert_eq!(ssh_action, ProfileOpen::AnotherSsh(2));
+        assert_eq!(
+            ssh_action.hint(&ssh.connection),
+            Some(rustterm::trf!(
+                i18n_key::WORKSPACE_QUICK_OPEN_ANOTHER_SSH,
+                count = 2
+            ))
+        );
+        let rdp_action = ProfileOpen::resolve(&rdp, panes);
+        assert_eq!(rdp_action, ProfileOpen::Focus(9));
+        assert_eq!(
+            rdp_action.hint(&rdp.connection).as_deref(),
+            Some(tr(i18n_key::WORKSPACE_QUICK_OPEN_SWITCH_DESKTOP))
+        );
+        assert_eq!(ProfileOpen::resolve(&ssh, []).hint(&ssh.connection), None);
+    }
+
+    #[test]
     fn opening_an_ssh_profile_always_creates_another_session() {
         let profile = Profile::ssh("SSH", Default::default());
-        assert_eq!(reusable_profile_pane(&profile, []), None);
+        assert_eq!(ProfileOpen::resolve(&profile, []), ProfileOpen::New);
         assert_eq!(
-            reusable_profile_pane(&profile, [(3, &profile), (7, &profile)]),
-            None
+            ProfileOpen::resolve(&profile, [(3, &profile), (7, &profile)]),
+            ProfileOpen::AnotherSsh(2)
         );
     }
 
@@ -945,26 +1002,26 @@ mod tests {
             let mut other = profile.clone();
             other.id = rustterm::config::Uuid::new_v4();
             assert_eq!(
-                reusable_profile_pane(&profile, []),
-                None,
+                ProfileOpen::resolve(&profile, []),
+                ProfileOpen::New,
                 "{}",
                 profile.name
             );
             assert_eq!(
-                reusable_profile_pane(&profile, [(1, &other)]),
-                None,
+                ProfileOpen::resolve(&profile, [(1, &other)]),
+                ProfileOpen::New,
                 "{}",
                 profile.name
             );
             assert_eq!(
-                reusable_profile_pane(&profile, [(1, &other), (7, &profile), (3, &profile)]),
-                Some(7),
+                ProfileOpen::resolve(&profile, [(1, &other), (7, &profile), (3, &profile)]),
+                ProfileOpen::Focus(7),
                 "{}",
                 profile.name
             );
             assert_eq!(
-                reusable_profile_pane(&profile, [(3, &profile), (7, &profile)]),
-                Some(3),
+                ProfileOpen::resolve(&profile, [(3, &profile), (7, &profile)]),
+                ProfileOpen::Focus(3),
                 "{}",
                 profile.name
             );

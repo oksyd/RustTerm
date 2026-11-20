@@ -635,7 +635,7 @@ impl RedisView {
         };
         if let Some(bytes) = bytes {
             if let Ok(text) = std::str::from_utf8(bytes) {
-                cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                crate::app::clipboard::write(cx, ClipboardItem::new_string(text.to_owned()));
                 let message = if value::partial_string(info, &self.detail_page) {
                     i18n_key::REDIS_PAGE_COPIED
                 } else {

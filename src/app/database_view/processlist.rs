@@ -119,10 +119,12 @@ impl MonitorState {
             })
             .unwrap_or_default();
         if let Some(id) = self.selected
-            && !self
-                .rows
-                .iter()
-                .any(|&i| self.snapshot.as_ref().unwrap().processes[i].id == id)
+            && !self.rows.iter().any(|&i| {
+                self.snapshot
+                    .as_ref()
+                    .and_then(|s| s.processes.get(i))
+                    .is_some_and(|p| p.id == id)
+            })
         {
             self.selected = None;
             self.preview = None;
@@ -197,9 +199,9 @@ impl DatabaseView {
         }
     }
     pub(super) fn start_monitor_poll(&mut self, cx: &mut Context<Self>) {
-        if self.monitor.is_none() {
+        let Some(monitor) = &mut self.monitor else {
             return;
-        }
+        };
         let poll = cx.spawn(async move |this, cx| {
             loop {
                 gpui::Timer::after(Duration::from_millis(500)).await;
@@ -236,7 +238,7 @@ impl DatabaseView {
                 }
             }
         });
-        self.monitor.as_mut().unwrap().poll = Some(poll);
+        monitor.poll = Some(poll);
     }
     pub(super) fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         if !self.monitor_visible() || !self.monitor_connected() {
@@ -248,8 +250,11 @@ impl DatabaseView {
         if monitor.busy {
             return;
         }
+        let Some(connection) = self.client.as_ref() else {
+            return;
+        };
         if monitor.client.is_none() {
-            match self.client.as_ref().unwrap().mysql_monitor() {
+            match connection.mysql_monitor() {
                 Ok(client) => monitor.client = Some(client),
                 Err(error) => {
                     monitor.error = Some(Message::from_error(error));
@@ -258,12 +263,14 @@ impl DatabaseView {
                 }
             }
         }
+        let Some(client) = monitor.client.clone() else {
+            return;
+        };
         monitor.busy = true;
         monitor.error = None;
         monitor.last_attempt = Some(Instant::now());
         monitor.request = monitor.request.wrapping_add(1);
         let request = monitor.request;
-        let client = monitor.client.as_ref().unwrap().clone();
         let generation = self.generation;
         let task = cx
             .background_executor()
@@ -333,7 +340,7 @@ impl DatabaseView {
         }
         if modifiers.control && key == "c" {
             if let Some(preview) = &monitor.preview {
-                cx.write_to_clipboard(ClipboardItem::new_string(preview.sql.clone()));
+                crate::app::clipboard::write(cx, ClipboardItem::new_string(preview.sql.clone()));
             }
             return true;
         }
@@ -343,16 +350,25 @@ impl DatabaseView {
             && matches!(key, "up" | "down")
             && !monitor.rows.is_empty()
         {
-            let processes = &monitor.snapshot.as_ref().unwrap().processes;
-            let current = monitor
-                .selected
-                .and_then(|id| monitor.rows.iter().position(|&i| processes[i].id == id));
+            let Some(snapshot) = &monitor.snapshot else {
+                return false;
+            };
+            let processes = &snapshot.processes;
+            let current = monitor.selected.and_then(|id| {
+                monitor
+                    .rows
+                    .iter()
+                    .position(|&i| processes.get(i).is_some_and(|p| p.id == id))
+            });
             let next = match (current, key) {
                 (Some(i), "up") => i.saturating_sub(1),
                 (Some(i), _) => (i + 1).min(monitor.rows.len() - 1),
                 _ => 0,
             };
-            let id = processes[monitor.rows[next]].id;
+            let Some(process) = visible_process(Some(snapshot), &monitor.rows, next) else {
+                return false;
+            };
+            let id = process.id;
             monitor.select(id);
             monitor
                 .scroll
@@ -369,6 +385,15 @@ fn refresh_due(last: Option<Instant>, seconds: u64, busy: bool, visible: bool) -
         && seconds > 0
         && last.is_none_or(|last| last.elapsed() >= Duration::from_secs(seconds))
 }
+
+fn visible_process<'a>(
+    snapshot: Option<&'a Snapshot>,
+    rows: &[usize],
+    index: usize,
+) -> Option<&'a Process> {
+    snapshot?.processes.get(*rows.get(index)?)
+}
+
 fn filtered_rows(
     processes: &[Process],
     search: &str,
@@ -422,6 +447,19 @@ fn filtered_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expired_process_rows_do_not_access_a_replaced_snapshot() {
+        let snapshot = Snapshot {
+            processes: vec![process(1, 0, "Query", None)],
+            visibility: rustterm::database::processlist::Visibility::Own,
+            truncated: false,
+            elapsed: Duration::ZERO,
+        };
+        assert_eq!(visible_process(Some(&snapshot), &[0], 0).unwrap().id, 1);
+        assert!(visible_process(None, &[0], 0).is_none());
+        assert!(visible_process(Some(&snapshot), &[], 0).is_none());
+        assert!(visible_process(Some(&snapshot), &[1], 0).is_none());
+    }
     fn process(id: u64, seconds: u64, command: &str, database: Option<&str>) -> Process {
         Process {
             id,

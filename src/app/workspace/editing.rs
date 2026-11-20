@@ -533,8 +533,12 @@ impl Workspace {
                             this.config.settings.window_height,
                         );
                         let workspace = this.config.workspace.clone();
+                        let recent_connections =
+                            std::mem::take(&mut this.config.recent_connections);
                         this.config = candidate;
+                        this.palette.invalidate_connections();
                         this.config.workspace = workspace;
+                        this.config.recent_connections = recent_connections;
                         this.config.settings.window_width = current_size.0;
                         this.config.settings.window_height = current_size.1;
                         if result.is_ok() {
@@ -558,7 +562,38 @@ impl Workspace {
                         Session::set_global_history_budget(
                             this.config.settings.global_history_bytes,
                         );
-                        for pane in this.panes.values() {
+                        for (id, pane) in &this.panes {
+                            let saved = this.pane_profiles.get(id).and_then(|original| {
+                                this.config
+                                    .profiles
+                                    .iter()
+                                    .find(|profile| profile.id == original.id)
+                            });
+                            match (pane, saved.map(|profile| &profile.connection)) {
+                                (
+                                    crate::app::pane::Pane::Terminal(view),
+                                    Some(Connection::Ssh(config)),
+                                ) => {
+                                    view.update(cx, |view, cx| {
+                                        view.set_configured_production(
+                                            config.production_protection,
+                                            cx,
+                                        )
+                                    });
+                                }
+                                (
+                                    crate::app::pane::Pane::Rdp(view),
+                                    Some(Connection::Rdp(config)),
+                                ) => {
+                                    view.update(cx, |view, cx| {
+                                        view.set_background_audio_mute(
+                                            config.mute_audio_in_background,
+                                            cx,
+                                        )
+                                    });
+                                }
+                                _ => {}
+                            }
                             pane.apply_settings(&this.config.settings, cx);
                         }
                         for files in this.files.values() {
@@ -690,6 +725,7 @@ impl Workspace {
                     .iter()
                     .position(|profile| profile.id == id)
                     .map(|index| this.config.profiles.remove(index));
+                this.config.recent_connections.forget(id);
                 if this.selected_library_profile() == Some(id) {
                     this.library_selection = None;
                 }

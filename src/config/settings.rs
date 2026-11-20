@@ -1,5 +1,7 @@
 use crate::i18n::messages as i18n_key;
 
+mod shortcuts;
+pub use shortcuts::{ShortcutAction, ShortcutChord, Shortcuts};
 mod theme;
 pub use theme::{AppTheme, Theme};
 
@@ -28,9 +30,51 @@ impl AppLockConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabSwitchOrder {
+    #[default]
+    TabBar,
+    RecentlyUsed,
+}
+
+impl TabSwitchOrder {
+    fn is_tab_bar(&self) -> bool {
+        *self == Self::TabBar
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickOpenOrder {
+    #[default]
+    RecentlyUsed,
+    ConnectionList,
+}
+
+impl QuickOpenOrder {
+    fn is_recently_used(&self) -> bool {
+        *self == Self::RecentlyUsed
+    }
+}
+
+fn default_delimiters(value: &str) -> bool {
+    value == crate::terminal::default_word_delimiters()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
+    #[serde(skip_serializing_if = "Shortcuts::is_default")]
+    pub shortcuts: Shortcuts,
+    #[serde(skip_serializing_if = "TabSwitchOrder::is_tab_bar")]
+    pub tab_switch_order: TabSwitchOrder,
+    #[serde(skip_serializing_if = "QuickOpenOrder::is_recently_used")]
+    pub quick_open_order: QuickOpenOrder,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sftp_follow_directory: bool,
+    #[serde(skip_serializing_if = "default_delimiters")]
+    pub word_delimiters: String,
     pub restore_workspace: bool,
     pub auto_reconnect: bool,
     pub status_bar_monitoring: bool,
@@ -63,8 +107,13 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            shortcuts: Shortcuts::default(),
             language: crate::i18n::Language::System,
             app_theme: AppTheme::default(),
+            tab_switch_order: TabSwitchOrder::default(),
+            quick_open_order: QuickOpenOrder::default(),
+            sftp_follow_directory: false,
+            word_delimiters: crate::terminal::default_word_delimiters(),
             restore_workspace: true,
             auto_reconnect: true,
             status_bar_monitoring: true,
@@ -127,6 +176,10 @@ impl Settings {
         {
             return Err(invalid(i18n_key::WORKSPACE_PANEL_WIDTHS_ARE_OUT_OF_RANGE));
         }
+        if !crate::terminal::valid_word_delimiters(&self.word_delimiters) {
+            return Err(invalid(i18n_key::SETTINGS_WORD_DELIMITERS_INVALID));
+        }
+        self.shortcuts.validate()?;
         self.theme.validate()
     }
 }
@@ -134,6 +187,103 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::{AppTheme, Settings};
+
+    #[test]
+    fn tab_switch_order_defaults_and_round_trips() {
+        use super::TabSwitchOrder;
+        let old: Settings = toml::from_str("restore_workspace = true").unwrap();
+        assert_eq!(old.tab_switch_order, TabSwitchOrder::TabBar);
+        assert!(!toml::to_string(&old).unwrap().contains("tab_switch_order"));
+        let customized: Settings = toml::from_str("tab_switch_order = 'recently_used'").unwrap();
+        let saved = toml::to_string(&customized).unwrap();
+        assert_eq!(
+            toml::from_str::<Settings>(&saved).unwrap().tab_switch_order,
+            TabSwitchOrder::RecentlyUsed
+        );
+        assert!(toml::from_str::<Settings>("tab_switch_order = 'other'").is_err());
+    }
+
+    #[test]
+    fn workspace_shortcuts_reassign_clear_restore_and_round_trip() {
+        use super::ShortcutAction::{Palette, QuickOpen};
+        use gpui::Keystroke;
+        let mut settings: Settings = toml::from_str("font_size = 15").unwrap();
+        let pressed = |key| Keystroke::parse(key).unwrap();
+        let original = settings.shortcuts.clone();
+        assert_eq!(
+            original.action(&pressed("ctrl-shift-space")),
+            Some(QuickOpen)
+        );
+        let choice = original.binding(Palette).cloned();
+        assert_eq!(original.owner(choice.as_ref().unwrap()), Some(Palette));
+        settings.shortcuts.assign(QuickOpen, choice);
+        assert_eq!(
+            settings.shortcuts.action(&pressed("ctrl-shift-p")),
+            Some(QuickOpen)
+        );
+        assert!(settings.shortcuts.binding(Palette).is_none());
+        assert_eq!(
+            settings.shortcuts.action(&pressed("ctrl-shift-space")),
+            None
+        );
+        let loaded: Settings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(loaded.shortcuts, settings.shortcuts);
+        settings.shortcuts.assign(QuickOpen, None);
+        settings
+            .shortcuts
+            .assign(Palette, Palette.default_binding().into());
+        settings
+            .shortcuts
+            .assign(QuickOpen, QuickOpen.default_binding().into());
+        assert_eq!(settings.shortcuts, original);
+    }
+
+    #[test]
+    fn workspace_shortcuts_respect_text_input_and_fixed_bindings() {
+        use super::{ShortcutAction, ShortcutChord};
+        use gpui::Keystroke;
+
+        let read = |key| Keystroke::parse(key).unwrap();
+        for key in ["a", "shift-space", "shift", "ctrl-alt-a->ä"] {
+            assert!(ShortcutChord::capture(&read(key)).is_none(), "{key}");
+        }
+        let mut settings = Settings::default();
+        let chord = ShortcutChord::capture(&read("ctrl-alt-a")).unwrap();
+        settings
+            .shortcuts
+            .assign(ShortcutAction::QuickOpen, Some(chord));
+        assert_eq!(
+            settings.shortcuts.action(&read("ctrl-alt-a")),
+            Some(ShortcutAction::QuickOpen)
+        );
+        assert_eq!(settings.shortcuts.action(&read("ctrl-alt-a->ä")), None);
+        for fixed in [
+            "ctrl-,",
+            "ctrl-shift-r",
+            "ctrl-tab",
+            "f3",
+            "ctrl-v",
+            "ctrl-c",
+        ] {
+            let config = format!("[shortcuts]\nquick_open = '{fixed}'");
+            assert!(
+                toml::from_str::<Settings>(&config)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "{fixed}"
+            );
+        }
+        let duplicate =
+            toml::from_str::<Settings>("[shortcuts]\nquick_open = 'ctrl-shift-p'").unwrap();
+        assert!(duplicate.validate().is_err());
+        assert!(toml::from_str::<Settings>("[shortcuts]\nquick_open = 'z'").is_err());
+        assert!(
+            !toml::to_string(&Settings::default())
+                .unwrap()
+                .contains("[shortcuts]")
+        );
+    }
 
     #[test]
     fn application_theme_defaults_and_round_trips_without_changing_terminal_colors() {

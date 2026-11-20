@@ -15,7 +15,7 @@ fn assert_token(snapshot: &Snapshot, row: usize, token: &str, color: u32) {
         .unwrap_or_else(|| panic!("missing {token:?} in {text:?}"));
     let end = start + token.len();
     let mut offset = 0;
-    for cell in cells {
+    for cell in cells.iter() {
         let next = offset + cell.text.len();
         if offset < end && start < next {
             assert_eq!(cell.foreground, color, "{token:?}: cell {:?}", cell.text);
@@ -30,6 +30,54 @@ fn visible_cell(snapshot: &Snapshot, offset: usize) -> &Cell {
 }
 
 #[test]
+fn ordinary_values_and_negated_prose_do_not_claim_failure_or_warning() {
+    let theme = Theme::default();
+    let (_, snapshot) = screen(
+        "enabled=false dry_run=true not required don't panic 2026 4096 12345678 0x2026 DEAD1234",
+    );
+    for token in ["false", "true", "0x2026", "DEAD1234"] {
+        assert_token(&snapshot, 0, token, theme.debug);
+    }
+    for token in ["not required", "don't panic", "2026 4096 12345678"] {
+        assert_token(&snapshot, 0, token, theme.foreground);
+    }
+}
+
+#[test]
+fn paired_delimiters_never_borrow_status_colors() {
+    let theme = Theme::default();
+    let (_, snapshot) = screen("([{([{value}])}]) WARN ERROR FATAL");
+    for cell in &snapshot.lines[0].cells[..15] {
+        if "()[]{}".contains(cell.text.as_str()) {
+            assert!(![theme.warn, theme.error, theme.fatal].contains(&cell.foreground));
+        }
+    }
+    assert_token(&snapshot, 0, "WARN", theme.warn);
+    assert_token(&snapshot, 0, "ERROR", theme.error);
+    assert_token(&snapshot, 0, "FATAL", theme.fatal);
+}
+
+#[test]
+fn ansi_defaults_share_semantic_colors_and_remote_palette_overrides_still_win() {
+    let theme = Theme::default();
+    let (mut terminal, snapshot) = screen(
+        "\x1b[31mred\x1b[0m \x1b[32mgreen\x1b[0m \x1b[33myellow\x1b[0m \x1b[91mbright\x1b[0m",
+    );
+    for (token, color) in [
+        ("red", theme.error),
+        ("green", theme.info),
+        ("yellow", theme.warn),
+        ("bright", theme.fatal),
+    ] {
+        assert_token(&snapshot, 0, token, color);
+    }
+    terminal.feed(b"\r\x1b[2K\x1b]4;1;rgb:12/34/56\x07\x1b[31mERROR false 2026\x1b[0m");
+    assert_token(&terminal.snapshot(), 0, "ERROR false 2026", 0x123456);
+    terminal.feed(b"\r\x1b[2K\x1b[38;2;65;43;21mERROR false 2026\x1b[0m");
+    assert_token(&terminal.snapshot(), 0, "ERROR false 2026", 0x412b15);
+}
+
+#[test]
 fn default_rules_color_shell_values_addresses_and_keep_log_palette() {
     let theme = Theme::default();
     let (_, snapshot) = screen(
@@ -41,11 +89,11 @@ fn default_rules_color_shell_values_addresses_and_keep_log_palette() {
     }
     assert_token(&snapshot, 0, "=value", theme.foreground);
     for token in ["0x002A", "DEAD1234"] {
-        assert_token(&snapshot, 0, token, theme.warn);
+        assert_token(&snapshot, 0, token, theme.debug);
     }
-    assert_token(&snapshot, 0, "true", theme.info);
-    assert_token(&snapshot, 0, "false", theme.error);
-    assert_token(&snapshot, 0, "not found", theme.error);
+    assert_token(&snapshot, 0, "true", theme.debug);
+    assert_token(&snapshot, 0, "false", theme.debug);
+    assert_token(&snapshot, 0, "not found", theme.foreground);
     for token in ["192.0.2.12", "aa:bb:cc:dd:ee:ff"] {
         assert_token(&snapshot, 0, token, theme.address);
     }
@@ -68,7 +116,7 @@ fn token_boundaries_reject_embedded_words_and_malformed_addresses() {
         "abc--flag x0x0042 0xGGGG untrue falsehood 中文true \
          999.1.2.3 192.0.2.1.2 aa:bb:cc:dd:ee:gg user@@example.com",
     );
-    for cell in &snapshot.lines[0].cells {
+    for cell in snapshot.lines[0].cells.iter() {
         assert_eq!(
             cell.foreground,
             Theme::default().foreground,
@@ -83,18 +131,18 @@ fn six_nested_pairs_share_depth_colors_and_unmatched_delimiters_stay_plain() {
     let theme = Theme::default();
     let (_, snapshot) = screen("([{([{x}])}])\r\n( [ { x\r\n) ] }");
     for (position, color) in [
-        (0, theme.warn),
-        (1, theme.address),
-        (2, theme.info),
-        (3, theme.url),
-        (4, theme.debug),
-        (5, theme.error),
-        (7, theme.error),
-        (8, theme.debug),
-        (9, theme.url),
-        (10, theme.info),
-        (11, theme.address),
-        (12, theme.warn),
+        (0, theme.bracket_colors()[0]),
+        (1, theme.bracket_colors()[1]),
+        (2, theme.bracket_colors()[2]),
+        (3, theme.bracket_colors()[3]),
+        (4, theme.bracket_colors()[4]),
+        (5, theme.bracket_colors()[5]),
+        (7, theme.bracket_colors()[5]),
+        (8, theme.bracket_colors()[4]),
+        (9, theme.bracket_colors()[3]),
+        (10, theme.bracket_colors()[2]),
+        (11, theme.bracket_colors()[1]),
+        (12, theme.bracket_colors()[0]),
     ] {
         assert_eq!(snapshot.lines[0].cells[position].foreground, color);
     }
@@ -112,11 +160,13 @@ fn six_nested_pairs_share_depth_colors_and_unmatched_delimiters_stay_plain() {
 fn quoted_delimiters_and_complete_urls_paths_are_not_recolored_as_brackets() {
     let theme = Theme::default();
     let (_, snapshot) = screen(
-        "'(quoted[words])' \"{also quoted}\" \
+        "'(quoted[words])' \"{also quoted}\" `quoted (words)` 'it\\'s (quoted)' \
          https://example.com/a(b)?enabled=true /tmp/[draft] user+tag@example.com",
     );
     assert_token(&snapshot, 0, "'(quoted[words])'", theme.foreground);
     assert_token(&snapshot, 0, "\"{also quoted}\"", theme.foreground);
+    assert_token(&snapshot, 0, "`quoted (words)`", theme.foreground);
+    assert_token(&snapshot, 0, "'it\\'s (quoted)'", theme.foreground);
     assert_token(
         &snapshot,
         0,
@@ -141,15 +191,15 @@ fn semantic_tokens_and_matching_pairs_follow_soft_wrap_and_column_reflow() {
             let live = terminal.snapshot();
             assert!(live.history_size > 0);
             assert_eq!(live.display_offset, 0);
-            assert_token(&live, 0, "]", theme.address);
-            assert_token(&live, 0, ")", theme.warn);
+            assert_token(&live, 0, "]", theme.bracket_colors()[1]);
+            assert_token(&live, 0, ")", theme.bracket_colors()[0]);
         }
         terminal.scroll(16);
         let snapshot = terminal.snapshot();
         let visible: String = snapshot
             .lines
             .iter()
-            .flat_map(|line| &line.cells)
+            .flat_map(|line| line.cells.iter())
             .map(|cell| cell.text.as_str())
             .collect();
         assert!(
@@ -158,10 +208,10 @@ fn semantic_tokens_and_matching_pairs_follow_soft_wrap_and_column_reflow() {
         );
         assert!(snapshot.lines[0].wrapped);
         for (offset, text, color) in [
-            (0, "(", theme.warn),
-            (1, "[", theme.address),
-            (12, "]", theme.address),
-            (13, ")", theme.warn),
+            (0, "(", theme.bracket_colors()[0]),
+            (1, "[", theme.bracket_colors()[1]),
+            (12, "]", theme.bracket_colors()[1]),
+            (13, ")", theme.bracket_colors()[0]),
         ] {
             let cell = visible_cell(&snapshot, offset);
             assert_eq!(cell.text, text);
@@ -192,7 +242,12 @@ fn real_line_breaks_do_not_join_brackets_or_partial_keywords() {
 fn overwritten_text_theme_changes_and_switches_do_not_reuse_stale_colors() {
     let mut terminal = Terminal::new(40, 3, 16);
     terminal.feed(b"(word) --verbose true");
-    assert_token(&terminal.snapshot(), 0, "(", Theme::default().warn);
+    assert_token(
+        &terminal.snapshot(),
+        0,
+        "(",
+        Theme::default().bracket_colors()[0],
+    );
     terminal.feed(b"\r\x1b[2Kordinary prose");
     let snapshot = terminal.snapshot();
     assert_token(&snapshot, 0, "ordinary prose", Theme::default().foreground);
@@ -206,9 +261,9 @@ fn overwritten_text_theme_changes_and_switches_do_not_reuse_stale_colors() {
     };
     terminal.set_theme(theme.clone());
     let snapshot = terminal.snapshot();
-    assert_token(&snapshot, 0, "(", theme.warn);
+    assert_token(&snapshot, 0, "(", theme.bracket_colors()[0]);
     assert_token(&snapshot, 0, "--verbose", theme.debug);
-    assert_token(&snapshot, 0, "true", theme.info);
+    assert_token(&snapshot, 0, "true", theme.debug);
     terminal.set_highlight(false);
     assert_token(
         &terminal.snapshot(),
@@ -228,7 +283,7 @@ fn ansi_foreground_dim_inverse_and_hidden_cells_keep_their_presentation() {
             terminal.feed(b"\x1b[?1049h\x1b[H");
         }
         let theme = Theme {
-            warn: 0x90c060,
+            address: 0x90c060,
             ..Theme::default()
         };
         terminal.set_theme(theme.clone());
@@ -251,9 +306,15 @@ fn ansi_foreground_dim_inverse_and_hidden_cells_keep_their_presentation() {
         let snapshot = terminal.snapshot();
         assert_token(&snapshot, 0, "ROR", theme.foreground);
         assert_eq!(snapshot.lines[1].cells[1].text, "(");
-        assert_eq!(snapshot.lines[1].cells[1].foreground, theme.warn);
+        assert_eq!(
+            snapshot.lines[1].cells[1].foreground,
+            theme.bracket_colors()[0]
+        );
         assert_eq!(snapshot.lines[1].cells[3].text, ")");
-        assert_eq!(snapshot.lines[1].cells[3].foreground, theme.warn);
+        assert_eq!(
+            snapshot.lines[1].cells[3].foreground,
+            theme.bracket_colors()[0]
+        );
     }
 }
 
@@ -262,7 +323,7 @@ fn alternate_screen_highlights_pager_pages_and_restores_main_screen() {
     let theme = Theme::default();
     let mut terminal = Terminal::new(40, 3, 16);
     terminal.feed(b"(word) --verbose true");
-    assert_token(&terminal.snapshot(), 0, "(", theme.warn);
+    assert_token(&terminal.snapshot(), 0, "(", theme.bracket_colors()[0]);
     terminal.feed(b"\x1b[?1049h\x1b[HINFO startup\r\nWARN retry\r\nERROR failed");
     let alternate = terminal.snapshot();
     assert!(alternate.alternate_screen);
@@ -294,9 +355,9 @@ fn alternate_screen_highlights_pager_pages_and_restores_main_screen() {
     terminal.feed(b"\x1b[?1049l");
     let restored = terminal.snapshot();
     assert!(!restored.alternate_screen);
-    assert_token(&restored, 0, "(", theme.warn);
+    assert_token(&restored, 0, "(", theme.bracket_colors()[0]);
     assert_token(&restored, 0, "--verbose", theme.debug);
-    assert_token(&restored, 0, "true", theme.info);
+    assert_token(&restored, 0, "true", theme.debug);
 }
 
 #[test]
@@ -334,11 +395,11 @@ fn wide_and_combining_cells_do_not_shift_decoration_boundaries() {
     assert_eq!(snapshot.lines[0].cells[1].width, 0);
     assert_eq!(snapshot.lines[0].cells[3].text, "e\u{301}");
     assert_token(&snapshot, 0, "界 e\u{301}", theme.foreground);
-    assert_token(&snapshot, 0, "(", theme.warn);
-    assert_token(&snapshot, 0, "[", theme.address);
-    assert_token(&snapshot, 0, "]", theme.address);
-    assert_token(&snapshot, 0, ")", theme.warn);
-    assert_token(&snapshot, 0, "true", theme.info);
+    assert_token(&snapshot, 0, "(", theme.bracket_colors()[0]);
+    assert_token(&snapshot, 0, "[", theme.bracket_colors()[1]);
+    assert_token(&snapshot, 0, "]", theme.bracket_colors()[1]);
+    assert_token(&snapshot, 0, ")", theme.bracket_colors()[0]);
+    assert_token(&snapshot, 0, "true", theme.debug);
 }
 
 #[test]
@@ -374,6 +435,76 @@ fn docker_health_keeps_ansi_colors_and_recomputes_after_carriage_return() {
     terminal.feed(b"\r\x1b[2KUp 1 second starting not healthy unhealthyish");
     let snapshot = terminal.snapshot();
     assert_token(&snapshot, 0, "Up 1 second starting", theme.foreground);
-    assert_token(&snapshot, 0, "not healthy", theme.error);
+    assert_token(&snapshot, 0, "not healthy", theme.foreground);
     assert_token(&snapshot, 0, "unhealthyish", theme.foreground);
+}
+
+#[test]
+fn web_links_have_an_affordance_and_preserve_remote_ansi_colors() {
+    let mut terminal = Terminal::new(60, 5, 16);
+    terminal.feed(b"url https://example.com end\r\n\x1b[38;2;18;52;86mhttps://example.org\x1b[0m\r\nftp://example.com user@example.com");
+    let snapshot = terminal.snapshot();
+    assert!(
+        snapshot.lines[0].cells[4..23]
+            .iter()
+            .all(|cell| cell.underline)
+    );
+    assert!(!snapshot.lines[0].cells[0].underline);
+    assert!(
+        snapshot.lines[1].cells[..19]
+            .iter()
+            .all(|cell| cell.underline && cell.foreground == 0x123456)
+    );
+    assert!(snapshot.lines[2].cells.iter().all(|cell| !cell.underline));
+    terminal.feed(b"\x1b[?1049hhttps://example.com");
+    assert!(
+        terminal.snapshot().lines[0]
+            .cells
+            .iter()
+            .all(|cell| !cell.underline)
+    );
+    terminal.feed(b"\x1b[?1049l\x1b[H\x1b[2Kplain");
+    assert!(
+        terminal.snapshot().lines[0]
+            .cells
+            .iter()
+            .all(|cell| !cell.underline)
+    );
+}
+
+#[test]
+fn link_underlines_follow_wrapping_and_do_not_depend_on_color_equality() {
+    let mut terminal = Terminal::new(20, 5, 16);
+    let theme = Theme {
+        url: Theme::default().info,
+        ..Theme::default()
+    };
+    terminal.set_theme(theme);
+    terminal.feed(b"INFO HTTPS://example.com/long/path end");
+    for width in [20, 40, 18] {
+        terminal.scroll_to_bottom();
+        terminal.resize(width, 5);
+        terminal.scroll(16);
+        let snapshot = terminal.snapshot();
+        let cells: Vec<_> = snapshot
+            .lines
+            .iter()
+            .flat_map(|line| line.cells.iter())
+            .collect();
+        assert!(cells[..5].iter().all(|cell| !cell.underline));
+        assert!(
+            cells[5..34].iter().all(|cell| cell.underline),
+            "width {width}"
+        );
+        assert!(cells[34..].iter().all(|cell| !cell.underline));
+    }
+    terminal.set_highlight(false);
+    assert!(
+        terminal
+            .snapshot()
+            .lines
+            .iter()
+            .flat_map(|line| line.cells.iter())
+            .all(|cell| !cell.underline)
+    );
 }

@@ -748,3 +748,19 @@ connections-ssh-fingerprint-tunnel =
 connections-ssh-route-help = The SSH server reaches the target host and port. TLS still verifies the target hostname.
 connections-ssh-route-unavailable = The SSH connection for this tunnel is unavailable. Edit the tunnel settings before reconnecting.
 connections-ssh-route-in-use = This SSH connection is used by other connections. Change their tunnel settings before deleting it.
+
+connections-ssh-production-protection = SSH production protection
+
+connections-production-description = Disables client shell injection, resource sampling and automatic service discovery. Requires multi-line paste review. Existing sessions must reconnect.
+
+connections-production-blocked = This action is disabled by SSH production protection.
+
+connections-production = Production
+
+connections-production-pending = Protection change pending — reconnect to apply
+
+connections-production-tunnel-restart = Applying the protection change for { $name } will rebuild its shared SSH tunnels and interrupt connections using them. Continue?
+
+connections-production-ports-disabled = Production protection disables automatic forwarding and service discovery. Configured tunnels remain available.
+
+connections-production-reconnect-required = Reconnect required

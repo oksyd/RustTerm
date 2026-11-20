@@ -13,8 +13,8 @@ use rustterm::i18n::messages as i18n_key;
 use rustterm::i18n::tr;
 use rustterm::session::{Session, SessionState};
 
-#[derive(Clone, Copy)]
-enum PaneMenuAction {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PaneMenuAction {
     Split(Axis),
     Zoom,
     Disconnect,
@@ -66,6 +66,9 @@ impl TerminalView {
 
     pub(super) fn feedback_text(&self) -> Option<String> {
         let mut notes = Vec::new();
+        if self.protection_pending() {
+            notes.push(tr(i18n_key::CONNECTIONS_PRODUCTION_PENDING).into());
+        }
         if let Some(error) = &self.error {
             notes.push(error.render());
         }
@@ -114,7 +117,7 @@ impl TerminalView {
 
     pub(super) fn chrome_blocked(&self, cx: &App) -> bool {
         self.input_composing(cx)
-            || self.paste_pending
+            || self.paste_preview.is_some()
             || self.window_state.prompts.is_busy()
             || self.window_state.prompts.is_blocked()
     }
@@ -128,7 +131,7 @@ impl TerminalView {
         } else {
             self.menu_open = true;
             self.context_menu_position = None;
-            self.menu_index = 0;
+            self.selected_pane_action = PaneMenuAction::Split(Axis::Horizontal);
             self.menu_scroll.scroll_to_item(0);
             cx.emit(PaneEvent::Focused(self.index));
             self.menu_focus.focus(window);
@@ -139,6 +142,7 @@ impl TerminalView {
     pub(super) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
         self.context_menu_position = None;
+        self.context_block = None;
         if !self.window_state.is_locked() {
             self.focus.focus(window);
         }
@@ -185,6 +189,9 @@ impl TerminalView {
                 "",
             ),
         ] {
+            if action == PreviousFailedCommand && !self.menu_action_enabled(action) {
+                continue;
+            }
             items.push(PaneMenuItem {
                 action,
                 label,
@@ -261,9 +268,15 @@ impl TerminalView {
     fn menu_action_enabled(&self, action: PaneMenuAction) -> bool {
         match action {
             PaneMenuAction::Split(axis) => self.can_split(axis),
+            PaneMenuAction::PreviousFailedCommand => {
+                !self.show_final_alternate
+                    && self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.shell.can_navigate_to_previous_failure)
+            }
             PaneMenuAction::PreviousCommand
             | PaneMenuAction::NextCommand
-            | PaneMenuAction::PreviousFailedCommand
             | PaneMenuAction::SelectCommandOutput => {
                 !self.show_final_alternate
                     && self.snapshot.as_ref().is_some_and(|snapshot| {
@@ -320,7 +333,9 @@ impl TerminalView {
             return self.context_menu_key(event, window, cx);
         }
         let items = self.menu_items();
-        self.menu_index = self.menu_index.min(items.len() - 1);
+        let selected = items
+            .iter()
+            .position(|item| item.action == self.selected_pane_action);
         match event.keystroke.key.as_str() {
             "escape" => self.close_menu(window, cx),
             "up" | "down" | "tab" | "home" | "end" => {
@@ -328,16 +343,18 @@ impl TerminalView {
                     .iter()
                     .map(|item| self.menu_action_enabled(item.action))
                     .collect();
-                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
-                    self.menu_index = index;
+                if let Some(index) =
+                    ui::popup::next_index(event, selected.unwrap_or(usize::MAX), &enabled)
+                {
+                    self.selected_pane_action = items[index].action;
+                    self.menu_scroll.scroll_to_item(index);
                 }
             }
-            "enter" | "return" | "space" => {
-                self.menu_action(items[self.menu_index].action, window, cx)
+            "enter" | "return" | "space" if selected.is_some() => {
+                self.menu_action(self.selected_pane_action, window, cx);
             }
             _ => {}
         }
-        self.menu_scroll.scroll_to_item(self.menu_index);
         cx.stop_propagation();
         window.prevent_default();
         cx.notify();
@@ -412,11 +429,14 @@ impl TerminalView {
                     ("search-open", index),
                     Icon::Search,
                     if !interactive {
-                        i18n_key::COMMON_FINISH_THE_CURRENT_INPUT_OR_DIALOG_FIRST
+                        tr(i18n_key::COMMON_FINISH_THE_CURRENT_INPUT_OR_DIALOG_FIRST).to_owned()
                     } else if !self.visible {
-                        i18n_key::COMMON_SHOW_THE_TERMINAL_TO_SEARCH_ITS_OUTPUT
+                        tr(i18n_key::COMMON_SHOW_THE_TERMINAL_TO_SEARCH_ITS_OUTPUT).to_owned()
                     } else {
-                        i18n_key::TERMINAL_FIND_OUTPUT_CTRL_SHIFT_F
+                        self.settings.shortcuts.hint(
+                            rustterm::config::ShortcutAction::Search,
+                            i18n_key::WORKSPACE_SEARCH_OUTPUT,
+                        )
                     },
                     terminal_visible,
                 )
@@ -472,6 +492,11 @@ impl TerminalView {
         match tool {
             SessionTool::Files if self.sftp_client().is_none() => {
                 Some(i18n_key::COMMON_SFTP_IS_NOT_AVAILABLE_FOR_THIS_CONNECTION)
+            }
+            SessionTool::Resources
+                if self.production_protected() && self.kind == TerminalKind::Ssh =>
+            {
+                Some(i18n_key::CONNECTIONS_PRODUCTION_BLOCKED)
             }
             SessionTool::Resources
                 if self.kind == TerminalKind::Ssh
@@ -570,33 +595,36 @@ impl TerminalView {
             .track_scroll(&self.menu_scroll)
             .track_focus(&self.menu_focus)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for (index, item) in items.into_iter().enumerate() {
+        for item in items {
             let action = item.action;
             let enabled = self.menu_action_enabled(action);
-            popup =
-                popup.child(
-                    ui::popup::row(("pane-menu-item", index), enabled, index == self.menu_index)
-                        .on_mouse_move(cx.listener(move |this, _, _, cx| {
-                            if enabled && this.menu_index != index {
-                                this.menu_index = index;
-                                cx.notify();
-                            }
-                        }))
-                        .child(ui::icon(item.icon))
-                        .child(div().flex_1().min_w_0().truncate().child(tr(item.label)))
-                        .when(width >= 290., |d| {
-                            d.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(9.))
-                                    .text_color(rgb(ui::colors().muted))
-                                    .child(item.shortcut),
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.menu_action(action, window, cx)
-                        })),
-                );
+            popup = popup.child(
+                ui::popup::row(
+                    (item.label, self.index),
+                    enabled,
+                    action == self.selected_pane_action,
+                )
+                .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                    if enabled && this.selected_pane_action != action {
+                        this.selected_pane_action = action;
+                        cx.notify();
+                    }
+                }))
+                .child(ui::icon(item.icon))
+                .child(div().flex_1().min_w_0().truncate().child(tr(item.label)))
+                .when(width >= 290., |d| {
+                    d.child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(9.))
+                            .text_color(rgb(ui::colors().muted))
+                            .child(item.shortcut),
+                    )
+                })
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.menu_action(action, window, cx)),
+                ),
+            );
         }
         Some(
             div()
@@ -651,20 +679,14 @@ pub(super) fn pane_button(
 ) -> gpui::Stateful<gpui::Div> {
     let label = match action {
         "more" => i18n_key::WORKSPACE_PANE_ACTIONS,
-        "search-open" => i18n_key::TERMINAL_FIND_OUTPUT_CTRL_SHIFT_F,
         "live" => i18n_key::TERMINAL_RETURN_TO_LIVE_CONNECTION,
         "feedback-dismiss" => i18n_key::TERMINAL_DISMISS_NOTICE,
-        "bottom" => i18n_key::TERMINAL_SCROLL_TO_BOTTOM_AND_RESUME_FOLLOWING,
         "prev" => i18n_key::TERMINAL_PREVIOUS_MATCH,
         "next" => i18n_key::TERMINAL_NEXT_MATCH,
         "search-close" => i18n_key::TERMINAL_CLOSE_SEARCH_ESCAPE,
         _ => i18n_key::TERMINAL_TERMINAL_ACTION,
     };
-    let style = match action {
-        "bottom" => ui::ButtonStyle::Primary,
-        _ => ui::ButtonStyle::Neutral,
-    };
-    ui::styled_icon_button((action, pane), glyph, label, style)
+    ui::icon_button((action, pane), glyph, label)
         .w_auto()
         .min_w(px(24.))
         .px(px(4.))

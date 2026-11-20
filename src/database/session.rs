@@ -19,8 +19,22 @@ pub(super) enum TransactionAction {
     Rollback,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum QueryRows {
+    Display(usize),
+    Table(usize),
+}
+
+impl QueryRows {
+    pub(super) fn limit(self) -> usize {
+        match self {
+            Self::Display(limit) | Self::Table(limit) => limit,
+        }
+    }
+}
+
 pub(super) enum Command {
-    Sql { sql: String, row_limit: usize },
+    Sql { sql: String, rows: QueryRows },
     Apply(Vec<table::GuardedStatement>),
     Transaction(TransactionAction),
 }
@@ -64,7 +78,7 @@ impl Connection {
     async fn execute(
         &mut self,
         sql: &str,
-        limit: usize,
+        rows: QueryRows,
         cancel: &CancellationToken,
         marker: &str,
     ) -> Result<QueryOutput> {
@@ -78,11 +92,12 @@ impl Connection {
             &tagged
         };
         let start = Instant::now();
+        let limit = rows.limit();
         let results = match self {
             Self::Mysql(connection) => connection.execute(sql, limit).await?,
             Self::ClickHouse(connection) => connection.execute(sql, limit, cancel, marker).await?,
             Self::Postgres(connection) => connection.execute(sql, limit).await?,
-            Self::Sqlite(connection) => connection.execute(sql, limit, cancel.clone()).await?,
+            Self::Sqlite(connection) => connection.execute(sql, rows, cancel.clone()).await?,
         };
         Ok(QueryOutput {
             results,
@@ -125,7 +140,7 @@ impl Connection {
             return Err(DatabaseError::TransactionsUnsupported);
         }
         match command {
-            Command::Sql { sql, row_limit } => self.execute(sql, *row_limit, cancel, marker).await,
+            Command::Sql { sql, rows } => self.execute(sql, *rows, cancel, marker).await,
             Command::Transaction(action) => {
                 let sql = match action {
                     TransactionAction::Begin if transaction == TransactionStatus::Idle => "BEGIN",
@@ -135,7 +150,8 @@ impl Connection {
                     TransactionAction::Rollback => "ROLLBACK",
                     _ => return Err(DatabaseError::TransactionState),
                 };
-                self.execute(sql, 1, cancel, marker).await
+                self.execute(sql, QueryRows::Display(1), cancel, marker)
+                    .await
             }
             Command::Apply(statements) => {
                 let nested = match transaction {
@@ -157,14 +173,17 @@ impl Connection {
                 } else {
                     "COMMIT".into()
                 };
-                self.execute(&begin, 1, cancel, marker).await?;
+                self.execute(&begin, QueryRows::Display(1), cancel, marker)
+                    .await?;
                 let start = Instant::now();
                 let result = async {
                     for statement in statements {
                         if cancel.is_cancelled() {
                             return Err(DatabaseError::Cancelled);
                         }
-                        let output = self.execute(&statement.sql, 1, cancel, marker).await?;
+                        let output = self
+                            .execute(&statement.sql, QueryRows::Display(1), cancel, marker)
+                            .await?;
                         let affected: u64 = output
                             .results
                             .iter()
@@ -174,7 +193,8 @@ impl Connection {
                             return Err(DatabaseError::Conflict);
                         }
                     }
-                    self.execute(&commit, 1, cancel, marker).await?;
+                    self.execute(&commit, QueryRows::Display(1), cancel, marker)
+                        .await?;
                     Ok(QueryOutput {
                         results: Vec::new(),
                         elapsed: start.elapsed(),
@@ -188,11 +208,11 @@ impl Connection {
                     } else {
                         "ROLLBACK".into()
                     };
-                    self.execute(&rollback, 1, &cleanup, marker)
+                    self.execute(&rollback, QueryRows::Display(1), &cleanup, marker)
                         .await
                         .map_err(|_| DatabaseError::TransactionRecovery)?;
                     if nested {
-                        self.execute(&commit, 1, &cleanup, marker)
+                        self.execute(&commit, QueryRows::Display(1), &cleanup, marker)
                             .await
                             .map_err(|_| DatabaseError::TransactionRecovery)?;
                     }
@@ -539,7 +559,7 @@ mod tests {
     ) -> TransactionStatus {
         let command = Command::Sql {
             sql: text.into(),
-            row_limit: 1,
+            rows: QueryRows::Display(1),
         };
         let result = if success {
             Ok(QueryOutput {

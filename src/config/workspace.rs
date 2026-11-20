@@ -148,3 +148,22 @@ pub struct QuickCommand {
     pub name: String,
     pub command: String,
 }
+
+/// Presentation preferences, independent of credentials and RDP negotiation defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RdpViewMode {
+    #[default]
+    Fit,
+    Dynamic,
+    Actual,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RdpViewState {
+    pub mode: RdpViewMode,
+    /// Fraction of available pan travel on each axis, normalized to u16::MAX.
+    pub pan: (u16, u16),
+    pub toolbar_pinned: bool,
+}

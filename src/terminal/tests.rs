@@ -1,4 +1,78 @@
 use super::*;
+
+#[test]
+fn fragmented_untrusted_output_keeps_snapshots_valid_during_resize_and_search() {
+    let fragments: &[&[u8]] = &[
+        b"https://google.com\r\n",
+        "中文🙂e\u{301}".as_bytes(),
+        b"\xff\xfe\xf0\x80\x80",
+        b"\x1b[999999999999999999999;1H\x1b[2K",
+        b"\x1b[38;2;255;0;127mcolor\x1b[0m",
+        b"\x1b]133;A\x07$ \x1b]133;B\x07test\r\n\x1b]133;C\x07",
+        b"\x1b]133;D;0\x07\x1b[?1049halternate\x1b[?1049l",
+        b"\x1b[2A\rprogress\x1b[0K\r\n",
+    ];
+    let mut terminal = Terminal::new(40, 8, 80);
+    for index in 0..128 {
+        let fragment = fragments[index % fragments.len()];
+        for chunk in fragment.chunks(1 + index % 7) {
+            terminal.feed(chunk);
+        }
+        terminal.resize(1 + (index % 40) as u16, 1 + (index % 12) as u16);
+        terminal.start_search("o".into(), false);
+        terminal.search_step(16);
+        terminal.search_next(index % 2 == 0);
+        let snapshot = terminal.snapshot();
+        assert_eq!(snapshot.lines.len(), usize::from(snapshot.rows));
+        assert!(
+            snapshot
+                .lines
+                .iter()
+                .all(|line| line.cells.len() == usize::from(snapshot.columns))
+        );
+        if snapshot.cursor.visible {
+            assert!(snapshot.cursor.row < usize::from(snapshot.rows));
+            assert!(snapshot.cursor.column < usize::from(snapshot.columns));
+        }
+    }
+}
+
+#[test]
+fn progress_redraws_hide_numbers_until_the_command_finishes() {
+    let mut terminal = Terminal::new(32, 8, 100);
+    terminal.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07pull\r\n\x1b]133;C\x07one 0%\r\ntwo 0%\r\n");
+    for percent in [10, 20] {
+        terminal.feed(
+            format!("\x1b[2A\r\x1b[2Kone {percent}%\r\n\x1b[2Ktwo {percent}%\r\n").as_bytes(),
+        );
+    }
+    let snapshot = terminal.snapshot();
+    assert_eq!(snapshot.lines[0].number, Some(1));
+    assert_eq!(snapshot.lines[1].number, None);
+    assert_eq!(snapshot.lines[2].number, None);
+    assert!(snapshot.lines[1].received_at.is_some());
+    terminal.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    let snapshot = terminal.snapshot();
+    assert_eq!(snapshot.lines[1].number, Some(2));
+    assert_eq!(snapshot.lines[2].number, Some(3));
+    assert_eq!(snapshot.lines[4].number, None);
+}
+
+#[test]
+fn prompt_edits_and_output_blank_lines_keep_their_numbers() {
+    let mut terminal = Terminal::new(32, 8, 100);
+    terminal.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07a\r$ b\r$ c\r\n\x1b]133;C\x07first\r\n\r\nlast\r\n\x1b]133;D;0\x07");
+    let snapshot = terminal.snapshot();
+    assert_eq!(
+        snapshot.lines[..4]
+            .iter()
+            .map(|line| line.number)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(2), Some(3), Some(4)]
+    );
+    assert_eq!(snapshot.lines[4].number, None);
+}
+
 fn text(term: &Terminal) -> Vec<String> {
     term.snapshot()
         .lines
@@ -377,6 +451,269 @@ fn finish_search(t: &mut Terminal) -> SearchStatus {
 }
 
 #[test]
+fn fractional_history_scroll_moves_subrows_and_retains_the_exposed_bottom_row() {
+    let mut t = Terminal::new(12, 3, 100);
+    for row in 0..12 {
+        t.feed(format!("line {row:02}\r\n").as_bytes());
+    }
+    t.feed(b"prompt");
+    t.start_search("prompt".into(), true);
+    finish_search(&mut t);
+    let original = text(&t)[0].clone();
+    t.scroll_fractional(0.25);
+    let s = t.snapshot();
+    assert_eq!(s.display_offset, 1);
+    assert_eq!(s.scroll_fraction, 0.75);
+    assert_eq!(s.lines.len(), 4);
+    assert_eq!(
+        s.lines[3].cells[0].search_highlight,
+        Some(SearchHighlight::Match)
+    );
+    assert_eq!(text(&t)[1], original);
+    t.begin_selection(1, 3, SelectionKind::Word);
+    assert_eq!(t.selected_text().as_deref(), Some("prompt"));
+    for _ in 0..3 {
+        t.scroll_fractional(0.25);
+    }
+    assert_eq!(t.snapshot().display_offset, 1);
+    assert_eq!(t.snapshot().scroll_fraction, 0.);
+    t.scroll_fractional(-0.125);
+    assert_eq!(t.snapshot().scroll_fraction, 0.125);
+    let top = text(&t)[0].clone();
+    t.feed(b"new output\r\n");
+    assert_eq!(text(&t)[0], top);
+    assert_eq!(t.snapshot().scroll_fraction, 0.125);
+    t.scroll_fractional(-1000.);
+    assert_eq!(t.snapshot().display_offset, 0);
+    assert_eq!(t.snapshot().scroll_fraction, 0.);
+    t.scroll_fractional(f64::NAN);
+    assert_eq!(t.snapshot().display_offset, 0);
+    t.scroll_fractional(0.5);
+    t.feed(b"\x1b[?1049h");
+    assert_eq!(t.snapshot().scroll_fraction, 0.);
+}
+
+#[test]
+fn budgeted_search_makes_bounded_progress_without_losing_matches() {
+    let mut terminal = Terminal::new(20, 3, 100);
+    for _ in 0..30 {
+        terminal.feed(b"needle\r\n");
+    }
+    terminal.start_search("needle".into(), true);
+    let status = terminal.search_step_budgeted(256, std::time::Duration::ZERO);
+    assert_eq!(status.scanned_rows, 1);
+    assert!(!status.complete);
+    assert_eq!(finish_search(&mut terminal).matches, 30);
+}
+
+#[test]
+fn unused_grid_cells_cannot_form_a_drag_selection() {
+    for output in [b"".as_slice(), b"alpha\r\n  beta\r\n$ "] {
+        for (start, end) in [((10, 5), (20, 7)), ((15, 0), (20, 0))] {
+            let mut terminal = Terminal::new(24, 8, 16);
+            terminal.feed(output);
+            terminal.begin_selection(start.0, start.1, SelectionKind::Character);
+            terminal.update_selection(end.0, end.1);
+            let snapshot = terminal.snapshot();
+            assert!(!snapshot.has_selection, "{output:?}: {start:?} to {end:?}");
+            assert_eq!(terminal.selected_text(), None);
+            assert!(
+                snapshot
+                    .lines
+                    .iter()
+                    .all(|line| line.cells.iter().all(|cell| !cell.selected))
+            );
+        }
+    }
+    for kind in [
+        SelectionKind::Word,
+        SelectionKind::Enclosed,
+        SelectionKind::Line,
+    ] {
+        let mut terminal = Terminal::new(24, 8, 16);
+        terminal.feed(b"alpha");
+        terminal.begin_selection(15, 5, kind);
+        assert_eq!(terminal.selected_text(), None);
+        assert!(!terminal.snapshot().has_selection);
+    }
+}
+
+#[test]
+fn dragging_into_unused_space_stops_at_content_and_preserves_output_whitespace() {
+    let mut terminal = Terminal::new(24, 8, 16);
+    terminal.feed(b"one   \r\n\r\n  two  \r\n$ ");
+    terminal.begin_selection(0, 0, SelectionKind::Character);
+    terminal.update_selection(23, 7);
+    assert_eq!(
+        terminal.selected_text().as_deref(),
+        Some("one   \n\n  two  \n$ ")
+    );
+    let snapshot = terminal.snapshot();
+    for (row, length) in [(0, 6), (1, 1), (2, 7), (3, 2), (4, 0), (7, 0)] {
+        assert!(
+            snapshot.lines[row].cells[..length]
+                .iter()
+                .all(|cell| cell.selected)
+        );
+        assert!(
+            snapshot.lines[row].cells[length..]
+                .iter()
+                .all(|cell| !cell.selected)
+        );
+    }
+    terminal.begin_selection(20, 7, SelectionKind::Character);
+    terminal.update_selection(10, 6);
+    assert_eq!(terminal.selected_text(), None);
+    terminal.update_selection(1, 0);
+    assert_eq!(
+        terminal.selected_text().as_deref(),
+        Some("ne   \n\n  two  \n$ ")
+    );
+    terminal.update_selection(10, 6);
+    assert_eq!(terminal.selected_text(), None);
+}
+
+#[test]
+fn erasing_selected_spaces_retires_the_selection_even_when_cells_look_unchanged() {
+    let mut terminal = Terminal::new(24, 6, 16);
+    terminal.feed(b"      ");
+    terminal.begin_selection(2, 0, SelectionKind::Character);
+    terminal.update_selection(5, 0);
+    assert_eq!(terminal.selected_text().as_deref(), Some("    "));
+    terminal.feed(b"\r\x1b[2K");
+    assert!(!terminal.snapshot().has_selection);
+    assert!(terminal.snapshot().selection_invalidated);
+    assert_eq!(terminal.selected_text(), None);
+}
+
+#[test]
+fn content_boundaries_follow_erase_insert_delete_and_reflow() {
+    for (output, expected) in [
+        ("ab   \r\x1b[2C\x1b[K", Some("ab")),
+        ("ab   \r\x1b[2C\x1b[P", Some("ab  ")),
+        ("  \r\x1b[2@", Some("    ")),
+        ("ab   \r\x1b[2C\x1b[5X", Some("ab")),
+        ("x\n\n\rend", Some("x\n\nend")),
+        ("ab   \x1b[2J\x1b[3J", None),
+        ("ab   \x1bc", None),
+    ] {
+        let mut terminal = Terminal::new(24, 8, 16);
+        terminal.feed(output.as_bytes());
+        terminal.select_all();
+        assert_eq!(terminal.selected_text().as_deref(), expected, "{output:?}");
+    }
+    let mut terminal = Terminal::new(24, 8, 16);
+    terminal.feed(b"retained history\x1b[2J");
+    terminal.begin_selection(2, 2, SelectionKind::Character);
+    terminal.update_selection(20, 7);
+    assert_eq!(terminal.selected_text(), None);
+    assert!(!terminal.snapshot().has_selection);
+    let mut terminal = Terminal::new(8, 4, 16);
+    terminal.feed("a中  \r\n  ".as_bytes());
+    for columns in [12, 7, 8] {
+        terminal.resize(columns, 4);
+        terminal.select_all();
+        assert_eq!(terminal.selected_text().as_deref(), Some("a中  \n  "));
+        let snapshot = terminal.snapshot();
+        assert!(
+            snapshot.lines[0].cells[..5]
+                .iter()
+                .all(|cell| cell.selected)
+        );
+        assert!(
+            snapshot.lines[0].cells[5..]
+                .iter()
+                .all(|cell| !cell.selected)
+        );
+        assert!(
+            snapshot.lines[1].cells[2..]
+                .iter()
+                .all(|cell| !cell.selected)
+        );
+        assert!(
+            snapshot.lines[2..]
+                .iter()
+                .all(|line| line.cells.iter().all(|cell| !cell.selected))
+        );
+    }
+}
+
+#[test]
+fn single_press_records_a_drag_origin_without_selecting_text_or_blank_cells() {
+    for (column, row) in [(1, 0), (5, 0), (16, 0), (2, 3)] {
+        let mut terminal = Terminal::new(24, 5, 16);
+        terminal.feed(b"alpha beta");
+        terminal.begin_selection(0, 0, SelectionKind::Word);
+        assert_eq!(terminal.selected_text().as_deref(), Some("alpha"));
+        terminal.begin_selection(column, row, SelectionKind::Character);
+        for _ in 0..2 {
+            let snapshot = terminal.snapshot();
+            assert!(!snapshot.has_selection, "press at {column}, {row}");
+            assert!(!snapshot.selection_invalidated);
+            assert!(
+                snapshot
+                    .lines
+                    .iter()
+                    .all(|line| line.cells.iter().all(|cell| !cell.selected))
+            );
+            assert_eq!(terminal.selected_text(), None);
+            // Mouse movement inside the same cell and mouse-up must not create a selection.
+            terminal.update_selection(column, row);
+        }
+        terminal.clear_selection();
+        assert!(!terminal.snapshot().has_selection);
+    }
+}
+
+#[test]
+fn pending_drag_anchors_follow_scrolling_and_reject_overwritten_or_evicted_text() {
+    let mut terminal = Terminal::new(24, 2, 16);
+    terminal.feed(b"alpha beta\r\nlive");
+    terminal.begin_selection(0, 0, SelectionKind::Character);
+    terminal.feed(b"\r\nnext");
+    assert!(!terminal.snapshot().has_selection);
+    terminal.scroll(1);
+    terminal.update_selection(4, 0);
+    assert_eq!(terminal.selected_text().as_deref(), Some("alpha"));
+
+    for change in [
+        b"\rX".as_slice(),
+        b"\r\nnext\r\nlast\x1b[3J",
+        b"\x1b[?1049h",
+    ] {
+        let mut terminal = Terminal::new(24, 2, 16);
+        terminal.feed(b"alpha beta");
+        terminal.begin_selection(0, 0, SelectionKind::Character);
+        terminal.feed(change);
+        terminal.update_selection(4, 0);
+        assert_eq!(terminal.selected_text(), None);
+        assert!(!terminal.snapshot().has_selection);
+        assert!(!terminal.snapshot().selection_invalidated);
+    }
+}
+
+#[test]
+fn pending_drag_validates_both_halves_of_wide_glyphs_and_cancels_on_reflow() {
+    for column in [0, 1] {
+        let mut terminal = Terminal::new(8, 4, 16);
+        terminal.feed("prefix(中文)".as_bytes());
+        terminal.begin_selection(column, 1, SelectionKind::Character);
+        assert!(!terminal.snapshot().has_selection);
+        terminal.feed("\x1b[2;1H换".as_bytes());
+        terminal.update_selection(3, 1);
+        assert_eq!(terminal.selected_text(), None);
+        assert!(!terminal.snapshot().selection_invalidated);
+    }
+    let mut terminal = Terminal::new(8, 4, 16);
+    terminal.feed(b"alpha beta");
+    terminal.begin_selection(0, 0, SelectionKind::Character);
+    terminal.resize(10, 4);
+    terminal.update_selection(4, 0);
+    assert_eq!(terminal.selected_text(), None);
+    assert!(!terminal.snapshot().selection_invalidated);
+}
+
+#[test]
 fn selection_copies_soft_wrap_wide_characters_and_explicit_spaces() {
     let mut t = Terminal::new(4, 3, 100);
     t.feed(b"abcdef");
@@ -387,6 +724,7 @@ fn selection_copies_soft_wrap_wide_characters_and_explicit_spaces() {
     t.feed(b"\x1b[H\x1b[2J");
     t.feed("中  ".as_bytes());
     t.begin_selection(1, 0, SelectionKind::Character);
+    t.update_selection(0, 0);
     assert_eq!(t.selected_text().as_deref(), Some("中"));
     t.begin_selection(2, 0, SelectionKind::Character);
     t.update_selection(3, 0);
@@ -417,27 +755,60 @@ fn reverse_character_selection_includes_both_endpoints_and_reverses_again() {
 }
 
 #[test]
+fn select_all_excludes_unused_bottom_rows_without_dropping_output_blank_lines() {
+    for (output, expected) in [
+        ("", None),
+        ("one", Some("one")),
+        ("one\r\n\r\nlast\r\n", Some("one\n\nlast\n")),
+        ("one\r\n\r\nlast\x1b[H", Some("one\n\nlast")),
+    ] {
+        let mut terminal = Terminal::new(24, 10, 100);
+        terminal.feed(output.as_bytes());
+        terminal.select_all();
+        assert_eq!(terminal.selected_text().as_deref(), expected);
+    }
+}
+
+#[test]
 fn select_all_includes_retained_history_and_stays_inside_the_active_screen() {
     let mut terminal = Terminal::new(4, 2, 10);
     terminal.feed(b"one\r\ntwo\r\nlast");
     terminal.select_all();
     assert!(terminal.snapshot().has_selection);
-    assert_eq!(
-        terminal.selected_text().as_deref(),
-        Some("one \ntwo \nlast")
-    );
+    assert_eq!(terminal.selected_text().as_deref(), Some("one\ntwo\nlast"));
     terminal.feed(b"\x1b[?1049h\x1b[HALT");
     terminal.select_all();
-    assert_eq!(terminal.selected_text().as_deref(), Some("ALT \n    "));
+    assert_eq!(terminal.selected_text().as_deref(), Some("ALT"));
     terminal.feed(b"\x1b[?1049l");
     terminal.select_all();
-    assert_eq!(
-        terminal.selected_text().as_deref(),
-        Some("one \ntwo \nlast")
-    );
+    assert_eq!(terminal.selected_text().as_deref(), Some("one\ntwo\nlast"));
     terminal.clear_selection();
     assert!(!terminal.snapshot().has_selection);
 }
+#[test]
+fn selection_copies_text_without_grid_padding_and_preserves_output_blank_lines() {
+    let mut terminal = Terminal::new(24, 6, 100);
+    terminal.feed("first\r\n\r\n  中文e\u{301}\r\nlast".as_bytes());
+    terminal.begin_selection(0, 0, SelectionKind::Character);
+    terminal.update_selection(3, 3);
+    assert_eq!(
+        terminal.selected_text().as_deref(),
+        Some("first\n\n  中文e\u{301}\nlast")
+    );
+}
+
+#[test]
+fn selection_preserves_spaces_at_soft_wraps_without_adding_line_breaks() {
+    let mut terminal = Terminal::new(8, 4, 100);
+    terminal.feed("abc     中文e\u{301}f\r\nend".as_bytes());
+    terminal.begin_selection(0, 0, SelectionKind::Character);
+    terminal.update_selection(2, 2);
+    assert_eq!(
+        terminal.selected_text().as_deref(),
+        Some("abc     中文e\u{301}f\nend")
+    );
+}
+
 #[test]
 fn selection_copies_tab_spans_as_visual_spaces() {
     let mut t = Terminal::new(16, 3, 100);
@@ -505,11 +876,17 @@ fn selection_revalidates_live_rows_after_they_scroll_into_history() {
         if overwrite {
             assert!(terminal.selected_text().is_none());
         } else {
-            assert_eq!(
-                terminal.selected_text().as_deref(),
-                Some("old   \nkeep  \nlive  ")
+            assert_eq!(terminal.selected_text().as_deref(), Some("old\nkeep\nlive"));
+            assert!(
+                snapshot.lines[0].cells[..4]
+                    .iter()
+                    .all(|cell| cell.selected)
             );
-            assert!(snapshot.lines[0].cells.iter().all(|cell| cell.selected));
+            assert!(
+                snapshot.lines[0].cells[4..]
+                    .iter()
+                    .all(|cell| !cell.selected)
+            );
             assert!(snapshot.lines[1].cells.iter().all(|cell| !cell.selected));
             terminal.feed(b"\x1b[3J");
             assert!(terminal.snapshot().selection_invalidated);
@@ -528,6 +905,32 @@ fn search_crosses_soft_wrap_and_respects_hard_breaks() {
     assert_eq!(finish_search(&mut t).matches, 0);
     t.start_search("CDE".into(), false);
     assert_eq!(finish_search(&mut t).matches, 1);
+}
+
+#[test]
+fn scrollbar_search_markers_follow_results_across_the_whole_history() {
+    let mut t = Terminal::new(12, 3, 100);
+    t.feed(b"hit hit\r\n1\r\n2\r\nhit\r\n4\r\n5");
+    t.start_search("hit".into(), true);
+    assert_eq!(t.search_step(1).matches, 2);
+    assert_eq!(&*t.snapshot().search_markers.rows, &[0]);
+    assert_eq!(finish_search(&mut t).matches, 3);
+    assert!(t.search_next(false));
+    let marks = t.snapshot().search_markers;
+    assert_eq!(&*marks.rows, &[0, 3]);
+    assert_eq!(marks.current, Some(3));
+    assert!(t.search_next(false));
+    assert_eq!(t.snapshot().search_markers.current, Some(0));
+    t.feed(b"\r\nhit");
+    finish_search(&mut t);
+    assert_eq!(&*t.snapshot().search_markers.rows, &[0, 3, 6]);
+    t.feed(b"\x1b[?1049h");
+    assert!(t.snapshot().search_markers.rows.is_empty());
+    t.feed(b"\x1b[?1049l");
+    t.start_search("missing".into(), true);
+    assert!(t.snapshot().search_markers.rows.is_empty());
+    t.cancel_search();
+    assert!(t.snapshot().search_markers.current.is_none());
 }
 
 #[test]
@@ -887,9 +1290,9 @@ fn visual_line_selection_survives_mouse_release_and_drag() {
     t.feed(b"foo bar\r\nnext");
     t.begin_selection(4, 0, SelectionKind::Line);
     t.update_selection(4, 0);
-    assert_eq!(t.selected_text().as_deref(), Some("foo bar "));
+    assert_eq!(t.selected_text().as_deref(), Some("foo bar"));
     t.update_selection(2, 1);
-    assert_eq!(t.selected_text().as_deref(), Some("foo bar \nnext    "));
+    assert_eq!(t.selected_text().as_deref(), Some("foo bar\nnext"));
 }
 
 #[test]
@@ -952,7 +1355,7 @@ fn search_navigation_tracks_the_match_after_an_earlier_result_disappears() {
     assert!(t.search_next(false));
     assert_eq!(t.search_status().current, Some(1));
     let result = &t.search_results()[1];
-    assert_eq!(t.main_tracker.positions[&result.rows[0].id], 2);
+    assert_eq!(t.main_tracker.positions.get(&result.rows[0].id).unwrap(), 2);
 }
 
 #[test]
@@ -972,7 +1375,7 @@ fn newly_discovered_search_results_are_ordered_without_changing_current_match() 
     let positions: Vec<_> = t
         .search_results()
         .iter()
-        .map(|m| t.main_tracker.positions[&m.rows[0].id])
+        .map(|m| t.main_tracker.positions.get(&m.rows[0].id).unwrap())
         .collect();
     assert_eq!(positions, vec![0, 1, 2]);
 }
@@ -1084,6 +1487,8 @@ fn soft_wrap_appended_after_a_match_preserves_selection_and_search_identity() {
     let mut t = Terminal::new(4, 3, 10);
     t.feed(b"abcd");
     t.begin_selection(3, 0, SelectionKind::Character);
+    t.update_selection(2, 0);
+    t.update_selection(3, 0);
     t.start_search("d".into(), true);
     assert_eq!(finish_search(&mut t).matches, 1);
     t.feed(b"e");
@@ -1151,7 +1556,7 @@ fn height_resize_invalidates_selection_and_matches_for_removed_rows() {
 }
 
 #[test]
-fn width_resize_still_invalidates_selection_and_restarts_soft_wrap_search() {
+fn width_resize_preserves_selected_text_and_restarts_soft_wrap_search() {
     let mut t = Terminal::new(4, 3, 20);
     t.feed(b"abcdef");
     t.begin_selection(2, 0, SelectionKind::Character);
@@ -1160,8 +1565,8 @@ fn width_resize_still_invalidates_selection_and_restarts_soft_wrap_search() {
     let query_id = t.start_search("cde".into(), true);
     assert_eq!(finish_search(&mut t).matches, 1);
     t.resize(6, 3);
-    assert!(t.selected_text().is_none());
-    assert!(t.snapshot().selection_invalidated);
+    assert_eq!(t.selected_text().as_deref(), Some("cde"));
+    assert!(!t.snapshot().selection_invalidated);
     assert_ne!(t.search_status().query_id, query_id);
     assert_eq!(finish_search(&mut t).matches, 1);
     assert!(text(&t)[0].starts_with("abcdef"));
@@ -1169,4 +1574,410 @@ fn width_resize_still_invalidates_selection_and_restarts_soft_wrap_search() {
     t.resize(7, 3);
     assert!(t.search_status().truncated);
     assert!(t.search.as_ref().unwrap().matcher.is_none());
+}
+
+#[test]
+fn width_resize_keeps_the_reading_line_without_a_selection() {
+    let mut t = Terminal::new(24, 4, 200);
+    for row in 0..30 {
+        t.feed(format!("{row:02}:abcdefghijklmnopqr\r\n").as_bytes());
+    }
+    t.scroll(15);
+    let expected = text(&t)[0][..3].to_owned();
+    assert!(!t.snapshot().has_selection);
+    for (columns, rows) in [(12, 5), (36, 3), (8, 6), (24, 4)] {
+        t.resize(columns, rows);
+        assert!(
+            text(&t)[0].starts_with(&expected),
+            "{columns}x{rows}: {:?}",
+            text(&t)
+        );
+        assert!(!t.snapshot().viewport_evicted);
+        t.feed(b"more output\r\n");
+        assert!(text(&t)[0].starts_with(&expected));
+    }
+    t.scroll_to_bottom();
+    t.resize(12, 4);
+    assert_eq!(t.snapshot().display_offset, 0);
+}
+
+#[test]
+fn width_resize_keeps_the_current_repeated_search_match_while_rescanning() {
+    let mut t = Terminal::new(24, 4, 200);
+    for _ in 0..12 {
+        t.feed("中文😀 needle e\u{301} needle\r\n".as_bytes());
+    }
+    t.scroll_to(usize::MAX);
+    t.start_search("needle".into(), true);
+    assert_eq!(finish_search(&mut t).matches, 24);
+    for _ in 0..10 {
+        assert!(t.search_next(false));
+    }
+    assert_eq!(t.search_status().current, Some(9));
+    t.resize(10, 6);
+    t.search_step(1);
+    t.resize(18, 5);
+    assert_eq!(finish_search(&mut t).current, Some(9));
+    for (columns, rows) in [(11, 6), (32, 4), (7, 8), (24, 4)] {
+        t.resize(columns, rows);
+        assert!(
+            t.search_status().current.is_some(),
+            "current match vanished before rescan"
+        );
+        assert!(t.snapshot().lines.iter().any(|line| {
+            line.cells
+                .iter()
+                .any(|cell| cell.search_highlight == Some(SearchHighlight::Current))
+        }));
+        while !t.search_step(1).complete {
+            assert!(t.search_status().current.is_some());
+        }
+        assert_eq!(t.search_status().matches, 24);
+        assert_eq!(t.search_status().current, Some(9));
+    }
+    assert!(t.search_next(false));
+    assert_eq!(t.search_status().current, Some(10));
+    t.resize(16, 4);
+    t.start_search("absent".into(), true);
+    let status = finish_search(&mut t);
+    assert_eq!(status.matches, 0);
+    assert_eq!(status.current, None);
+    assert!(!status.current_unavailable);
+}
+
+#[test]
+fn reflow_search_keeps_retained_tail_matches_and_rejects_removed_duplicate_rows() {
+    let mut tail = Terminal::new(24, 3, 2);
+    tail.feed(b"abcdefghijklmnopqrstuvwxyz0123456789 needle");
+    tail.start_search("needle".into(), true);
+    assert_eq!(finish_search(&mut tail).matches, 1);
+    assert!(tail.search_next(false));
+    tail.resize(8, 3);
+    let status = finish_search(&mut tail);
+    assert_eq!(status.matches, 1);
+    assert_eq!(
+        status.current,
+        Some(0),
+        "the matched suffix is still retained"
+    );
+    assert!(!status.current_unavailable);
+
+    let mut duplicate = Terminal::new(12, 5, 0);
+    duplicate.feed(b"needle\r\nneedle\r\nneedle\r\nneedle\r\nneedle\x1b[H");
+    duplicate.start_search("needle".into(), true);
+    assert_eq!(finish_search(&mut duplicate).matches, 5);
+    for _ in 0..4 {
+        assert!(duplicate.search_next(false));
+    }
+    duplicate.resize(10, 3);
+    let status = finish_search(&mut duplicate);
+    assert_eq!(status.matches, 3);
+    assert_eq!(
+        status.current, None,
+        "a removed row must not become a different identical row"
+    );
+    assert!(status.current_unavailable);
+    assert!(duplicate.search_next(false));
+    assert!(!duplicate.search_status().current_unavailable);
+}
+
+#[test]
+fn reflow_does_not_drag_a_reader_back_to_an_offscreen_search_match() {
+    let mut t = Terminal::new(24, 4, 200);
+    for row in 0..30 {
+        t.feed(format!("{row:02}:needle abcdefghijk\r\n").as_bytes());
+    }
+    t.scroll_to(usize::MAX);
+    t.start_search("needle".into(), true);
+    finish_search(&mut t);
+    assert!(t.search_next(false));
+    t.scroll_to(10);
+    let expected = text(&t)[0][..3].to_owned();
+    t.feed(b"new\r\n");
+    assert!(t.snapshot().new_output);
+    t.resize(12, 6);
+    assert!(text(&t)[0].starts_with(&expected));
+    assert!(t.snapshot().new_output);
+    assert_eq!(finish_search(&mut t).current, Some(0));
+    assert!(t.snapshot().lines.iter().all(|line| {
+        line.cells
+            .iter()
+            .all(|cell| cell.search_highlight != Some(SearchHighlight::Current))
+    }));
+}
+
+#[test]
+fn reflow_reports_evicted_reading_and_search_positions_without_reselecting_text() {
+    let mut t = Terminal::new(24, 3, 2);
+    t.feed(b"old needle\r\nsecond line\r\nthird line\r\nfourth line\r\nfifth line");
+    t.scroll_to(usize::MAX);
+    t.start_search("needle".into(), true);
+    finish_search(&mut t);
+    assert!(t.search_next(false));
+    t.resize(6, 3);
+    let status = finish_search(&mut t);
+    assert_eq!(status.current, None);
+    assert!(status.current_unavailable);
+    assert!(t.snapshot().viewport_evicted);
+    t.feed(b"\r\nneedle");
+    let status = finish_search(&mut t);
+    assert_eq!(status.matches, 1);
+    assert_eq!(status.current, None);
+    assert!(status.current_unavailable);
+    t.start_search("needle".into(), true);
+    assert!(!t.search_status().current_unavailable);
+}
+
+#[test]
+fn reflow_does_not_revive_a_search_match_split_by_inserted_rows() {
+    let mut t = Terminal::new(4, 5, 16);
+    t.feed(b"needle");
+    t.start_search("needle".into(), true);
+    assert_eq!(finish_search(&mut t).matches, 1);
+    assert!(t.search_next(false));
+    t.feed(b"\x1b[2;1H\x1b[L");
+    t.resize(6, 5);
+    let status = finish_search(&mut t);
+    assert_eq!(status.matches, 0);
+    assert_eq!(status.current, None);
+    assert!(status.current_unavailable);
+}
+
+#[test]
+fn resizing_keeps_a_visible_search_match_without_rewinding_inside_a_long_match() {
+    let query = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut t = Terminal::new(12, 4, 100);
+    t.feed(format!("{query}\r\n{}", "tail\r\n".repeat(12)).as_bytes());
+    t.scroll_to(usize::MAX);
+    t.start_search(query.into(), true);
+    finish_search(&mut t);
+    assert!(t.search_next(false));
+    t.scroll(-2);
+    let expected = text(&t)[0][..6].to_owned();
+    t.resize(6, 4);
+    assert_eq!(text(&t)[0], expected);
+    assert_eq!(finish_search(&mut t).current, Some(0));
+
+    let mut t = Terminal::new(12, 8, 100);
+    for _ in 0..20 {
+        t.feed(b"needle\r\n");
+    }
+    t.scroll_to(usize::MAX);
+    t.start_search("needle".into(), true);
+    finish_search(&mut t);
+    for _ in 0..6 {
+        assert!(t.search_next(false));
+    }
+    t.resize(12, 3);
+    assert_eq!(finish_search(&mut t).current, Some(5));
+    assert!(t.snapshot().lines.iter().any(|line| {
+        line.cells
+            .iter()
+            .any(|cell| cell.search_highlight == Some(SearchHighlight::Current))
+    }));
+}
+
+#[test]
+fn selection_reflow_retains_wide_glyphs_spaces_blank_lines_and_repeated_text() {
+    for value in [
+        "prefix中文😀e\u{301}suffix",
+        "alpha  \r\n\r\nbeta  ",
+        "same\r\nsame\r\nsame",
+        "\r\n",
+        "  \r\n\r\n",
+    ] {
+        let mut terminal = Terminal::new(12, 8, 128);
+        terminal.feed(value.as_bytes());
+        terminal.select_all();
+        let expected = terminal.selected_text().unwrap();
+        for width in [7, 20, 4, 12] {
+            terminal.resize(width, 8);
+            assert_eq!(
+                terminal.selected_text().as_deref(),
+                Some(expected.as_str()),
+                "{value:?} at width {width}"
+            );
+            assert!(
+                terminal
+                    .snapshot()
+                    .lines
+                    .iter()
+                    .any(|line| line.cells.iter().any(|cell| cell.selected)),
+                "selection must remain visible after resizing {value:?} to {width}"
+            );
+        }
+    }
+    let mut terminal = Terminal::new(8, 3, 0);
+    terminal.feed(b"12345678abcdefgh");
+    terminal.select_all();
+    terminal.resize(2, 3);
+    assert!(
+        terminal.selected_text().is_none(),
+        "evicted selection must not attach to different text"
+    );
+    assert!(terminal.snapshot().selection_invalidated);
+}
+#[test]
+fn selectable_content_includes_offscreen_history_and_emitted_whitespace_only() {
+    let mut terminal = Terminal::new(12, 3, 30);
+    assert!(!terminal.snapshot().has_content);
+    terminal.feed(b"\x1b[3;8H");
+    assert!(!terminal.snapshot().has_content);
+    terminal.feed(b" ");
+    assert!(terminal.snapshot().has_content);
+    terminal.feed(b"\x1bc\n");
+    assert!(terminal.snapshot().has_content);
+    terminal.feed(b"\x1bcold\r\n\r\n\r\n\x1b[2J");
+    assert!(
+        terminal.snapshot().has_content,
+        "history remains selectable"
+    );
+    terminal.feed(b"\x1b[3J");
+    assert!(!terminal.snapshot().has_content);
+    terminal.feed(b"\x1b[?1049h");
+    assert!(!terminal.snapshot().has_content);
+    terminal.feed(b"app");
+    assert!(terminal.snapshot().has_content);
+}
+
+#[test]
+fn search_seed_uses_a_short_logical_line_and_preserves_literal_selection() {
+    let mut terminal = Terminal::new(8, 4, 100);
+    assert_eq!(terminal.selection_search_query(), None);
+    terminal.feed("  中hello world ".as_bytes());
+    terminal.select_all();
+    assert_eq!(
+        terminal.selection_search_query().as_deref(),
+        Some("  中hello world ")
+    );
+    terminal.feed(b"\r\nnext");
+    terminal.select_all();
+    assert_eq!(terminal.selection_search_query(), None);
+    terminal.feed(b"\x1bc   ");
+    terminal.select_all();
+    assert_eq!(terminal.selection_search_query(), None);
+    terminal.feed(b"\x1bc");
+    terminal.feed("中".repeat(256).as_bytes());
+    terminal.select_all();
+    assert_eq!(terminal.selection_search_query(), Some("中".repeat(256)));
+    terminal.feed(b"x");
+    terminal.select_all();
+    assert_eq!(terminal.selection_search_query(), None);
+}
+#[test]
+fn pointer_selection_uses_character_edges_and_shift_click_keeps_its_anchor() {
+    use super::{
+        SelectionPoint as P,
+        SelectionSide::{Left, Right},
+    };
+    let mut terminal = Terminal::new(24, 4, 30);
+    terminal.feed("alpha 中文😀 beta".as_bytes());
+    terminal.begin_selection_at(P::new(0, 0, Left), SelectionKind::Character, false);
+    terminal.update_selection_at(P::new(4, 0, Left));
+    assert_eq!(terminal.selected_text().as_deref(), Some("alph"));
+    terminal.update_selection_at(P::new(4, 0, Right));
+    assert_eq!(terminal.selected_text().as_deref(), Some("alpha"));
+    terminal.begin_selection_at(P::new(11, 0, Right), SelectionKind::Character, true);
+    assert_eq!(terminal.selected_text().as_deref(), Some("alpha 中文😀"));
+    terminal.begin_selection_at(P::new(2, 0, Right), SelectionKind::Character, true);
+    assert_eq!(terminal.selected_text().as_deref(), Some("alp"));
+    terminal.begin_selection_at(P::new(4, 0, Right), SelectionKind::Character, false);
+    terminal.update_selection_at(P::new(1, 0, Left));
+    assert_eq!(terminal.selected_text().as_deref(), Some("lpha"));
+    terminal.begin_selection_at(P::new(6, 0, Left), SelectionKind::Character, true);
+    assert_eq!(terminal.selected_text().as_deref(), Some(" "));
+    terminal.feed(b"\rchanged");
+    terminal.begin_selection_at(P::new(11, 0, Right), SelectionKind::Character, true);
+    assert_eq!(
+        terminal.selected_text(),
+        None,
+        "an invalidated anchor must not select different content"
+    );
+}
+
+#[test]
+fn reversed_selection_keeps_its_fixed_edge_after_reflow_and_rejects_a_changed_pending_anchor() {
+    use super::{
+        SelectionPoint as P,
+        SelectionSide::{Left, Right},
+    };
+    let mut terminal = Terminal::new(16, 5, 20);
+    terminal.feed(b"alpha beta");
+    terminal.begin_selection_at(P::new(4, 0, Right), SelectionKind::Character, false);
+    terminal.update_selection_at(P::new(1, 0, Left));
+    terminal.resize(12, 5);
+    assert_eq!(terminal.selected_text().as_deref(), Some("lpha"));
+    terminal.begin_selection_at(P::new(9, 0, Right), SelectionKind::Character, true);
+    assert_eq!(terminal.selected_text().as_deref(), Some(" beta"));
+    terminal.clear_selection();
+    terminal.begin_selection_at(P::new(0, 0, Left), SelectionKind::Character, false);
+    terminal.feed(b"\rX");
+    terminal.begin_selection_at(P::new(4, 0, Right), SelectionKind::Character, true);
+    assert_eq!(terminal.selected_text(), None);
+}
+#[test]
+fn snapshots_share_unchanged_rows_without_reusing_changed_selection_or_text() {
+    let mut t = Terminal::new(40, 4, 20);
+    t.feed(b"https://example.com\r\nsecond\r\nthird");
+    let first = t.snapshot();
+    let same = t.snapshot();
+    assert_eq!(first.lines[0].cells.as_ptr(), same.lines[0].cells.as_ptr());
+    t.feed(b"!");
+    let changed = t.snapshot();
+    assert_eq!(
+        first.lines[0].cells.as_ptr(),
+        changed.lines[0].cells.as_ptr()
+    );
+    assert_ne!(
+        first.lines[2].cells.as_ptr(),
+        changed.lines[2].cells.as_ptr()
+    );
+    assert_eq!(changed.lines[2].cells[5].text, "!");
+    t.start_search("second".into(), true);
+    while !t.search_step(256).complete {}
+    let searched = t.snapshot();
+    assert!(searched.lines[1].cells[0].search_highlight.is_some());
+    assert!(first.lines[1].cells[0].search_highlight.is_none());
+    assert_eq!(
+        first.lines[0].cells.as_ptr(),
+        searched.lines[0].cells.as_ptr()
+    );
+}
+
+#[test]
+fn plain_output_batches_metadata_without_changing_terminal_semantics() {
+    let mut t = Terminal::new(80, 4, 20);
+    t.feed(b"ordinary text with numbers 12345 and punctuation ()[] followed by more text");
+    assert!(t.line_times.observations <= 2);
+    let examples: &[&[u8]] = &[
+        b"long ascii line that wraps across many rows\r\nnext\ttext\x1b[2D!!\x1b[31mred\x1b[0m",
+        "中文😀e\u{301} ASCII\r\nmore words\x1b[2;3Hoverwrite".as_bytes(),
+        b"\x1b(0lqqqk\x1b(Bnormal\x1b[4hinsert text\x1b[4l\x1b[?7lno wrapping text",
+        b"\x1b]133;A\x07$ \x1b]133;B\x07echo text\r\n\x1b]133;C\x07output\r\n\x1b]133;D;0\x07",
+        b"\x1b]8;;https://example.invalid\x07label\x1b]8;;\x07\x1bPignored\x1b\\text\x1b[?1049halt\x1b[?1049lmain",
+        b"\xf0\x9fASCII\xc2\x1b[31mcolored\xffplain\x1b[2Jfresh\x1b[3J",
+    ];
+    for &input in examples {
+        let mut bulk = Terminal::new(12, 4, 20);
+        let mut single = Terminal::new(12, 4, 20);
+        let now = LineTimestamp::at(10);
+        let actual = bulk.feed_at(input, now);
+        let expected: Vec<_> = input
+            .iter()
+            .flat_map(|byte| single.feed_at(&[*byte], now))
+            .collect();
+        assert_eq!(actual, expected);
+        let a = bulk.snapshot();
+        let b = single.snapshot();
+        for (a, b) in a.lines.iter().zip(&b.lines) {
+            assert_eq!(a.cells, b.cells, "{input:?}");
+            assert_eq!(a.received_at, b.received_at);
+            assert_eq!(a.number, b.number);
+        }
+        assert_eq!(
+            (a.cursor.row, a.cursor.column),
+            (b.cursor.row, b.cursor.column)
+        );
+        assert_eq!(a.shell.interaction, b.shell.interaction);
+    }
 }

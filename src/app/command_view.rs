@@ -47,6 +47,17 @@ pub struct CommandHistoryView {
     _observe: Subscription,
 }
 
+fn command_output(command: &ShellCommand) -> Result<&str, &'static str> {
+    match command.output.as_deref() {
+        Some("") => Err(i18n_key::TERMINAL_THIS_COMMAND_PRODUCED_NO_OUTPUT),
+        Some(output) => Ok(output),
+        None if command.output_cache_disabled => {
+            Err(i18n_key::TERMINAL_COMMAND_OUTPUT_CACHE_WAS_DISABLED)
+        }
+        None => Err(i18n_key::TERMINAL_COMMAND_OUTPUT_IS_NO_LONGER_RETAINED_OR_EXCEEDS_64_KIB),
+    }
+}
+
 impl EventEmitter<CommandHistoryEvent> for CommandHistoryView {}
 impl Focusable for CommandHistoryView {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -310,29 +321,14 @@ impl CommandHistoryView {
                     .map(ui::preserve_scroll_axes)
                     .font_family(ui::MONOSPACE_FONT)
                     .text_size(px(11.))
-                    .child(command.output.as_ref().map_or_else(
-                        || tr(if command.output_cache_disabled {
-                            i18n_key::TERMINAL_COMMAND_OUTPUT_CACHE_WAS_DISABLED
-                        } else {
-                            i18n_key::TERMINAL_COMMAND_OUTPUT_IS_NO_LONGER_RETAINED_OR_EXCEEDS_64_KIB
-                        }).to_owned(),
-                        |output| {
-                            if output.is_empty() {
-                                tr(i18n_key::TERMINAL_THIS_COMMAND_PRODUCED_NO_OUTPUT).to_owned()
-                            } else {
-                                output.to_string()
-                            }
-                        },
-                    ))
+                    .child(command_output(command).unwrap_or_else(tr).to_owned())
                     .map(|content| ui::scrollable(content, None)),
             )
             .child(
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(ui::colors().muted))
-                    .child(tr(
-                        i18n_key::TERMINAL_COMMAND_CONTEXT_MENU_HINT,
-                    )),
+                    .child(tr(i18n_key::TERMINAL_COMMAND_CONTEXT_MENU_HINT)),
             )
             .into_any_element()
     }
@@ -344,7 +340,9 @@ impl Render for CommandHistoryView {
         if self.menu.is_none() && self.menu_focus.is_focused(window) {
             self.focus.focus(window);
         }
-        let integration_hint = if !self.terminal.read(cx).is_running() {
+        let integration_hint = if self.terminal.read(cx).production_protected() {
+            i18n_key::CONNECTIONS_PRODUCTION_BLOCKED
+        } else if !self.terminal.read(cx).is_running() {
             i18n_key::COMMON_CONNECT_THE_TERMINAL_BEFORE_ENABLING_SHELL_INTEGRATION
         } else {
             i18n_key::COMMON_RETURN_TO_THE_LIVE_TERMINAL_AND_LEAVE_FULL_SCREEN_APPLICATIONS
@@ -451,5 +449,27 @@ impl Render for CommandHistoryView {
                     i18n_key::TERMINAL_THE_SELECTED_COMMAND_IS_NO_LONGER_RETAINED_SELECT_ANOTHER_COMMAND,
                 )))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustterm::terminal::Terminal;
+
+    #[test]
+    fn copying_command_output_distinguishes_empty_from_whitespace() {
+        for (output, expected) in [
+            ("", Err(i18n_key::TERMINAL_THIS_COMMAND_PRODUCED_NO_OUTPUT)),
+            ("   ", Ok("   ")),
+            ("\r\n", Ok("\n")),
+            ("  \r\n", Ok("  \n")),
+        ] {
+            let mut terminal = Terminal::new(24, 4, 20);
+            terminal.feed(
+                format!("\x1b]133;B\x07cmd\r\n\x1b]133;C\x07{output}\x1b]133;D;0\x07").as_bytes(),
+            );
+            assert_eq!(command_output(&terminal.command_history()[0]), expected);
+        }
     }
 }

@@ -577,7 +577,7 @@ impl TransferPlan {
                 }
             };
             let Some(Checkpoint::Download { temporary, .. }) = &checkpoint else {
-                unreachable!()
+                return Err(SftpError::Local(std::io::Error::other("invalid download checkpoint")));
             };
             let mut output = tokio::fs::File::from_std(temporary.as_file().try_clone()?);
             output.set_len(offset).await?;
@@ -623,7 +623,7 @@ impl TransferPlan {
                 return Err(SftpError::Cancelled);
             }
             let Some(Checkpoint::Download { temporary, .. }) = checkpoint.take() else {
-                unreachable!()
+                return Err(SftpError::Local(std::io::Error::other("invalid download checkpoint")));
             };
             let target = job.local.clone();
             let replace = self.policy == SftpConflictPolicy::Overwrite;

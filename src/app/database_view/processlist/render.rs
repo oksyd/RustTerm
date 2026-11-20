@@ -49,7 +49,9 @@ impl DatabaseView {
         )
     }
     pub(in crate::app::database_view) fn render_sessions(&self, cx: &Context<Self>) -> AnyElement {
-        let monitor = self.monitor.as_ref().unwrap();
+        let Some(monitor) = &self.monitor else {
+            return div().into_any_element();
+        };
         let enabled = self.monitor_connected();
         let mut body = div()
             .flex_1()
@@ -102,7 +104,10 @@ impl DatabaseView {
                                 if !this.interactive() {
                                     return;
                                 }
-                                this.monitor.as_mut().unwrap().refresh_secs = seconds;
+                                let Some(monitor) = &mut this.monitor else {
+                                    return;
+                                };
+                                monitor.refresh_secs = seconds;
                                 this.start_monitor_poll(cx);
                                 if seconds > 0 {
                                     this.refresh_sessions(cx);
@@ -150,7 +155,9 @@ impl DatabaseView {
                             if !this.interactive() {
                                 return;
                             }
-                            let monitor = this.monitor.as_mut().unwrap();
+                            let Some(monitor) = &mut this.monitor else {
+                                return;
+                            };
                             monitor.hide_sleep = !monitor.hide_sleep;
                             monitor.filter(cx);
                             cx.notify();
@@ -238,15 +245,14 @@ impl DatabaseView {
                     })),
             );
         } else {
-            body = body.child(self.render_session_grid(cx));
+            body = body.child(self.render_session_grid(monitor, cx));
         }
-        if monitor.selected.is_some() {
-            body = body.child(self.render_session_sql(cx));
+        if let Some(id) = monitor.selected {
+            body = body.child(self.render_session_sql(monitor, id, cx));
         }
         body.into_any_element()
     }
-    fn render_session_grid(&self, cx: &Context<Self>) -> AnyElement {
-        let monitor = self.monitor.as_ref().unwrap();
+    fn render_session_grid(&self, monitor: &MonitorState, cx: &Context<Self>) -> AnyElement {
         let width: f32 = WIDTHS.iter().sum();
         let table = div()
             .w(px(width))
@@ -294,7 +300,9 @@ impl DatabaseView {
                                 if !this.interactive() {
                                     return;
                                 }
-                                let monitor = this.monitor.as_mut().unwrap();
+                                let Some(monitor) = &mut this.monitor else {
+                                    return;
+                                };
                                 monitor.sort = (
                                     column,
                                     if monitor.sort.0 == column {
@@ -352,8 +360,12 @@ impl DatabaseView {
             .into_any_element()
     }
     fn render_session_row(&self, index: usize, cx: &Context<Self>) -> AnyElement {
-        let monitor = self.monitor.as_ref().unwrap();
-        let process = &monitor.snapshot.as_ref().unwrap().processes[monitor.rows[index]];
+        let Some(monitor) = &self.monitor else {
+            return div().into_any_element();
+        };
+        let Some(process) = visible_process(monitor.snapshot.as_ref(), &monitor.rows, index) else {
+            return div().into_any_element();
+        };
         let id = process.id;
         let time = process.seconds.map(|s| s.to_string());
         let id_text = id.to_string();
@@ -408,7 +420,10 @@ impl DatabaseView {
                     if !this.interactive() {
                         return;
                     }
-                    this.monitor.as_mut().unwrap().select(id);
+                    let Some(monitor) = &mut this.monitor else {
+                        return;
+                    };
+                    monitor.select(id);
                     this.focus.focus(window);
                     cx.stop_propagation();
                     cx.notify();
@@ -416,8 +431,12 @@ impl DatabaseView {
             )
             .into_any_element()
     }
-    fn render_session_sql(&self, cx: &Context<Self>) -> AnyElement {
-        let monitor = self.monitor.as_ref().unwrap();
+    fn render_session_sql(
+        &self,
+        monitor: &MonitorState,
+        id: u64,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let mut panel = div()
             .h(px((self.viewport_size.1 * 0.3).clamp(100., 220.)))
             .min_h_0()
@@ -434,11 +453,7 @@ impl DatabaseView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(format!("SQL · #{}", monitor.selected.unwrap())),
-                    )
+                    .child(div().flex_1().child(format!("SQL · #{id}")))
                     .child(
                         ui::icon_button_enabled(
                             "copy-session-sql",
@@ -451,9 +466,10 @@ impl DatabaseView {
                                 && let Some(preview) =
                                     this.monitor.as_ref().and_then(|m| m.preview.as_ref())
                             {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    preview.sql.clone(),
-                                ));
+                                crate::app::clipboard::write(
+                                    cx,
+                                    ClipboardItem::new_string(preview.sql.clone()),
+                                );
                             }
                         })),
                     )
@@ -464,7 +480,9 @@ impl DatabaseView {
                             i18n_key::DATABASE_SESSIONS_CLOSE_SQL,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            let monitor = this.monitor.as_mut().unwrap();
+                            let Some(monitor) = &mut this.monitor else {
+                                return;
+                            };
                             monitor.selected = None;
                             monitor.preview = None;
                             cx.notify();
@@ -485,8 +503,18 @@ impl DatabaseView {
                         list(
                             preview.scroll.clone(),
                             cx.processor(|this, index: usize, _, _| {
-                                let preview =
-                                    this.monitor.as_ref().unwrap().preview.as_ref().unwrap();
+                                let Some(preview) =
+                                    this.monitor.as_ref().and_then(|m| m.preview.as_ref())
+                                else {
+                                    return div().into_any_element();
+                                };
+                                let Some(text) = preview
+                                    .chunks
+                                    .get(index)
+                                    .and_then(|range| preview.sql.get(range.clone()))
+                                else {
+                                    return div().into_any_element();
+                                };
                                 div()
                                     .px_3()
                                     .min_h(px(20.))
@@ -494,7 +522,7 @@ impl DatabaseView {
                                     .text_size(px(12.))
                                     .line_height(px(20.))
                                     .whitespace_normal()
-                                    .child(preview.sql[preview.chunks[index].clone()].to_owned())
+                                    .child(text.to_owned())
                                     .into_any_element()
                             }),
                         )

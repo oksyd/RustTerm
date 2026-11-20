@@ -303,8 +303,13 @@ mod linux {
     }
 
     impl BoundedStream {
-        fn renew(&self) {
-            *self.deadline.lock().unwrap() = Instant::now() + OPERATION_TIMEOUT;
+        fn renew(&self) -> io::Result<()> {
+            *self
+                .deadline
+                .lock()
+                .map_err(|_| io::Error::other("clipboard deadline lock poisoned"))? =
+                Instant::now() + OPERATION_TIMEOUT;
+            Ok(())
         }
         fn check(&self) -> io::Result<()> {
             if self.cancelled.is_cancelled() {
@@ -312,7 +317,12 @@ mod linux {
                     io::ErrorKind::ConnectionAborted,
                     "clipboard export cancelled",
                 ))
-            } else if Instant::now() >= *self.deadline.lock().unwrap() {
+            } else if Instant::now()
+                >= *self
+                    .deadline
+                    .lock()
+                    .map_err(|_| io::Error::other("clipboard deadline lock poisoned"))?
+            {
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "clipboard export timed out",
@@ -594,7 +604,10 @@ mod linux {
         }
 
         pub(super) fn begin(mut self) -> Result<Owner, ExportError> {
-            self.connection.stream().renew();
+            self.connection
+                .stream()
+                .renew()
+                .map_err(|_| ExportError::Failed)?;
             self.claim(self.snapshot_owner)?;
             let (commands, receiver) = mpsc::sync_channel(1);
             let (wake_write, wake_read) = UnixStream::pair().map_err(|_| ExportError::Failed)?;
@@ -679,7 +692,7 @@ mod linux {
                 if self.cancelled.is_cancelled() {
                     return Ok(());
                 }
-                self.connection.stream().renew();
+                self.connection.stream().renew()?;
                 loop {
                     let event = match self.queued_events.pop_front() {
                         Some(event) => Some(event),

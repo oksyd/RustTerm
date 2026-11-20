@@ -559,7 +559,7 @@ impl DockerView {
         let Some(details) = &self.details else { return };
         let id = details.id.clone();
         let name = details.name.trim_start_matches('/').to_owned();
-        if action == Action::Start {
+        if action == Action::Start && !self.client.protection().is_production() {
             self.execute(id, action, cx);
             return;
         }

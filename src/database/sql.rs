@@ -620,6 +620,39 @@ mod tests {
     }
 
     #[test]
+    fn partial_unicode_queries_keep_contiguous_token_boundaries() {
+        for engine in [
+            SqlEngine::Mysql,
+            SqlEngine::Postgres,
+            SqlEngine::Sqlite,
+            SqlEngine::ClickHouse,
+        ] {
+            for text in [
+                "SELECT '中文\\'🙂', \"名称\" /* 中文 /* nested */ */;",
+                "SELECT $tag$e'🙂\\中$tag$, 0xFF --comment\nFROM 数据表;",
+                "https://google.com\0\u{301}'\\'-- \r\n[列] `表`",
+            ] {
+                for end in text
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(text.len()))
+                {
+                    let input = &text[..end];
+                    let tokens = lex(input, engine);
+                    let mut offset = 0;
+                    for token in tokens {
+                        assert_eq!(token.range.start, offset);
+                        assert!(token.range.start < token.range.end);
+                        assert!(input.get(token.range.clone()).is_some());
+                        offset = token.range.end;
+                    }
+                    assert_eq!(offset, input.len());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unicode_and_incomplete_statements_keep_safe_boundaries() {
         let sql = "SELECT '中;文';\nSELECT \"名称\" FROM \"表\";";
         assert_eq!(

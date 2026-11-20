@@ -748,3 +748,19 @@ connections-ssh-fingerprint-tunnel =
 connections-ssh-route-help = 目标主机和端口由 SSH 服务器访问，TLS 仍验证目标主机名。
 connections-ssh-route-unavailable = 此隧道使用的 SSH 连接不可用，请修改隧道设置后重新连接。
 connections-ssh-route-in-use = 此 SSH 连接正被其他连接用作隧道，请先修改相关连接的隧道设置再删除。
+
+connections-ssh-production-protection = SSH 生产保护
+
+connections-production-description = 禁用客户端 Shell 注入、资源采集和自动服务发现，强制多行粘贴预览。已有会话需重连后生效。
+
+connections-production-blocked = SSH 生产保护已禁用此操作。
+
+connections-production = 生产
+
+connections-production-pending = 保护设置已更改，重连后生效
+
+connections-production-tunnel-restart = 应用 { $name } 的保护设置会重建共享 SSH 隧道，并中断正在使用这些隧道的连接。是否继续？
+
+connections-production-ports-disabled = 生产保护已禁用自动转发和服务发现，手动配置的隧道仍可使用。
+
+connections-production-reconnect-required = 待重连

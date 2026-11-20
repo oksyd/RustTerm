@@ -7,15 +7,24 @@ use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
     index::{Column, Line, Point},
-    term::{Config, Osc52, TermMode, cell::Flags},
+    term::{Config, Osc52, SEMANTIC_ESCAPE_CHARS, TermMode, cell::Flags},
     vte::ansi::{Color, NamedColor, Processor, Rgb, Timeout},
 };
 use std::sync::{Arc, Mutex};
+mod folding;
+mod links;
+pub use links::TerminalLink;
 pub mod integration;
+mod redraw;
+mod reflow;
 mod selection_matches;
 pub mod shell;
+mod snapshot;
 mod timestamps;
 pub use alacritty_terminal::vte::ansi::CursorShape;
+pub use folding::{
+    BlockCopy, CommandBlock, CommandDetails, CommandHeading, CommandResult, FoldMarker,
+};
 pub use shell::{ShellCommand, ShellInteraction, ShellSnapshot};
 pub use timestamps::LineTimestamp;
 
@@ -26,13 +35,42 @@ pub const DEFAULT_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 pub const CELL_BUDGET_BYTES: usize = 512;
 pub const MAX_COLUMNS: u16 = 500;
 pub const MAX_ROWS: u16 = 200;
+pub const MAX_WORD_DELIMITER_BYTES: usize = 256;
 const MAX_COMBINING: usize = 32;
 const MAX_STRING_BYTES: usize = 4096;
+
+/// Editable boundaries. Spaces and horizontal tabs always separate words.
+pub fn default_word_delimiters() -> String {
+    SEMANTIC_ESCAPE_CHARS
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+pub fn valid_word_delimiters(value: &str) -> bool {
+    value.len() <= MAX_WORD_DELIMITER_BYTES && !value.chars().any(char::is_control)
+}
+
+fn terminal_options(history: usize, semantic_escape_chars: String) -> Config {
+    Config {
+        scrolling_history: history,
+        semantic_escape_chars,
+        osc52: Osc52::Disabled,
+        ..Config::default()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchHighlight {
     Match,
     Current,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SearchMarkers {
+    /// Distinct visual rows measured from the top of the retained scrollback.
+    pub rows: Arc<[usize]>,
+    pub current: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,9 +92,12 @@ pub struct Cell {
 }
 #[derive(Clone, Debug)]
 pub struct VisualLine {
+    /// Stable retained-row identity, including across scrollback movement.
+    pub id: u64,
+    source_line: Line,
     pub number: Option<usize>,
     pub received_at: Option<LineTimestamp>,
-    pub cells: Vec<Cell>,
+    pub cells: Arc<Vec<Cell>>,
     pub wrapped: bool,
 }
 #[derive(Clone, Debug)]
@@ -81,9 +122,16 @@ pub struct Modes {
 }
 #[derive(Clone, Debug)]
 pub struct Snapshot {
+    /// Fraction of the first row clipped above the viewport; zero for aligned rows.
+    pub scroll_fraction: f32,
+    pub command_blocks: Vec<CommandBlock>,
+    pub sticky_command: Option<CommandHeading>,
+    pub new_output: bool,
     pub shell: ShellSnapshot,
     pub search: SearchStatus,
+    pub search_markers: SearchMarkers,
     pub has_selection: bool,
+    pub has_content: bool,
     pub selection_invalidated: bool,
     /// The paused viewport's first row was evicted. Explicit navigation clears this.
     pub viewport_evicted: bool,
@@ -117,15 +165,13 @@ impl EventListener for Events {
                 | Event::ColorRequest(..)
                 | Event::TextAreaSizeRequest(_)
         ) {
-            let mut events = self.0.lock().expect("terminal events poisoned");
+            let mut events = self.0.lock().unwrap_or_else(|error| error.into_inner());
             // Budget changes also emit a title event, even without subsequent PTY data.
             // Coalesce these notifications rather than retaining an idle-session queue.
             if matches!(event, Event::Title(_) | Event::ResetTitle)
-                && events
-                    .last()
-                    .is_some_and(|e| matches!(e, Event::Title(_) | Event::ResetTitle))
+                && let Some(last @ (Event::Title(_) | Event::ResetTitle)) = events.last_mut()
             {
-                *events.last_mut().unwrap() = event;
+                *last = event;
             } else {
                 events.push(event);
             }
@@ -257,16 +303,19 @@ impl Timeout for ImmediateUpdates {
 
 pub struct Terminal {
     line_times: timestamps::LineTimes,
+    redraws: redraw::Redraws,
+    blocks: folding::Blocks,
     shell: shell::ShellTracker,
     main_tracker: reading::Tracker,
     alt_tracker: reading::Tracker,
     next_row_id: u64,
     viewport_anchor: Option<u64>,
     viewport_evicted: bool,
+    scroll_fraction: f64,
     selection_anchor: Option<reading::SelectionAnchor>,
     selection_invalidated: bool,
     selection_kind: Option<SelectionKind>,
-    selection_origin: Option<u64>,
+    selection_origin: Option<reading::SelectionOrigin>,
     search: Option<reading::SearchState>,
     next_query_id: u64,
     highlight_enabled: bool,
@@ -274,6 +323,7 @@ pub struct Terminal {
     selection_match_cache: Mutex<selection_matches::MatchCache>,
     cache_command_output: bool,
     highlight_cache: Mutex<highlight::HighlightCache>,
+    snapshot_cache: Mutex<snapshot::Cache>,
     final_alternate: Option<Arc<Snapshot>>,
     theme: Theme,
     frozen_colors: Option<alacritty_terminal::term::color::Colors>,
@@ -284,6 +334,7 @@ pub struct Terminal {
     gate: StringGate,
     version: u64,
     content_version: u64,
+    new_output: bool,
     size: Size,
     requested_history: usize,
     history_bytes: usize,
@@ -300,22 +351,21 @@ impl Terminal {
         let limit = budget_limit(history, bytes, size.columns);
         let events = Events::default();
         let term = Term::new(
-            Config {
-                scrolling_history: limit,
-                osc52: Osc52::Disabled,
-                ..Config::default()
-            },
+            terminal_options(limit, SEMANTIC_ESCAPE_CHARS.to_owned()),
             &size,
             events.clone(),
         );
         let mut terminal = Self {
             line_times: Default::default(),
+            redraws: Default::default(),
+            blocks: Default::default(),
             shell: shell::ShellTracker::default(),
             main_tracker: Default::default(),
             alt_tracker: Default::default(),
             next_row_id: 0,
             viewport_anchor: None,
             viewport_evicted: false,
+            scroll_fraction: 0.,
             selection_anchor: None,
             selection_invalidated: false,
             selection_kind: None,
@@ -327,6 +377,7 @@ impl Terminal {
             selection_match_cache: Mutex::new(Default::default()),
             cache_command_output: true,
             highlight_cache: Mutex::new(Default::default()),
+            snapshot_cache: Mutex::new(Default::default()),
             final_alternate: None,
             theme: Theme::default(),
             frozen_colors: None,
@@ -337,6 +388,7 @@ impl Terminal {
             gate: StringGate::default(),
             version: 0,
             content_version: 0,
+            new_output: false,
             size,
             requested_history: history,
             history_bytes: bytes,
@@ -364,14 +416,52 @@ impl Terminal {
                 self.tracker()
                     .positions
                     .get(&stamp.id)
-                    .is_some_and(|&index| index < history)
+                    .is_some_and(|index| index < history)
             })
         });
-        for &byte in bytes {
+        let mut pending = bytes;
+        let mut plain_ready = false;
+        while let Some((&byte, tail)) = pending.split_first() {
+            if plain_ready && !self.term.grid().cursor.input_needs_wrap {
+                let room = self.term.columns() - self.term.grid().cursor.point.column.0;
+                let count = pending
+                    .iter()
+                    .take(room)
+                    .take_while(|&&byte| matches!(byte, b' '..=b'~'))
+                    .count();
+                if count > 0 {
+                    let old_point = self.term.grid().cursor.point;
+                    if let Some(parser) = self.parser.as_mut() {
+                        parser.advance(&mut self.term, &pending[..count]);
+                    }
+                    self.line_times.observe_text(&pending[..count]);
+                    if !self.is_alternate() {
+                        self.line_times
+                            .written(self.term.grid(), received_at, false);
+                        if self.term.grid().display_offset() > 0 {
+                            self.new_output = true;
+                        }
+                        if !self.term.mode().intersects(TermMode::MOUSE_MODE)
+                            && !self.shell.snapshot.at_prompt
+                        {
+                            self.redraws.observe(
+                                self.term.grid(),
+                                old_point,
+                                &timestamps::Observation::text(),
+                            );
+                        }
+                    }
+                    pending = &pending[count..];
+                    continue;
+                }
+            }
+            pending = tail;
+            plain_ready = false;
             let old_alt = self.is_alternate();
             let old_top = &self.term.grid()[Point::new(self.term.grid().topmost_line(), Column(0))]
                 as *const _ as usize;
-            let old_cursor = self.term.grid().cursor.point.line;
+            let old_point = self.term.grid().cursor.point;
+            let old_cursor = old_point.line;
             let old_cursor_address = timestamps::address(self.term.grid(), old_cursor);
             let accepted = match self.gate.accept(byte) {
                 GateAction::Byte => byte,
@@ -382,16 +472,39 @@ impl Terminal {
                 }
             };
             let observation = self.line_times.observe(accepted, self.term.grid(), old_alt);
+            // A literal ASCII print proves all parsers have left their control
+            // sequence/UTF-8 states. Batch only within this row; wrapping and
+            // every non-ASCII/control byte retain the precise observation path.
+            plain_ready = observation.printed
+                && matches!(accepted, b' '..=b'~')
+                && self.gate.string.is_none()
+                && !self.gate.escaped;
+            if !old_alt
+                && self.term.grid().display_offset() > 0
+                && (observation.printed || observation.linefeed || observation.bulk)
+            {
+                self.new_output = true;
+            }
             // LF emits the row being left, even when it contains no characters.
             // The destination remains unused until something is written there.
             if !old_alt && observation.linefeed {
-                self.line_times.written(self.term.grid(), received_at);
+                self.line_times.written(self.term.grid(), received_at, true);
             }
             self.parser
                 .as_mut()
                 .unwrap()
                 .advance(&mut self.term, &[accepted]);
             self.shell_byte(byte);
+            if !old_alt
+                && !self
+                    .term
+                    .mode()
+                    .intersects(TermMode::ALT_SCREEN | TermMode::MOUSE_MODE)
+                && !self.shell.snapshot.at_prompt
+            {
+                self.redraws
+                    .observe(self.term.grid(), old_point, &observation);
+            }
             // CSI REP ends in ASCII 'b' and can repeat a preceding combining mark.
             // VTE caps its count at u16::MAX; clamp the resulting extras as well.
             if byte >= 0x80 || byte == b'b' {
@@ -400,6 +513,8 @@ impl Terminal {
             let new_top = &self.term.grid()[Point::new(self.term.grid().topmost_line(), Column(0))]
                 as *const _ as usize;
             if old_alt != self.is_alternate() {
+                self.scroll_fraction = 0.;
+                self.redraws.clear();
                 self.shell.suspend_input();
                 self.clear_selection();
                 if self.is_alternate() {
@@ -413,18 +528,27 @@ impl Terminal {
                 } else {
                     self.main_tracker.retire(old_top);
                     self.line_times.retire(old_top);
+                    self.redraws.retire(old_top);
                 }
             }
             if observation.reset {
+                self.redraws.clear();
+                self.clear_command_blocks(false);
                 self.shell.reset_interaction();
                 self.line_times.reset();
+            }
+            if observation.clear_screen && !self.is_alternate() {
+                self.redraws.clear();
+                self.reconcile_rows();
+                self.clear_command_blocks(true);
             }
             if !self.is_alternate() {
                 if old_alt {
                     self.line_times.primary_restored(self.term.grid());
                 }
                 if let Some(rows) = observation.cleanup.clone() {
-                    self.line_times.cleanup_screen(self.term.grid(), rows);
+                    self.line_times
+                        .cleanup_screen(self.term.grid(), rows, &observation);
                 }
                 let cursor = self.term.grid().cursor.point.line;
                 let cursor_address = timestamps::address(self.term.grid(), cursor);
@@ -433,9 +557,11 @@ impl Terminal {
                     && (observation.printed || matches!(accepted, b'\n' | 0x0b | 0x0c))
                 {
                     self.line_times.retire(cursor_address);
+                    self.redraws.retire(cursor_address);
                 }
                 if observation.printed {
-                    self.line_times.written(self.term.grid(), received_at);
+                    self.line_times
+                        .written(self.term.grid(), received_at, false);
                 }
                 if observation.bulk {
                     self.line_times
@@ -448,6 +574,7 @@ impl Terminal {
             self.content_version = self.content_version.wrapping_add(1);
         }
         self.reconcile_rows();
+        self.redraws.retain_screen(self.term.grid());
         self.restore_viewport();
         self.refresh_selection(unchanged_selection_rows);
         if !bytes.is_empty()
@@ -455,7 +582,13 @@ impl Terminal {
         {
             search.dirty = true;
         }
-        let events = std::mem::take(&mut *self.events.0.lock().expect("terminal events poisoned"));
+        let events = std::mem::take(
+            &mut *self
+                .events
+                .0
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
         let mut replies = Vec::new();
         for event in events {
             match event {
@@ -504,11 +637,8 @@ impl Terminal {
             point.column.0 = point.column.0.saturating_sub(1);
         }
         let cell = &mut grid[point];
-        if cell
-            .zerowidth()
-            .is_some_and(|chars| chars.len() > MAX_COMBINING)
-        {
-            let marks: Vec<char> = cell.zerowidth().unwrap()[..MAX_COMBINING].to_vec();
+        if let Some(chars) = cell.zerowidth().filter(|chars| chars.len() > MAX_COMBINING) {
+            let marks: Vec<char> = chars[..MAX_COMBINING].to_vec();
             let underline = cell.underline_color();
             cell.extra = None;
             for c in marks {
@@ -522,12 +652,33 @@ impl Terminal {
         if size.columns == self.size.columns && size.rows == self.size.rows {
             return;
         }
+        self.scroll_fraction = 0.;
+        if size.columns != self.size.columns && size.rows != self.size.rows {
+            // The grid removes bottom rows on a height shrink when the cursor is
+            // above them. Reconcile those identities before mapping column reflow.
+            self.resize(self.size.columns, size.rows);
+        }
         let width_changed = size.columns != self.size.columns;
+        let keep_search_visible = !width_changed && self.current_search_visible();
+        let logical = if self.is_alternate() {
+            self.line_times.alternate_resized();
+            None
+        } else {
+            Some(self.line_times.logical_lines(self.term.grid()))
+        };
+        let (reading, blocks) = if width_changed {
+            let map = reflow::LogicalMap::new(logical.as_ref(), self.term.grid().topmost_line());
+            (
+                self.reading_before_reflow(&map),
+                self.blocks_before_reflow(&map),
+            )
+        } else {
+            Default::default()
+        };
+        self.redraws.clear();
         let readline_prompt = width_changed
             .then(|| self.readline_prompt_distance())
             .flatten();
-        self.line_times
-            .before_resize(self.term.grid(), self.is_alternate());
         let inactive_primary_shrinks = self.is_alternate() && size.rows < self.size.rows;
         if size.columns > self.max_columns_seen {
             self.max_columns_seen = size.columns;
@@ -537,38 +688,21 @@ impl Terminal {
                 self.max_columns_seen,
             );
             if limit != self.history_limit {
-                self.history_limit = limit;
-                // set_options updates the primary buffer, including while alternate is active.
-                self.term.set_options(Config {
-                    scrolling_history: limit,
-                    osc52: Osc52::Disabled,
-                    ..Config::default()
-                });
+                self.apply_history_limit(limit);
             }
         }
         self.max_rows_seen = self.max_rows_seen.max(size.rows);
         self.term.resize(size);
         self.size = size;
-        self.line_times
-            .after_resize(self.term.grid(), self.is_alternate());
+        let logical = self.line_times.after_resize(self.term.grid(), logical);
         if width_changed {
             // Reflow replaces identities, but reuse the active tracker's allocations.
             self.reset_rows();
             self.restore_readline_prompt(readline_prompt);
             self.viewport_anchor = None;
-            self.anchor_viewport();
-            let had_selection = self.selection_anchor.is_some();
-            self.clear_selection();
-            self.selection_invalidated = had_selection;
-            if let Some(search) = self.search.take() {
-                if search.matcher.is_none() {
-                    // Rejected queries retain only a bounded display preview;
-                    // never reinterpret that preview as a new literal query.
-                    self.search = Some(search);
-                } else {
-                    self.start_search(search.status.query, search.status.case_sensitive);
-                }
-            }
+            let map = reflow::LogicalMap::new(logical.as_ref(), self.term.grid().topmost_line());
+            let folded_anchor = self.blocks_after_reflow(&map, blocks);
+            self.reading_after_reflow(&map, reading, folded_anchor);
         } else {
             if inactive_primary_shrinks {
                 // We cannot reconcile the inaccessible primary grid after every
@@ -585,6 +719,9 @@ impl Terminal {
             if let Some(search) = &mut self.search {
                 search.dirty = true;
             }
+            if keep_search_visible {
+                self.keep_current_search_visible();
+            }
         }
         // Highlight spans are keyed by exact logical text; mappings to cells are
         // rebuilt per snapshot. Layout changes cannot make a cached span stale.
@@ -594,6 +731,26 @@ impl Terminal {
     fn is_alternate(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
+    fn apply_history_limit(&mut self, limit: usize) {
+        self.history_limit = limit;
+        let delimiters = self.term.semantic_escape_chars().to_owned();
+        self.term.set_options(terminal_options(limit, delimiters));
+    }
+
+    pub fn set_word_delimiters(&mut self, punctuation: &str) {
+        let mut delimiters = punctuation.to_owned();
+        for space in [' ', '\t'] {
+            if !delimiters.contains(space) {
+                delimiters.push(space);
+            }
+        }
+        if self.term.semantic_escape_chars() != delimiters {
+            self.term
+                .set_options(terminal_options(self.history_limit, delimiters));
+            self.version = self.version.wrapping_add(1);
+        }
+    }
+
     pub fn set_history_budget(&mut self, bytes: usize) {
         self.set_history_limits(self.requested_history, bytes);
     }
@@ -612,14 +769,9 @@ impl Terminal {
         }
         let shrinking = limit < self.history_limit;
         if shrinking && self.is_alternate() {
-            self.line_times.before_resize(self.term.grid(), true);
+            self.line_times.alternate_resized();
         }
-        self.history_limit = limit;
-        self.term.set_options(Config {
-            scrolling_history: self.history_limit,
-            osc52: Osc52::Disabled,
-            ..Config::default()
-        });
+        self.apply_history_limit(limit);
         if shrinking {
             self.reconcile_rows();
             self.restore_viewport();
@@ -639,6 +791,7 @@ impl Terminal {
             return;
         }
         self.shell.reset_interaction();
+        self.redraws.clear();
         if self.is_alternate() {
             self.final_alternate = Some(Arc::new(self.snapshot()));
             self.term.swap_alt();
@@ -648,11 +801,10 @@ impl Terminal {
         // Transfer only the authoritative main grid to a fresh read-only container.
         // Dropping the old Term also releases title stacks, alternate state and protocol modes.
         let mut readonly = Term::new(
-            Config {
-                scrolling_history: self.history_limit,
-                osc52: Osc52::Disabled,
-                ..Config::default()
-            },
+            terminal_options(
+                self.history_limit,
+                self.term.semantic_escape_chars().to_owned(),
+            ),
             &self.size,
             self.events.clone(),
         );
@@ -699,7 +851,24 @@ impl Terminal {
     pub fn scroll(&mut self, lines: i32) {
         self.shell.snapshot.focused_command = None;
         self.shell.snapshot.command_unavailable = false;
-        self.term.scroll_display(Scroll::Delta(lines));
+        let offset = self.viewport().offset.saturating_add_signed(lines as isize);
+        self.scroll_projected(offset);
+        self.viewport_evicted = false;
+        self.anchor_viewport();
+        self.version = self.version.wrapping_add(1);
+    }
+    pub fn scroll_fractional(&mut self, lines: f64) {
+        if !lines.is_finite() || lines == 0. || self.is_alternate() {
+            return;
+        }
+        let viewport = self.viewport();
+        let position = (viewport.offset as f64 - self.scroll_fraction + lines)
+            .clamp(0., viewport.history as f64);
+        let offset = position.ceil() as usize;
+        self.scroll_projected(offset);
+        self.scroll_fraction = (offset as f64 - position).clamp(0., 1.);
+        self.shell.snapshot.focused_command = None;
+        self.shell.snapshot.command_unavailable = false;
         self.viewport_evicted = false;
         self.anchor_viewport();
         self.version = self.version.wrapping_add(1);
@@ -709,9 +878,9 @@ impl Terminal {
     }
     /// Set the viewport's distance from the live bottom, clamped to retained history.
     pub fn scroll_to(&mut self, offset: usize) {
-        let grid = self.term.grid();
-        let target = offset.min(grid.history_size());
-        self.scroll(target as i32 - grid.display_offset() as i32);
+        let viewport = self.viewport();
+        let target = offset.min(viewport.history);
+        self.scroll(target as i32 - viewport.offset as i32);
     }
     pub fn modes(&self) -> Modes {
         let m = self.term.mode();
@@ -726,121 +895,6 @@ impl Terminal {
             alternate_scroll: m.contains(TermMode::ALTERNATE_SCROLL),
             focus_reporting: m.contains(TermMode::FOCUS_IN_OUT),
         }
-    }
-    /// Copies visible cells only. Hidden sessions must not call this on output.
-    pub fn snapshot(&self) -> Snapshot {
-        let grid = self.term.grid();
-        let offset = grid.display_offset();
-        let alternate = self.term.mode().contains(TermMode::ALT_SCREEN);
-        let mut lines = Vec::with_capacity(self.size.rows as usize);
-        let selection = self.selection_points();
-        let search_marks = self.search_visible_marks();
-        let selection_marks = self.selection_visible_marks();
-        for row in 0..self.size.rows as usize {
-            let line = Line(row as i32 - offset as i32);
-            let mut cells = Vec::with_capacity(self.size.columns as usize);
-            for col in 0..self.size.columns as usize {
-                let point = Point::new(line, Column(col));
-                let cell = &grid[point];
-                let flags = cell.flags;
-                let spacer =
-                    flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
-                let mut text = if spacer {
-                    String::new()
-                } else {
-                    cell.c.to_string()
-                };
-                if !spacer {
-                    for &c in cell.zerowidth().unwrap_or_default() {
-                        text.push(c);
-                    }
-                }
-                let mut foreground = self.color(cell.fg);
-                let mut background = self.color(cell.bg);
-                if flags.contains(Flags::INVERSE) {
-                    std::mem::swap(&mut foreground, &mut background);
-                }
-                if flags.contains(Flags::DIM) {
-                    foreground = dim(foreground);
-                }
-                cells.push(Cell {
-                    default_foreground: matches!(cell.fg, Color::Named(NamedColor::Foreground))
-                        && !flags.intersects(Flags::INVERSE | Flags::HIDDEN),
-                    selected: selection
-                        .is_some_and(|(first, last)| first <= point && point <= last),
-                    search_highlight: search_marks
-                        .as_ref()
-                        .and_then(|marks| marks[row * self.size.columns as usize + col]),
-                    selection_match: selection_marks
-                        .as_ref()
-                        .is_some_and(|marks| marks[row * self.size.columns as usize + col]),
-                    text,
-                    width: if spacer {
-                        0
-                    } else if flags.contains(Flags::WIDE_CHAR) {
-                        2
-                    } else {
-                        1
-                    },
-                    foreground,
-                    background,
-                    bold: flags.contains(Flags::BOLD),
-                    italic: flags.contains(Flags::ITALIC),
-                    underline: flags.intersects(Flags::ALL_UNDERLINES),
-                    hidden: flags.contains(Flags::HIDDEN),
-                    strikeout: flags.contains(Flags::STRIKEOUT),
-                });
-            }
-            let received_at = (!alternate)
-                .then(|| self.line_times.get(grid, line))
-                .flatten();
-            lines.push(VisualLine {
-                number: received_at.map(|_| grid.history_size() + row + 1 - offset),
-                received_at,
-                wrapped: grid[Point::new(line, Column(self.size.columns as usize - 1))]
-                    .flags
-                    .contains(Flags::WRAPLINE),
-                cells,
-            });
-        }
-        let cursor = self.term.renderable_content().cursor;
-        let point = cursor.point;
-        let cursor_row = point.line.0 as usize + offset;
-        let mut snapshot = Snapshot {
-            shell: self.shell_snapshot(),
-            search: self.search_status(),
-            has_selection: self.selection_anchor.is_some(),
-            selection_invalidated: self.selection_invalidated,
-            viewport_evicted: self.viewport_evicted && !alternate,
-            is_read_only: self.parser.is_none(),
-            mouse_reporting: self.term.mode().intersects(TermMode::MOUSE_MODE),
-            version: self.version,
-            columns: self.size.columns,
-            rows: self.size.rows,
-            lines,
-            cursor: Cursor {
-                row: cursor_row,
-                column: point.column.0,
-                width: if grid[point].flags.contains(Flags::WIDE_CHAR) {
-                    2
-                } else {
-                    1
-                },
-                shape: cursor.shape,
-                visible: self.parser.is_some()
-                    && cursor.shape != CursorShape::Hidden
-                    && cursor_row < self.size.rows as usize,
-            },
-            alternate_screen: alternate,
-            display_offset: offset,
-            history_size: grid.history_size(),
-            title: self.title.clone(),
-            modes: self.modes(),
-            history_limit: self.history_limit,
-            history_budget_bytes: self.history_bytes,
-        };
-        self.decorate_snapshot(&mut snapshot);
-        snapshot
     }
     fn color(&self, color: Color) -> u32 {
         let index = match color {
@@ -898,10 +952,7 @@ fn dim(c: u32) -> u32 {
     (((c >> 16) & 255) * 2 / 3) << 16 | (((c >> 8) & 255) * 2 / 3) << 8 | ((c & 255) * 2 / 3)
 }
 fn palette(index: usize) -> u32 {
-    const ANSI: [u32; 16] = [
-        0x161b22, 0xf47067, 0x8ddb8c, 0xeac55f, 0x6cb6ff, 0xd2a8ff, 0x76e3ea, 0xc9d1d9, 0x768390,
-        0xff938a, 0xb4f1b4, 0xf6d976, 0x9dcaff, 0xe2c5ff, 0xa9f0f5, 0xf0f6fc,
-    ];
+    use theme::ANSI;
     match index {
         0..=15 => ANSI[index],
         16..=231 => {
@@ -915,15 +966,20 @@ fn palette(index: usize) -> u32 {
         }
         257 => 0x0d1117,
         259..=266 => dim(ANSI[index - 259]),
-        268 => dim(0xc9d1d9),
-        _ => 0xc9d1d9,
+        268 => dim(ANSI[7]),
+        _ => ANSI[7],
     }
 }
 
+mod content;
+mod delimiters;
+mod enclosed;
 mod theme;
 pub use theme::Theme;
 mod reading;
-pub use reading::{SearchMatch, SearchStatus, SelectionKind};
+pub use reading::{
+    SearchMatch, SearchScope, SearchStatus, SelectionKind, SelectionPoint, SelectionSide,
+};
 mod highlight;
 mod input;
 pub use input::MouseEvent;

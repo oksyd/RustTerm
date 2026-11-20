@@ -429,7 +429,7 @@ impl DatabaseView {
                     cx,
                 );
             } else {
-                cx.write_to_clipboard(ClipboardItem::new_string(qualified));
+                crate::app::clipboard::write(cx, ClipboardItem::new_string(qualified));
             }
         }
         cx.notify();

@@ -224,7 +224,7 @@ impl DatabaseView {
             .child(
                 ui::icon_button("database-copy-address", Icon::Copy, i18n_key::COMMON_COPY)
                     .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(address.clone()))
+                        crate::app::clipboard::write(cx, ClipboardItem::new_string(address.clone()))
                     })),
             )
             .when_some(
@@ -678,7 +678,10 @@ impl DatabaseView {
                     )
                     .children(self.render_inline_modes(cx))
                     .when(
-                        self.can_edit_inline_cell(row, column) && self.inline_edit_cell().is_none(),
+                        (self.can_edit_inline_cell(row, column)
+                            || (self.is_binary_cell(row, column)
+                                && self.can_edit_cell(row, column)))
+                            && self.inline_edit_cell().is_none(),
                         |bar| {
                             bar.child(
                                 ui::icon_button_enabled(
@@ -701,10 +704,10 @@ impl DatabaseView {
                         ui::icon_button_enabled(
                             "database-open-value",
                             Icon::Maximize,
-                            if self.can_edit_cell(row, column) {
-                                i18n_key::DATABASE_EXPANDED_EDITOR_SHIFT_ENTER
-                            } else {
+                            if self.opens_value_viewer(row, column) {
                                 i18n_key::COMMON_VIEW_FULL_VALUE
+                            } else {
+                                i18n_key::DATABASE_EXPANDED_EDITOR_SHIFT_ENTER
                             },
                             self.interactive(),
                         )
@@ -714,10 +717,10 @@ impl DatabaseView {
                         })
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
-                                if this.can_edit_cell(row, column) {
-                                    this.expand_cell_editor(window, cx);
-                                } else {
+                                if this.opens_value_viewer(row, column) {
                                     this.open_value(window, cx);
+                                } else {
+                                    this.expand_cell_editor(window, cx);
                                 }
                             },
                         )),
@@ -741,9 +744,18 @@ impl DatabaseView {
     }
 
     fn render_result_row(&self, visible_index: usize, cx: &Context<Self>) -> AnyElement {
-        let result = self.current_result().unwrap();
-        let row_index = self.documents[self.active_document].visible_rows[visible_index];
-        let row = &result.rows[row_index];
+        let Some(result) = self.current_result() else {
+            return div().into_any_element();
+        };
+        let Some(&row_index) = self.documents[self.active_document]
+            .visible_rows
+            .get(visible_index)
+        else {
+            return div().into_any_element();
+        };
+        let Some(row) = result.rows.get(row_index) else {
+            return div().into_any_element();
+        };
         let revision = self.documents[self.active_document].result_revision;
         div()
             .w(px(self.result_width()))
@@ -805,10 +817,10 @@ impl DatabaseView {
                                     return;
                                 }
                                 if event.click_count() == 2 {
-                                    if this.can_edit_cell(row_index, column) {
-                                        this.edit_cell(window, cx);
-                                    } else {
+                                    if this.opens_value_viewer(row_index, column) {
                                         this.open_value(window, cx);
+                                    } else {
+                                        this.edit_cell(window, cx);
                                     }
                                 }
                                 cx.notify();

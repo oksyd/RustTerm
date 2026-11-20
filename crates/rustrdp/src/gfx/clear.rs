@@ -137,9 +137,9 @@ impl Decoder {
                             column.push(pixel(&mut input)?);
                         }
                         let index = self.next_short;
-                        self.short_bars[index] = Some(column.into_boxed_slice());
                         self.next_short = (index + 1) % self.short_bars.len();
-                        (on, self.short_bars[index].as_deref().unwrap())
+                        let column = self.short_bars[index].insert(column.into_boxed_slice());
+                        (on, &**column)
                     };
                     if on > length || short.len() > length - on {
                         return Err(Error::Invalid("ClearCodec short bar height"));

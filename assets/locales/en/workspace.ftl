@@ -45,6 +45,20 @@ workspace-close-panes-confirmation =
     }
 
 workspace-close-tab = Close tab
+workspace-disconnect-named-session = Disconnect “{ $name }”?
+workspace-close-named-session = Close “{ $name }”?
+workspace-close-running-sessions =
+    { $count ->
+        [one] One session is still running.
+       *[other] { $count } sessions are still running.
+    }
+workspace-close-uploads = Unfinished uploads will be cancelled.
+workspace-close-downloads = Unfinished downloads will be cancelled.
+workspace-close-file-edits = Unuploaded file edits will not be saved to the server.
+workspace-close-filename = The file name being edited will be discarded.
+workspace-close-file-operation = A file operation is in progress. Its result may not be available after closing.
+workspace-close-unsaved-edits = Unsaved edits will be discarded.
+workspace-close-transaction = The transaction has not been confirmed as complete. Check its status before closing.
 workspace-pin-tab = Pin tab
 workspace-unpin-tab = Unpin tab
 workspace-new-tab-session = New session
@@ -61,6 +75,11 @@ workspace-closing-connections-and-saving-settings = Closing connections and savi
 workspace-command-name = Command name
 
 workspace-command-palette = Command palette…
+
+workspace-quick-open-connection = Quick open connection…
+workspace-quick-open-another-ssh = Enter opens a new SSH session · { $count } already open
+workspace-quick-open-switch-desktop = Enter switches to the open remote desktop
+workspace-quick-open-switch-session = Enter switches to the open session
 
 workspace-command-text = Command text
 
@@ -210,7 +229,6 @@ workspace-expand-ssh-tab-group = { $name } · { $count } tabs. Click to expand; 
 
 workspace-collapse-ssh-tab-group = { $name } · { $count } tabs. Click to collapse; drag to move the group.
 
-workspace-hide-connection-library-ctrl-shift-b = Hide connection library · Ctrl+Shift+B
 
 workspace-hide-tools = Hide tools
 
@@ -446,11 +464,9 @@ workspace-shell = Shell
 
 workspace-shortcuts-and-about-rustterm = Shortcuts and about RustTerm
 
-workspace-show-connection-library-ctrl-shift-b = Show connection library · Ctrl+Shift+B
 
 workspace-show-connection-sidebar = Show connection sidebar
 
-workspace-show-hide-sidebar-ctrl-shift-b = Show / hide sidebar · Ctrl+Shift+B
 
 workspace-show-line-numbers = Show line numbers
 
@@ -533,3 +549,17 @@ workspace-no-ports = Open an SSH connection to manage port forwards.
 workspace-all-connections = All connections
 
 workspace-speed-search = Quick locate: ↑/↓ selects a match, Enter opens it, Esc closes search.
+
+workspace-retry-countdown = Retry { $attempt }/5 in { $seconds }s
+
+workspace-retry-connecting = Reconnecting · Attempt { $attempt }/5
+
+workspace-retry-stopped = Automatic retry stopped
+
+workspace-retry-now = Retry now
+
+workspace-retry-stop = Stop retrying
+
+workspace-retry-ssh-detail = Previous output stays read-only. Reconnecting starts a new shell; previous commands are not resumed or replayed.
+
+workspace-retry-rdp-detail = Previous desktop is read-only. Session restoration depends on the remote server.

@@ -62,6 +62,113 @@ fn numeric_input_is_exact_and_cannot_become_sql() {
 }
 
 #[tokio::test]
+async fn sqlite_blob_query_and_table_page_show_text_without_changing_the_bytes() {
+    let (_directory, client) = sqlite().await;
+    let json = r#"{"message":"示例","items":[]}"#;
+    client
+        .execute(
+            format!(
+                "CREATE TABLE cache(id INTEGER PRIMARY KEY, body BLOB);
+            INSERT INTO cache VALUES (1,CAST('{json}' AS BLOB)),(2,X'00FF'),(3,X'610062'),
+            (4,CAST('0x4142' AS BLOB)),(5,X''),(6,NULL),(7,'0x4142'),(8,X'80');"
+            ),
+            20,
+        )
+        .await
+        .unwrap();
+    let schema = client.table_schema(table("cache")).await.unwrap();
+    let page = client
+        .table_page(&schema, PageRequest::default())
+        .await
+        .unwrap();
+    let query = client
+        .execute("SELECT id, body FROM cache ORDER BY id".into(), 20)
+        .await
+        .unwrap();
+    let expected = [
+        Some(json),
+        Some("0x00ff"),
+        Some("0x610062"),
+        Some("0x4142"),
+        Some("0x"),
+        None,
+        Some("0x4142"),
+        Some("0x80"),
+    ];
+    for rows in [&query.results[0].rows, &page.result.rows] {
+        assert_eq!(
+            rows.iter().map(|row| row[1].as_deref()).collect::<Vec<_>>(),
+            expected
+        );
+    }
+    assert_eq!(
+        page.originals[0][1],
+        CellValue::Binary(json.as_bytes().to_vec())
+    );
+    assert_eq!(page.originals[3][1], CellValue::Binary(b"0x4142".to_vec()));
+    assert_eq!(page.originals[6][1], CellValue::Text("0x4142".into()));
+    let blob = &page.originals[3][1];
+    assert_eq!(
+        schema
+            .parse_cell(1, Some(blob), &blob.display().unwrap())
+            .unwrap(),
+        *blob
+    );
+}
+
+#[tokio::test]
+async fn utf16_sqlite_tables_preserve_text_including_nul_when_browsing_and_editing() {
+    for encoding in ["UTF-16le", "UTF-16be"] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = SqliteConfig {
+            path: directory.path().join("utf16.sqlite"),
+            read_only: false,
+            query_timeout_secs: 10,
+        };
+        let native = rusqlite::Connection::open(&config.path).unwrap();
+        native.pragma_update(None, "encoding", encoding).unwrap();
+        native
+            .execute_batch("CREATE TABLE items(id INTEGER PRIMARY KEY, label TEXT)")
+            .unwrap();
+        let label = "中文\0🙂";
+        native
+            .execute("INSERT INTO items VALUES (1, ?1)", [label])
+            .unwrap();
+        drop(native);
+
+        let client = DatabaseClient::connect(
+            DatabaseConfig::Sqlite(config),
+            Secret::new(String::new()),
+            None,
+        )
+        .await
+        .unwrap();
+        let schema = client.table_schema(table("items")).await.unwrap();
+        let page = client
+            .table_page(&schema, PageRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(page.originals[0][1], CellValue::Text(label.into()));
+        let new_label = "更新'\0🙂";
+        client
+            .apply_changes(
+                &schema,
+                vec![RowChange::Update {
+                    original: page.originals[0].clone(),
+                    values: vec![(1, CellValue::Text(new_label.into()))],
+                }],
+            )
+            .await
+            .unwrap();
+        let page = client
+            .table_page(&schema, PageRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(page.originals[0][1], CellValue::Text(new_label.into()));
+    }
+}
+
+#[tokio::test]
 async fn pages_filter_server_side_and_keep_composite_key_order() {
     let (_directory, client) = sqlite().await;
     client.execute("CREATE TABLE items(tenant INTEGER NOT NULL,id INTEGER NOT NULL,name TEXT,PRIMARY KEY(tenant,id)); INSERT INTO items VALUES (2,1,'late'),(1,3,'100%'),(1,1,'100x'),(1,2,'100%');".into(), 20).await.unwrap();

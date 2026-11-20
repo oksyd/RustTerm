@@ -292,6 +292,10 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new(mode: Mode) -> Self {
+        Self::with_protection(mode, false).await
+    }
+
+    async fn with_protection(mode: Mode, production_protection: bool) -> Self {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -340,6 +344,7 @@ impl Fixture {
                 keepalive_secs: 0,
                 keepalive_max: 3,
                 shell_integration: false,
+                production_protection,
                 jump_hosts: vec![],
                 forwards: vec![],
                 auto_forward: Default::default(),
@@ -605,4 +610,21 @@ async fn inspect_rejects_a_response_for_a_different_container() {
         "unexpected inspect result: {result:?}; requests={:?}",
         f.events.requests.lock().unwrap()
     );
+}
+
+#[tokio::test]
+async fn production_protection_is_inherited_by_container_consoles() {
+    let f = Fixture::with_protection(Mode::Mock, true).await;
+    let client = f.client.with_endpoint(rustterm::docker::Endpoint::System);
+    assert!(client.protection().is_production());
+    let console = Session::spawn_container(client, ID.into(), Shell::Sh, 80, 24, 1000).unwrap();
+    wait_connected(&console, &f.events).await;
+    assert!(console.protection().is_production());
+    assert_eq!(
+        console.send(Command::Paste("one\ntwo".into())),
+        Err(rustterm::session::SendError::PasteReviewRequired)
+    );
+    console.disconnect();
+    wait(|| !console.state().is_running()).await;
+    assert_eq!(f.session.state(), SessionState::Connected);
 }

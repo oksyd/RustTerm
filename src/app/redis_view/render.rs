@@ -1245,9 +1245,10 @@ impl RedisView {
                                 if this.window_state.is_locked() {
                                     return;
                                 }
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    this.console_output.clone(),
-                                ));
+                                crate::app::clipboard::write(
+                                    cx,
+                                    ClipboardItem::new_string(this.console_output.clone()),
+                                );
                                 this.show_success(i18n_key::COMMON_RESULT_COPIED, cx);
                             })),
                         )

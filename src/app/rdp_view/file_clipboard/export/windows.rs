@@ -16,28 +16,7 @@ impl Content {
         if content.len() > MAX_CONTENT_BYTES {
             return Err(ExportError::TooLarge);
         }
-        let image = if let Some(png) = &content.png {
-            content::from_png(png.clone())
-        } else if let Some(dib) = &content.dib {
-            content::from_dib(dib.clone())
-        } else {
-            return Err(ExportError::Unavailable);
-        }
-        .map_err(|error| match error {
-            super::super::ReadError::TooLarge => ExportError::TooLarge,
-            _ => ExportError::Invalid,
-        })?;
-        let png = png_format();
-        if png == 0 {
-            return Err(ExportError::Failed);
-        }
-        let mut formats = vec![
-            (png, image.png.expect("normalized image has PNG")),
-            (
-                u32::from(CF_DIBV5),
-                image.dib.expect("normalized image has DIBV5"),
-            ),
-        ];
+        let mut formats = Self::image_formats(content)?;
         if let Some(text) = &content.text {
             if text.contains('\0') {
                 return Err(ExportError::Invalid);
@@ -53,7 +32,34 @@ impl Content {
         if formats.iter().map(|(_, data)| data.len()).sum::<usize>() > MAX_CONTENT_BYTES {
             return Err(ExportError::TooLarge);
         }
+        if formats.is_empty() {
+            return Err(ExportError::Unavailable);
+        }
         Ok(Self(formats))
+    }
+
+    fn image_formats(
+        content: &rustrdp::ClipboardContent,
+    ) -> Result<Vec<(u32, Vec<u8>)>, ExportError> {
+        let image = if let Some(png) = &content.png {
+            content::from_png(png.clone())
+        } else if let Some(dib) = &content.dib {
+            content::from_dib(dib.clone())
+        } else {
+            return Ok(Vec::new());
+        }
+        .map_err(|error| match error {
+            super::super::ReadError::TooLarge => ExportError::TooLarge,
+            _ => ExportError::Invalid,
+        })?;
+        let png = png_format();
+        if png == 0 {
+            return Err(ExportError::Failed);
+        }
+        Ok(vec![
+            (png, image.png.ok_or(ExportError::Invalid)?),
+            (u32::from(CF_DIBV5), image.dib.ok_or(ExportError::Invalid)?),
+        ])
     }
 }
 
@@ -125,5 +131,25 @@ impl Owner {
 impl Drop for Owner {
     fn drop(&mut self) {
         self.cancel(); // Fully rendered data stays available independently of this pane.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_selection_without_an_image_offers_unicode_text() {
+        let selection = rustrdp::ClipboardContent {
+            text: Some("中".into()),
+            html: Some("<b>中</b>".into()),
+            ..Default::default()
+        };
+        let formats = Content::prepare(&selection).unwrap();
+        assert!(
+            formats
+                .0
+                .contains(&(u32::from(CF_UNICODETEXT), vec![0x2d, 0x4e, 0, 0]))
+        );
     }
 }

@@ -1,6 +1,7 @@
 use super::Workspace;
 use crate::app::{
     command_view::{CommandHistoryEvent, CommandHistoryView},
+    file_transfer::FileTransferView,
     pane::{Pane, SessionTool},
     ui::{self, Icon},
 };
@@ -10,7 +11,7 @@ use rustterm::i18n::tr;
 
 impl Workspace {
     pub(super) fn utility_is_open(&self) -> bool {
-        self.left_tool.is_some()
+        self.dock_tool.is_some()
     }
 
     pub(super) fn active_commands(&self) -> Option<&Entity<CommandHistoryView>> {
@@ -38,9 +39,30 @@ impl Workspace {
             }
         }
         for (id, files) in &self.files {
-            files.update(cx, |files, cx| {
-                files.set_follow_directory(self.files_follow.contains(id), cx);
-            });
+            self.sync_file_directory(*id, files, cx);
+        }
+    }
+
+    pub(super) fn sync_file_directory(
+        &self,
+        id: usize,
+        files: &Entity<FileTransferView>,
+        cx: &mut Context<Self>,
+    ) {
+        let directory = match self.panes.get(&id) {
+            Some(Pane::Terminal(terminal))
+                if id == self.focused
+                    && self.dock_tool == Some(SessionTool::Files)
+                    && !self.lock_screen.locked =>
+            {
+                terminal.read(cx).followed_sftp_directory()
+            }
+            _ => None,
+        };
+        // Only a new shell report or reopening the panel should override manual browsing.
+        if files.read(cx).followed_directory() != directory {
+            let directory = directory.map(str::to_owned);
+            files.update(cx, |files, cx| files.follow_directory(directory, cx));
         }
     }
 
@@ -58,7 +80,7 @@ impl Workspace {
             return;
         }
         self.menu = None;
-        if self.left_tool == Some(tool) {
+        if self.dock_tool == Some(tool) {
             self.close_utility_panel(window, cx);
             return;
         }
@@ -104,7 +126,7 @@ impl Workspace {
                                 CommandHistoryEvent::Insert { .. } => {
                                     terminal.insert_history_command(*run, *command, cx);
                                 }
-                                CommandHistoryEvent::Close => unreachable!(),
+                                CommandHistoryEvent::Close => {}
                             });
                         }
                     }
@@ -126,10 +148,8 @@ impl Workspace {
         {
             return;
         }
-        self.left_tool = None;
+        self.dock_tool = None;
         self.tools.clear();
-        self.config.settings.sidebar_visible = false;
-        self.save(cx);
         self.utility_overlay = false;
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
@@ -139,7 +159,7 @@ impl Workspace {
     }
 
     pub(super) fn render_utility_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tool = self.left_tool?;
+        let tool = self.dock_tool?;
         let name = if tool == SessionTool::Ports {
             Some(tr(i18n_key::WORKSPACE_ALL_CONNECTIONS).to_owned())
         } else {

@@ -183,6 +183,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new(tunnel_mode: bool) -> Self {
+        Self::with_protection(tunnel_mode, Default::default()).await
+    }
+
+    async fn with_protection(
+        tunnel_mode: bool,
+        protection: crate::session::SessionProtection,
+    ) -> Self {
         let peer = Arc::new(Peer::default());
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let config = Arc::new(server::Config {
@@ -224,7 +231,14 @@ impl Fixture {
                 // A shared handle exercises each broker's request semantics;
                 // transport isolation is tested with distinct connections.
                 tokio::join!(
-                    run_shell(&handle, sftp_rx, resources_rx, exec_rx, &cancelled),
+                    run_shell(
+                        &handle,
+                        sftp_rx,
+                        resources_rx,
+                        exec_rx,
+                        protection,
+                        &cancelled
+                    ),
                     run_forwarding(&handle, forwards_rx, &cancelled, Duration::from_millis(40)),
                 );
             }
@@ -522,4 +536,19 @@ async fn stalled_tunnel_open_does_not_block_or_disconnect_other_destinations() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn production_protection_rejects_resource_requests_before_opening_channels() {
+    let fixture =
+        Fixture::with_protection(false, crate::session::SessionProtection::Production).await;
+    let channels = fixture.peer.sessions.load(Ordering::SeqCst);
+    for disks in [false, true] {
+        let result = tokio::time::timeout(Duration::from_secs(2), fixture.resources.sample(disks))
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(ResourceError::Protected)));
+    }
+    assert_eq!(fixture.peer.sessions.load(Ordering::SeqCst), channels);
+    assert!(fixture.peer.exec_commands.lock().unwrap().is_empty());
 }

@@ -78,7 +78,8 @@ fn client_config(config: &RdpConfig, tunneled: bool) -> Result<ClientConfig> {
         clipboard: config.clipboard,
         clipboard_files: config.clipboard && config.clipboard_files,
         audio_output: config.audio_output,
-        dynamic_resolution: config.uses_dynamic_resolution(),
+        // Capability is independent of the current local display mode.
+        dynamic_resolution: config.remote_app.is_none() && config.monitor_count == 1,
         bulk_compression: config.compression.then_some(BulkCompression::Rdp5),
         allow_lossy_bitmaps: config.allow_lossy_bitmaps,
         // GNOME requires RDPGFX even when AVC/lossy bitmap decoding is disabled.
@@ -272,16 +273,23 @@ impl Handshake<'_> {
                 if let Some(payload) = self.connector.server_redirection(&packet)? {
                     return Ok(Advance::Redirect(crate::rdp::handoff::Handoff::parse(payload)?));
                 }
-                self.connector.advance_with_frames(&packet, |completed| {
-                    let mut frame = self.frame_snapshot.capture_graphics(
+                let mut snapshot_error = None;
+                let output = self.connector.advance_with_frames(&packet, |completed| {
+                    let frame = self.frame_snapshot.capture_graphics(
                         completed.graphics,
                         completed.damage,
                         completed.bits_per_pixel,
                     );
+                    let mut frame = match frame {
+                        Ok(frame) => frame,
+                        Err(error) => { snapshot_error = Some(error); return; }
+                    };
                     self.completed_acknowledgement = completed.acknowledgement;
                     frame.acknowledgement = self.completed_acknowledgement.clone();
                     self.completed_frame = Some(frame);
-                })?
+                })?;
+                if let Some(error) = snapshot_error { return Err(error); }
+                output
             },
             Some(update) = self.sidebands.next() => match update {
                 sidebands::Update::Connected { request_id, result } => rustrdp::HandshakeOutput {
@@ -392,5 +400,25 @@ impl Handshake<'_> {
             | Event::ClipboardPublishRejected => {}
         };
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_control_capability_remains_available_when_initial_resolution_is_fixed() {
+        let mut config = RdpConfig {
+            dynamic_resolution: false,
+            ..Default::default()
+        };
+        let initial = (config.width, config.height);
+        let negotiated = client_config(&config, false).unwrap();
+        assert!(negotiated.dynamic_resolution);
+        assert_eq!((negotiated.width, negotiated.height), initial);
+        assert!(!config.uses_dynamic_resolution());
+        config.monitor_count = 2;
+        assert!(!client_config(&config, false).unwrap().dynamic_resolution);
     }
 }

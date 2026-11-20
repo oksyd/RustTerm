@@ -6,6 +6,25 @@ use rustterm::session::Command;
 use std::sync::Arc;
 
 impl TerminalView {
+    fn send_shell_action(
+        &mut self,
+        action: rustterm::session::ShellAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.window_state.is_locked()
+            || self.show_final_alternate
+            || self.viewed_run + 1 != self.runs.len()
+        {
+            return;
+        }
+        if let Some(run) = self.runs.get(self.viewed_run)
+            && let Err(error) = run.send_shell_action(action)
+        {
+            self.error = Some(rustterm::i18n::Message::from_error(error));
+            cx.notify();
+        }
+    }
+
     pub fn history_run(&self) -> Option<rustterm::config::Uuid> {
         self.runs.get(self.viewed_run).map(|session| session.id())
     }
@@ -64,26 +83,12 @@ impl TerminalView {
         }
     }
 
-    pub(super) fn command_status(&self) -> Option<String> {
-        let shell = &self.snapshot.as_ref()?.shell;
-        let command = shell
-            .focused_command
-            .and_then(|id| shell.commands.iter().find(|command| command.id == id))
-            .or_else(|| shell.commands.last())?;
-        Some(rustterm::trf!(
-            i18n_key::TERMINAL_COMMAND_FINISHED_IN_SECONDS_S_EXIT_CODE,
-            seconds = format!("{:.1}", command.duration.as_secs_f64()),
-            code = command
-                .exit_status
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "—".into())
-        ))
-    }
-
     pub fn offer_restore_directory(&mut self, path: Option<String>, cx: &mut Context<Self>) {
-        self.previous_directory = path.filter(|path| {
-            path.starts_with('/') && path.len() <= 4096 && !path.chars().any(char::is_control)
-        });
+        self.previous_directory = path
+            .filter(|_| !self.production_protected())
+            .filter(|path| {
+                path.starts_with('/') && path.len() <= 4096 && !path.chars().any(char::is_control)
+            });
         cx.notify();
     }
 
@@ -92,7 +97,8 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.chrome_blocked(cx)
+        if self.production_protected()
+            || self.chrome_blocked(cx)
             || !self.is_running()
             || self.viewed_run + 1 != self.runs.len()
             || self
@@ -151,14 +157,42 @@ impl TerminalView {
                     (None, Some(3)) => "fish",
                     _ => return,
                 };
-                if let Some(command) =
-                    rustterm::terminal::integration::directory_command(shell, &path)
-                {
-                    this.send(Command::Input(command.into_bytes()), cx);
-                }
+                this.send_shell_action(
+                    rustterm::session::ShellAction::RestoreDirectory {
+                        shell,
+                        directory: path,
+                    },
+                    cx,
+                );
             });
         })
         .detach();
+    }
+
+    pub fn sftp_directory(&self) -> Option<&str> {
+        let (run_id, path) = self.observed_directory.as_ref()?;
+        let session = self.runs.get(self.viewed_run)?;
+        if self.kind != super::TerminalKind::Ssh
+            || self.viewed_run + 1 != self.runs.len()
+            || session.id() != *run_id
+            || !session.protection().allows_enhancements()
+            || session.sftp().is_none()
+        {
+            return None;
+        }
+        Some(path)
+    }
+
+    pub fn followed_sftp_directory(&self) -> Option<&str> {
+        sftp_follow_target(
+            self.sftp_directory(),
+            self.settings.sftp_follow_directory,
+            self.sftp_follow_override,
+        )
+    }
+
+    pub fn set_sftp_follow(&mut self, enable: bool) {
+        self.sftp_follow_override = Some(enable);
     }
 
     pub fn current_directory(&self) -> Option<String> {
@@ -191,7 +225,7 @@ impl TerminalView {
         let records = self.command_records();
         let command = records.iter().find(|command| command.id == id);
         if let Some(output) = command.and_then(|command| command.output.as_deref()) {
-            cx.write_to_clipboard(ClipboardItem::new_string(output.to_string()));
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(output.to_string()));
         } else {
             self.error = Some(
                 if command.is_some_and(|command| command.output_cache_disabled) {
@@ -206,7 +240,8 @@ impl TerminalView {
     }
 
     pub fn can_enable_shell_integration(&self, cx: &gpui::App) -> bool {
-        !self.chrome_blocked(cx)
+        !self.production_protected()
+            && !self.chrome_blocked(cx)
             && !self.window_state.is_locked()
             && self.is_running()
             && self.viewed_run + 1 == self.runs.len()
@@ -248,11 +283,35 @@ impl TerminalView {
                     Some(3) => "fish",
                     _ => return,
                 };
-                if let Some(script) = rustterm::terminal::integration::activation(shell) {
-                    this.send(Command::Input(script.into_bytes()), cx);
-                }
+                this.send_shell_action(
+                    rustterm::session::ShellAction::EnableIntegration { shell },
+                    cx,
+                );
             });
         })
         .detach();
+    }
+}
+
+fn sftp_follow_target(
+    directory: Option<&str>,
+    default: bool,
+    session_override: Option<bool>,
+) -> Option<&str> {
+    directory.filter(|_| session_override.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sftp_follows_reported_directory_using_the_session_choice_before_the_default() {
+        let cwd = Some("/srv/app");
+        assert_eq!(sftp_follow_target(cwd, true, None), cwd);
+        assert_eq!(sftp_follow_target(cwd, false, None), None);
+        assert_eq!(sftp_follow_target(cwd, true, Some(false)), None);
+        assert_eq!(sftp_follow_target(cwd, false, Some(true)), cwd);
+        assert_eq!(sftp_follow_target(None, true, Some(true)), None);
     }
 }

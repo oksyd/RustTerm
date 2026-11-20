@@ -4,6 +4,8 @@ use gpui::{Context, Window};
 use rustterm::{config::Uuid, session::Command};
 use std::time::Duration;
 
+pub(super) const LONG_COMMAND_DURATION: Duration = Duration::from_secs(10);
+
 impl TerminalView {
     pub(super) fn watch_command_completions(&mut self, cx: &mut Context<Self>) {
         self.command_task = None;
@@ -29,7 +31,7 @@ impl TerminalView {
                         || this.viewed_run + 1 != this.runs.len();
                     if background
                         && !this.window_state.is_locked()
-                        && command.duration >= Duration::from_secs(10)
+                        && command.duration >= LONG_COMMAND_DURATION
                     {
                         this.unread = true;
                         cx.emit(PaneEvent::CommandFinished {

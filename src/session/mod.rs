@@ -8,6 +8,8 @@ use crate::i18n::messages as i18n_key;
 
 mod actor;
 mod budget;
+mod protection;
+pub use protection::{SessionProtection, ShellAction};
 mod container;
 pub(crate) mod exec;
 #[cfg(target_os = "linux")]
@@ -143,6 +145,7 @@ pub enum Command {
         rows: u16,
     },
     Scroll(i32),
+    ScrollFractional(f64),
     /// Scroll a mouse-unaware alternate-screen application, if it still owns the terminal.
     AlternateScroll(i32),
     /// Absolute viewport distance from the live terminal bottom, in rows.
@@ -158,11 +161,26 @@ pub enum Command {
     RevealCommand {
         id: u64,
     },
+    ToggleCommandFold {
+        id: u64,
+    },
+    RevealCommandBlock {
+        id: u64,
+    },
+    SelectCommandBlock {
+        id: u64,
+    },
     BeginSelection {
         column: u16,
         row: u16,
         kind: SelectionKind,
     },
+    BeginSelectionAt {
+        position: crate::terminal::SelectionPoint,
+        kind: SelectionKind,
+        extend: bool,
+    },
+    UpdateSelectionAt(crate::terminal::SelectionPoint),
     UpdateSelection {
         column: u16,
         row: u16,
@@ -173,12 +191,18 @@ pub enum Command {
         query: String,
         case_sensitive: bool,
     },
+    SearchScoped {
+        query: String,
+        case_sensitive: bool,
+        scope: crate::terminal::SearchScope,
+    },
     CancelSearch,
     NextMatch {
         backwards: bool,
     },
     SetHighlight(bool),
     SetSelectionHighlight(bool),
+    SetWordDelimiters(String),
     SetCommandOutputCache(bool),
     SetTheme(crate::config::Theme),
     SetHistoryBudget {
@@ -190,6 +214,12 @@ pub enum Command {
 }
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SendError {
+    #[error("{}", crate::i18n::tr(i18n_key::CONNECTIONS_PRODUCTION_BLOCKED))]
+    Protected,
+    #[error("{}", crate::i18n::tr(i18n_key::TERMINAL_PRODUCTION_PASTE_REVIEW))]
+    PasteReviewRequired,
+    #[error("{}", crate::i18n::tr(i18n_key::TERMINAL_INVALID_SHELL_ACTION))]
+    InvalidShellAction,
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::CONNECTIONS_THE_SESSION_INPUT_QUEUE_IS_FULL_PLEASE_RETRY_LATER)
@@ -212,6 +242,8 @@ pub enum SendError {
         crate::i18n::tr(i18n_key::CONNECTIONS_TERMINAL_SIZE_MUST_BE_2_TO_500_COLUMNS_AND_1)
     )]
     InvalidSize,
+    #[error("{}", crate::i18n::tr(i18n_key::SETTINGS_WORD_DELIMITERS_INVALID))]
+    InvalidWordDelimiters,
     #[error(
         "{}",
         crate::i18n::tr(i18n_key::CONNECTIONS_NO_HOST_KEY_IS_WAITING_FOR_CONFIRMATION)
@@ -249,7 +281,15 @@ impl ResizeReceipt {
 
 enum ActorCommand {
     User(Command),
-    CopySelection(oneshot::Sender<Option<String>>),
+    CopySelection {
+        search_query: bool,
+        reply: oneshot::Sender<Option<String>>,
+    },
+    CopyCommandBlock {
+        id: u64,
+        part: crate::terminal::BlockCopy,
+        reply: oneshot::Sender<Option<String>>,
+    },
     Resize {
         columns: u16,
         rows: u16,
@@ -267,6 +307,7 @@ enum ActorCommand {
 pub struct Session {
     commands: mpsc::Sender<ActorCommand>,
     shared: Arc<Shared>,
+    protection: SessionProtection,
 }
 impl Session {
     /// An ephemeral container shell; it shares SSH authentication, not terminal input.
@@ -278,7 +319,8 @@ impl Session {
         rows: u16,
         history: usize,
     ) -> Result<Self> {
-        let (handle, terminal, commands) = Self::create(columns, rows, history)?;
+        let (mut handle, terminal, commands) = Self::create(columns, rows, history)?;
+        handle.protection = client.protection();
         runtime()?.spawn(container::run(
             client,
             id,
@@ -301,7 +343,15 @@ impl Session {
         let shared = Shared::new(&terminal);
         budget::register(&shared);
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        Ok((Self { commands, shared }, terminal, receiver))
+        Ok((
+            Self {
+                commands,
+                shared,
+                protection: SessionProtection::Standard,
+            },
+            terminal,
+            receiver,
+        ))
     }
     pub fn spawn_local(
         options: LocalOptions,
@@ -327,7 +377,8 @@ impl Session {
             crate::i18n::tr(i18n_key::CONNECTIONS_SSH_HOST_PORT_AND_USERNAME_ARE_REQUIRED)
         );
         let runtime = runtime()?;
-        let (handle, terminal, commands) = Self::create(columns, rows, history)?;
+        let (mut handle, terminal, commands) = Self::create(columns, rows, history)?;
+        handle.protection = options.production_protection.into();
         runtime.spawn(ssh::run(
             options,
             terminal,
@@ -374,6 +425,32 @@ impl Session {
     }
     /// Nonblocking admission. Errors mean that the command was not accepted.
     pub fn send(&self, command: Command) -> std::result::Result<(), SendError> {
+        self.send_checked(command, false)
+    }
+
+    pub fn protection(&self) -> SessionProtection {
+        self.protection
+    }
+
+    pub fn send_shell_action(&self, action: ShellAction) -> std::result::Result<(), SendError> {
+        if !self.protection.allows_enhancements() {
+            return Err(SendError::Protected);
+        }
+        let command = action.command().ok_or(SendError::InvalidShellAction)?;
+        self.send(Command::Input(command.into_bytes()))
+    }
+
+    /// Call only after a preview has been approved for this exact session.
+    /// The UI must discard approval when its target session changes.
+    pub fn paste_confirmed(&self, text: String) -> std::result::Result<(), SendError> {
+        self.send_checked(Command::Paste(text), true)
+    }
+
+    fn send_checked(
+        &self,
+        command: Command,
+        paste_confirmed: bool,
+    ) -> std::result::Result<(), SendError> {
         if self.shared.actor_stop.is_cancelled() {
             return Err(SendError::Closed);
         }
@@ -409,17 +486,27 @@ impl Session {
             return Err(SendError::TransferBusy);
         }
         match &command {
+            Command::SetWordDelimiters(text) if !crate::terminal::valid_word_delimiters(text) => {
+                return Err(SendError::InvalidWordDelimiters);
+            }
             Command::Input(bytes) if bytes.len() > MAX_INPUT_BYTES => {
                 return Err(SendError::TooLarge);
             }
             Command::Paste(text)
             | Command::Key { key: text, .. }
             | Command::Search { query: text, .. }
+            | Command::SearchScoped { query: text, .. }
                 if text.len() > MAX_INPUT_BYTES =>
             {
                 return Err(SendError::TooLarge);
             }
             _ => {}
+        }
+        if let Command::Paste(text) = &command
+            && !paste_confirmed
+            && self.protection.requires_paste_review(text)
+        {
+            return Err(SendError::PasteReviewRequired);
         }
         let tracked = is_user_input(&command);
         if tracked {
@@ -580,7 +667,10 @@ impl Session {
             .clone()
     }
     pub fn resources(&self) -> Option<ResourceClient> {
-        if self.shared.io_stop.is_cancelled() || self.state() != SessionState::Connected {
+        if !self.protection.allows_enhancements()
+            || self.shared.io_stop.is_cancelled()
+            || self.state() != SessionState::Connected
+        {
             return None;
         }
         self.shared
@@ -664,12 +754,42 @@ impl Session {
     pub fn copy_selection(
         &self,
     ) -> std::result::Result<oneshot::Receiver<Option<String>>, SendError> {
+        self.selection_text(false)
+    }
+
+    pub fn selection_search_query(
+        &self,
+    ) -> std::result::Result<oneshot::Receiver<Option<String>>, SendError> {
+        self.selection_text(true)
+    }
+
+    fn selection_text(
+        &self,
+        search_query: bool,
+    ) -> std::result::Result<oneshot::Receiver<Option<String>>, SendError> {
         if self.shared.actor_stop.is_cancelled() {
             return Err(SendError::Closed);
         }
         let (sender, receiver) = oneshot::channel();
         self.commands
-            .try_send(ActorCommand::CopySelection(sender))
+            .try_send(ActorCommand::CopySelection {
+                search_query,
+                reply: sender,
+            })
+            .map_err(map_send_error)?;
+        Ok(receiver)
+    }
+    pub fn copy_command_block(
+        &self,
+        id: u64,
+        part: crate::terminal::BlockCopy,
+    ) -> std::result::Result<oneshot::Receiver<Option<String>>, SendError> {
+        if self.shared.actor_stop.is_cancelled() {
+            return Err(SendError::Closed);
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.commands
+            .try_send(ActorCommand::CopyCommandBlock { id, part, reply })
             .map_err(map_send_error)?;
         Ok(receiver)
     }
@@ -783,6 +903,7 @@ mod tests {
             shared.transition(LifecycleEvent::Connected);
             let (commands, _receiver) = mpsc::channel(1);
             let session = Session {
+                protection: Default::default(),
                 commands,
                 shared: shared.clone(),
             };
@@ -820,6 +941,7 @@ mod tests {
         shared.transition(LifecycleEvent::Connected);
         let (commands, _receiver) = mpsc::channel(1);
         let session = Session {
+            protection: Default::default(),
             commands,
             shared: shared.clone(),
         };

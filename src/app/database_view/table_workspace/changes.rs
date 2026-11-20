@@ -17,6 +17,22 @@ pub(super) fn initial_mode(
     }
 }
 
+pub(super) fn current_value<'a>(
+    change: Option<&'a RowChange>,
+    original: Option<&'a [CellValue]>,
+    column: usize,
+) -> Option<&'a CellValue> {
+    let assignments = match change {
+        Some(RowChange::Insert { values } | RowChange::Update { values, .. }) => values.as_slice(),
+        _ => &[],
+    };
+    assignments
+        .iter()
+        .find(|(index, _)| *index == column)
+        .map(|(_, value)| value)
+        .or_else(|| original?.get(column))
+}
+
 /// None means omit an inserted field, while Some(Null) writes SQL NULL.
 pub(super) fn stage_value(
     changes: &mut BTreeMap<usize, RowChange>,
@@ -24,18 +40,18 @@ pub(super) fn stage_value(
     row: usize,
     column: usize,
     value: Option<CellValue>,
-) -> Result<Option<String>, DatabaseError> {
+) -> Result<(), DatabaseError> {
     let Some(value) = value else {
         let Some(RowChange::Insert { values }) = changes.get_mut(&row) else {
             return Err(DatabaseError::InvalidTableEdit);
         };
         values.retain(|(index, _)| *index != column);
-        return Ok(None);
+        return Ok(());
     };
     if let Some(RowChange::Insert { values }) = changes.get_mut(&row) {
         values.retain(|(index, _)| *index != column);
-        values.push((column, value.clone()));
-        return Ok(value.display());
+        values.push((column, value));
+        return Ok(());
     }
     if matches!(changes.get(&row), Some(RowChange::Delete { .. })) {
         return Err(DatabaseError::InvalidTableEdit);
@@ -53,12 +69,12 @@ pub(super) fn stage_value(
     };
     values.retain(|(index, _)| *index != column);
     if previous != &value {
-        values.push((column, value.clone()));
+        values.push((column, value));
     }
     if values.is_empty() {
         changes.remove(&row);
     }
-    Ok(value.display())
+    Ok(())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -153,16 +169,17 @@ mod tests {
                 values: vec![(1, CellValue::Null)]
             })
         );
+        stage_value(
+            &mut changes,
+            &[],
+            0,
+            1,
+            Some(CellValue::Text(String::new())),
+        )
+        .unwrap();
         assert_eq!(
-            stage_value(
-                &mut changes,
-                &[],
-                0,
-                1,
-                Some(CellValue::Text(String::new()))
-            )
-            .unwrap(),
-            Some(String::new())
+            current_value(changes.get(&0), None, 1),
+            Some(&CellValue::Text(String::new()))
         );
         assert!(initial_mode(changes.get(&0), 1, Some("")) == CellMode::Value);
         stage_value(&mut changes, &[], 0, 1, None).unwrap();

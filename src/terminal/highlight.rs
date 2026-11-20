@@ -21,6 +21,7 @@ const MAX_CACHE_ENTRIES: usize = 256;
 struct Span {
     range: Range<usize>,
     color: u32,
+    underline: bool,
 }
 #[derive(Default)]
 pub(super) struct HighlightCache {
@@ -61,82 +62,18 @@ impl HighlightCache {
 }
 
 fn color_brackets(text: &str, spans: &mut Vec<Span>, theme: &super::Theme) {
-    let colors = [
-        theme.warn,
-        theme.address,
-        theme.info,
-        theme.url,
-        theme.debug,
-        theme.error,
-    ];
-    let mut stack = Vec::new();
-    let mut brackets = Vec::new();
-    let mut span_index = 0;
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in text.char_indices() {
-        while spans
-            .get(span_index)
-            .is_some_and(|span| span.range.end <= index)
-        {
-            span_index += 1;
-        }
-        if spans
-            .get(span_index)
-            .is_some_and(|span| span.range.contains(&index))
-        {
-            escaped = false;
-            continue;
-        }
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote != Some('\'') {
-            escaped = true;
-            continue;
-        }
-        let apostrophe = ch == '\''
-            && text[..index]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_alphanumeric)
-            && text[index + 1..]
-                .chars()
-                .next()
-                .is_some_and(char::is_alphanumeric);
-        if let Some(delimiter) = quote {
-            if ch == delimiter && !apostrophe {
-                quote = None;
-            }
-            continue;
-        }
-        if ch == '"' || ch == '\'' && !apostrophe {
-            quote = Some(ch);
-            continue;
-        }
-        match ch {
-            '(' | '[' | '{' => stack.push((index, ch, colors[stack.len() % colors.len()])),
-            ')' | ']' | '}' => {
-                if let Some((start, opening, color)) = stack.pop()
-                    && matches!((opening, ch), ('(', ')') | ('[', ']') | ('{', '}'))
-                {
-                    brackets.push(Span {
-                        range: start..start + 1,
-                        color,
-                    });
-                    brackets.push(Span {
-                        range: index..index + 1,
-                        color,
-                    });
-                } else {
-                    stack.clear();
-                }
-            }
-            _ => {}
+    let colors = theme.bracket_colors();
+    let pairs = super::delimiters::pairs(text, spans.iter().map(|span| span.range.clone()));
+    for pair in pairs.into_iter().filter(|pair| !pair.quoted) {
+        let color = colors[pair.depth % colors.len()];
+        for offset in [pair.open, pair.close] {
+            spans.push(Span {
+                range: offset..offset + 1,
+                color,
+                underline: false,
+            });
         }
     }
-    spans.extend(brackets);
     spans.sort_unstable_by_key(|span| span.range.start);
 }
 
@@ -145,19 +82,22 @@ impl Terminal {
         self.highlight_enabled = enabled;
         self.version = self.version.wrapping_add(1);
     }
-    pub(super) fn decorate_snapshot(&self, snapshot: &mut Snapshot) {
+    pub(super) fn decorate_snapshot(&self, snapshot: &mut Snapshot, reused: &[bool]) {
         if !self.highlight_enabled {
             return;
         }
         let grid = self.term.grid();
-        let view_top = -(grid.display_offset() as i32);
-        let view_end = view_top + self.size.rows as i32;
-        let mut current = view_top;
+        let mut visible = 0;
         let mut cache = self
             .highlight_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        while current < view_end {
+        while visible < snapshot.lines.len() {
+            if reused[visible] {
+                visible += 1;
+                continue;
+            }
+            let current = snapshot.lines[visible].source_line.0;
             let mut first = current;
             let mut estimated = 0;
             while first > grid.topmost_line().0
@@ -193,8 +133,11 @@ impl Terminal {
                             text.push(c);
                         }
                     }
-                    if line >= view_top && line < view_end {
-                        map.push((line, column, start..text.len()));
+                    if let Ok(row) = snapshot
+                        .lines
+                        .binary_search_by_key(&Line(line), |row| row.source_line)
+                    {
+                        map.push((row, line, column, start..text.len()));
                     }
                     if text.len() > MAX_LINE_BYTES {
                         overlong = true;
@@ -212,31 +155,43 @@ impl Terminal {
             if !overlong {
                 let spans = cache.spans(&text, &self.theme);
                 let mut span_index = 0;
-                for (line, column, range) in map {
+                for (row, line, column, range) in map {
+                    if reused[row] {
+                        continue;
+                    }
                     while spans
                         .get(span_index)
                         .is_some_and(|span| span.range.end <= range.start)
                     {
                         span_index += 1;
                     }
-                    let cell = &mut snapshot.lines[(line - view_top) as usize].cells[column];
-                    if cell.default_foreground
-                        && !cell.hidden
+                    let cell = &mut Arc::make_mut(&mut snapshot.lines[row].cells)[column];
+                    if !cell.hidden
                         && let Some(span) = spans.get(span_index)
                         && span.range.start < range.end
                     {
-                        cell.foreground = if grid[Point::new(Line(line), Column(column))]
-                            .flags
-                            .contains(Flags::DIM)
+                        let flags = grid[Point::new(Line(line), Column(column))].flags;
+                        if cell.default_foreground {
+                            cell.foreground = if flags.contains(Flags::DIM) {
+                                super::dim(span.color)
+                            } else {
+                                span.color
+                            };
+                        }
+                        if span.underline
+                            && !snapshot.alternate_screen
+                            && !snapshot.mouse_reporting
+                            && !flags.contains(Flags::INVERSE)
                         {
-                            super::dim(span.color)
-                        } else {
-                            span.color
-                        };
+                            cell.underline = true;
+                        }
                     }
                 }
             }
-            current = line.max(current + 1);
+            visible += 1;
+            while visible < snapshot.lines.len() && snapshot.lines[visible].source_line.0 < line {
+                visible += 1;
+            }
         }
     }
 }

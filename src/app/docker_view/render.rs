@@ -618,9 +618,12 @@ impl DockerView {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         if this.interactive(cx) {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                                this.logs.text(this.log_search.read(cx).value()),
-                                            ));
+                                            let text =
+                                                this.logs.text(this.log_search.read(cx).value());
+                                            crate::app::clipboard::write(
+                                                cx,
+                                                ClipboardItem::new_string(text),
+                                            );
                                         }
                                     },
                                 )),

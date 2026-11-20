@@ -77,6 +77,7 @@ struct ProfileDraft {
     group: Option<Uuid>,
     ssh_auth: SshAuthentication,
     shell_integration: bool,
+    production_protection: bool,
     forwards: Vec<rustterm::config::PortForward>,
     auto_forward: rustterm::config::ssh::AutoForwardConfig,
     forward_draft: Option<Vec<String>>,
@@ -102,6 +103,7 @@ pub struct ProfileForm {
     group_scroll: ScrollHandle,
     ssh_auth: SshAuthentication,
     shell_integration: bool,
+    production_protection: bool,
     forwards: Vec<rustterm::config::PortForward>,
     auto_forward: rustterm::config::ssh::AutoForwardConfig,
     forward_editor: Option<Entity<crate::app::port_editor::PortEditor>>,
@@ -171,6 +173,9 @@ impl ProfileForm {
                 _ => None,
             })
             .unwrap_or(true);
+        let production_protection = profile.as_ref().is_some_and(|profile| {
+            matches!(&profile.connection, Connection::Ssh(config) if config.production_protection)
+        });
         let mut database_tls = false;
         let mut es_auth = rustterm::config::ElasticsearchAuth::None;
         let mut sqlite_read_only = true;
@@ -380,6 +385,7 @@ impl ProfileForm {
             group_scroll: ScrollHandle::new(),
             ssh_auth,
             shell_integration,
+            production_protection,
             database_tls,
             es_auth,
             sqlite_read_only,
@@ -450,6 +456,7 @@ impl ProfileForm {
             group: self.group,
             ssh_auth: self.ssh_auth,
             shell_integration: self.shell_integration,
+            production_protection: self.production_protection,
             forwards: self.forwards.clone(),
             auto_forward: self.auto_forward.clone(),
             forward_draft: self
@@ -553,7 +560,7 @@ impl Render for ProfileForm {
                 ProfileKind::Elasticsearch => self.elasticsearch_body(cx),
                 ProfileKind::Mysql | ProfileKind::Postgres | ProfileKind::ClickHouse => self.sql_body(cx),
                 ProfileKind::Sqlite => self.sqlite_body(cx),
-                ProfileKind::Rdp => unreachable!(),
+                ProfileKind::Rdp => self.rdp_body(compact, cx),
             }).child(self.profile_details(cx)).into_any_element()
         };
         let navigation = ui::preferences_navigation(compact).children(

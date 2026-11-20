@@ -9,6 +9,16 @@ use rustterm::i18n::tr;
 use rustterm::session::{Session, ZmodemDirection, ZmodemPhase, ZmodemSelection, ZmodemStatus};
 
 impl TerminalView {
+    pub fn active_transfer_warning(&self) -> Option<&'static str> {
+        let status = self.runs.last()?.zmodem_status()?;
+        status
+            .is_active()
+            .then_some(match status.progress.direction {
+                ZmodemDirection::Upload => i18n_key::WORKSPACE_CLOSE_UPLOADS,
+                ZmodemDirection::Download => i18n_key::WORKSPACE_CLOSE_DOWNLOADS,
+            })
+    }
+
     pub(super) fn poll_transfer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let status = self
             .runs

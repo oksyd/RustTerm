@@ -23,6 +23,13 @@ impl Render for RdpView {
         }
         let index = self.index;
         let fullscreen = window.is_fullscreen();
+        let immersive = fullscreen && self.config.remote_app.is_none();
+        if self.fullscreen != immersive {
+            self.fullscreen = immersive;
+            self.show_fullscreen_bar(cx);
+            self.hide_fullscreen_bar_later(cx);
+            self.request_resize(cx);
+        }
         let header = ui::panel_header()
             .min_w_0()
             .child(ui::connection_address(
@@ -33,39 +40,7 @@ impl Render for RdpView {
                 self.title.clone(),
             ))
             .when(self.config.remote_app.is_none(), |header| {
-                header.child(
-                    ui::text_button(("rdp-fit", index), i18n_key::RDP_FIT, ButtonStyle::Neutral)
-                        .tab_index(0)
-                        .flex_shrink_0()
-                        .whitespace_nowrap()
-                        .when(self.zoom == Zoom::Fit, |button| {
-                            button
-                                .bg(rgb(ui::colors().selected))
-                                .text_color(rgb(ui::colors().accent))
-                        })
-                        .tooltip(|_, cx| {
-                            cx.new(|_| {
-                                ui::Tooltip(
-                                    tr(i18n_key::RDP_SCALE_DESKTOP_TO_FIT_THE_PANE).to_owned(),
-                                )
-                            })
-                            .into()
-                        })
-                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.display_action_available(window) {
-                                this.release_control(cx);
-                                this.zoom = Zoom::Fit;
-                                this.pan = (0., 0.);
-                                this.focus.focus(window);
-                                cx.emit(PaneEvent::Activity);
-                                cx.notify();
-                            }
-                        })),
-                )
+                header.child(self.render_display_button(cx))
             })
             .when(self.config.remote_app.is_none(), |header| {
                 header.child(
@@ -167,24 +142,20 @@ impl Render for RdpView {
                         move |bounds, window, cx| {
                             let hidden_bounds = entity.update(cx, |this, _| {
                                 this.bounds = Some(bounds);
-                                this.pan.0 = this.pan.0.clamp(
-                                    0.,
-                                    (f32::from(this.desktop_size.0) - f32::from(bounds.size.width))
-                                        .max(0.),
-                                );
-                                this.pan.1 = this.pan.1.clamp(
-                                    0.,
-                                    (f32::from(this.desktop_size.1)
-                                        - f32::from(bounds.size.height))
-                                    .max(0.),
-                                );
+                                this.clamp_pan(bounds);
                                 (this.state == State::Connected
                                     && this.remote_input_enabled()
                                     && !this.images.is_empty()
                                     && this.hide_local_pointer)
                                     .then(|| {
-                                        desktop_bounds(bounds, this.image_size, this.zoom, this.pan)
-                                            .intersect(&bounds)
+                                        desktop_bounds(
+                                            bounds,
+                                            this.image_size,
+                                            this.zoom,
+                                            this.pan,
+                                            this.device_scale,
+                                        )
+                                        .intersect(&bounds)
                                     })
                             });
                             // Scope the cursor request to actual desktop pixels.
@@ -215,7 +186,7 @@ impl Render for RdpView {
         }
         if self.config.remote_app.is_some() && self.state == State::Connected {
             body = body.child(self.application_panel(cx));
-        } else if self.images.is_empty() || self.state != State::Connected {
+        } else if self.images.is_empty() || self.stale_desktop || self.state != State::Connected {
             body = body.child(self.render_connection_state(cx));
         }
         if !self.preedit.is_empty() {
@@ -258,8 +229,9 @@ impl Render for RdpView {
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
             .on_modifiers_changed(cx.listener(Self::modifiers_changed))
-            .child(header)
+            .when(!self.fullscreen, |d| d.child(header))
             .child(body)
+            .children(self.render_fullscreen_bar(cx))
             .children(self.render_menu(cx))
     }
 }
@@ -267,11 +239,21 @@ impl Render for RdpView {
 impl RdpView {
     fn defer_native_cursor(&self, window: &Window, cx: &mut Context<Self>) {
         cx.defer_in(window, |this, window, cx| {
-            let desktop =
-                (this.remote_input_enabled() && this.hide_local_pointer && !this.images.is_empty())
-                    .then_some(this.bounds)
-                    .flatten()
-                    .map(|bounds| desktop_bounds(bounds, this.image_size, this.zoom, this.pan));
+            let desktop = (this.remote_input_enabled()
+                && !this.toolbar_hovered
+                && this.hide_local_pointer
+                && !this.images.is_empty())
+            .then_some(this.bounds)
+            .flatten()
+            .map(|bounds| {
+                desktop_bounds(
+                    bounds,
+                    this.image_size,
+                    this.zoom,
+                    this.pan,
+                    this.device_scale,
+                )
+            });
             let visible = desktop
                 .zip(this.bounds)
                 .map(|(desktop, bounds)| desktop.intersect(&bounds));
@@ -292,7 +274,7 @@ impl RdpView {
             && !self.window_state.prompts.is_busy()
     }
 
-    fn render_menu_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn render_menu_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         ui::icon_button(
             ("rdp-menu", self.index),
             Icon::More,
@@ -318,9 +300,10 @@ impl RdpView {
             .filter(|_| self.state == State::Connected)
             .map(|error| (error.render(), ui::colors().danger, true))
             .or_else(|| match &self.clipboard.feedback {
-                Some(feedback @ Feedback::Rejected(_)) => {
-                    Some((feedback.text(), ui::colors().danger, true))
-                }
+                Some(Feedback::Rejected(_)) => self
+                    .clipboard
+                    .feedback_text()
+                    .map(|text| (text, ui::colors().danger, true)),
                 _ => None,
             })
             .or_else(|| {
@@ -339,23 +322,24 @@ impl RdpView {
                     .map(|transfer| (transfer.text(), ui::colors().muted, false))
             })
             .or_else(|| {
-                self.clipboard.feedback.as_ref().map(|feedback| {
+                self.clipboard.feedback.as_ref().and_then(|feedback| {
                     let color = match feedback {
                         Feedback::ReadingFiles | Feedback::Waiting | Feedback::Requesting => {
                             ui::colors().muted
                         }
                         Feedback::RemoteEmpty => ui::colors().warning,
-                        Feedback::RemoteReady => ui::colors().accent,
                         _ => ui::colors().text,
                     };
-                    (feedback.text(), color, true)
+                    self.clipboard
+                        .feedback_text()
+                        .map(|text| (text, color, true))
                 })
             });
         let has_feedback = feedback.is_some();
         let (control_label, control_color) = self.control_status();
         let (text, color, dismissible) = feedback.unwrap_or_else(|| {
             if self.state == State::Connected {
-                (tr(control_label).to_owned(), control_color, false)
+                (String::new(), control_color, false)
             } else {
                 (self.title.clone(), ui::colors().muted, false)
             }
@@ -403,6 +387,14 @@ impl RdpView {
                 .size(px(12.))
                 .text_color(rgb(control_color)),
             )
+            .when(self.state == State::Connected, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(rgb(control_color))
+                        .child(tr(self.control_badge())),
+                )
+            })
             .child(
                 div()
                     .id(("rdp-feedback", self.index))
@@ -461,7 +453,13 @@ impl RdpView {
             self.invalidate_frame_acknowledgements();
             return;
         }
-        let desktop = desktop_bounds(viewport, self.image_size, self.zoom, self.pan);
+        let desktop = desktop_bounds(
+            viewport,
+            self.image_size,
+            self.zoom,
+            self.pan,
+            self.device_scale,
+        );
         let visible = desktop.intersect(&viewport);
         let device_scale = window.scale_factor();
         let started = Instant::now();
@@ -568,7 +566,22 @@ impl RdpView {
             {
                 continue;
             }
-            let buffer = tile_buffer(tile);
+            let buffer = match tile_buffer(tile) {
+                Ok(buffer) => buffer,
+                Err(error) => {
+                    self.window_state.record_with_context(
+                        error.diagnostic_code(),
+                        error.diagnostic_context(),
+                        self.index,
+                    );
+                    self.disconnect();
+                    self.state = State::Failed;
+                    self.error = Some(Message::from_error(error));
+                    self.clear_images(window);
+                    retire_images(window, retired);
+                    return;
+                }
+            };
             prepared_tiles += 1;
             prepared_bytes += buffer.as_raw().len() as u64;
             let image = TileImage {
@@ -585,6 +598,7 @@ impl RdpView {
             }
         }
         self.image_size = (frame.width, frame.height);
+        self.stale_desktop = false;
         self.image_acknowledgement = frame.acknowledgement.clone();
         self.hide_local_pointer = self
             .cursor
@@ -614,18 +628,23 @@ impl RdpView {
             State::Disconnected => i18n_key::RDP_THE_REMOTE_DESKTOP_CONNECTION_IS_CLOSED,
             State::Failed => i18n_key::RDP_THE_REMOTE_DESKTOP_CONNECTION_COULD_NOT_BE_ESTABLISHED,
         };
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
+        let content = div()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
             .gap(px(12.))
             .p(px(20.))
-            .bg(rgb(ui::colors().bg))
+            .bg(rgb(ui::colors().raised))
+            .rounded(px(4.))
+            .when(!self.images.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(ui::colors().muted))
+                        .child(tr(i18n_key::RDP_PREVIOUS_DESKTOP_READ_ONLY)),
+                )
+            })
             .cursor(CursorStyle::Arrow)
             .child(
                 ui::icon(Icon::Desktop)
@@ -665,13 +684,39 @@ impl RdpView {
                     ),
                 )
             })
-            .into_any_element()
+            .into_any_element();
+        let outer = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .top_0()
+            .flex()
+            .justify_center()
+            .p(px(8.));
+        if self.images.is_empty() {
+            outer
+                .h_full()
+                .items_center()
+                .child(content)
+                .into_any_element()
+        } else {
+            outer.child(content).into_any_element()
+        }
     }
 
     pub(super) fn remote_position(&self, point: Point<Pixels>, clamp: bool) -> Option<(u16, u16)> {
         let viewport = self.bounds?;
-        let desktop = desktop_bounds(viewport, self.desktop_size, self.zoom, self.pan);
-        map_position(point, viewport, desktop, self.desktop_size, clamp)
+        // The frame watcher and rendering consume independent revisions. Hit
+        // testing must use the displayed frame, just like painting and the
+        // cursor, rather than a desktop size reported before/after that frame.
+        let desktop = desktop_bounds(
+            viewport,
+            self.image_size,
+            self.zoom,
+            self.pan,
+            self.device_scale,
+        );
+        map_position(point, viewport, desktop, self.image_size, clamp)
     }
 }
 
@@ -696,26 +741,27 @@ pub(super) fn retire_images(window: &Window, images: Vec<Arc<RenderImage>>) {
     });
 }
 
-fn desktop_bounds(
+pub(super) fn desktop_bounds(
     viewport: Bounds<Pixels>,
     desktop: (u16, u16),
     zoom: Zoom,
     pan: (f32, f32),
+    device_scale: f32,
 ) -> Bounds<Pixels> {
     let vw = f32::from(viewport.size.width).max(1.);
     let vh = f32::from(viewport.size.height).max(1.);
     let width = f32::from(desktop.0).max(1.);
     let height = f32::from(desktop.1).max(1.);
     let scale = match zoom {
-        Zoom::Fit => (vw / width).min(vh / height),
-        Zoom::Actual => 1.,
+        Zoom::Fit | Zoom::Dynamic => (vw / width).min(vh / height),
+        Zoom::Actual => 1. / device_scale.max(0.1),
     };
     let rendered = (width * scale, height * scale);
     let offset = match zoom {
-        Zoom::Fit => ((vw - rendered.0) / 2., (vh - rendered.1) / 2.),
+        Zoom::Fit | Zoom::Dynamic => ((vw - rendered.0) / 2., (vh - rendered.1) / 2.),
         Zoom::Actual => (
-            ((vw - width) / 2.).max(0.) - pan.0.clamp(0., (width - vw).max(0.)),
-            ((vh - height) / 2.).max(0.) - pan.1.clamp(0., (height - vh).max(0.)),
+            ((vw - rendered.0) / 2.).max(0.) - (pan.0 * scale).clamp(0., (rendered.0 - vw).max(0.)),
+            ((vh - rendered.1) / 2.).max(0.) - (pan.1 * scale).clamp(0., (rendered.1 - vh).max(0.)),
         ),
     };
     Bounds::new(
@@ -724,8 +770,17 @@ fn desktop_bounds(
     )
 }
 
-pub(super) fn tile_buffer(tile: &RdpTile) -> image::RgbaImage {
+pub(super) fn tile_buffer(tile: &RdpTile) -> Result<image::RgbaImage, rustterm::rdp::RdpError> {
     let stride = usize::from(tile.width) * 4;
+    if tile.width == 0
+        || tile.height == 0
+        || usize::from(tile.height).checked_mul(stride) != Some(tile.pixels.len())
+        || usize::from(tile.width) * usize::from(tile.height) > rustterm::rdp::MAX_FRAME_PIXELS
+    {
+        return Err(rustterm::rdp::RdpError::Protocol(
+            "desktop tile pixel buffer",
+        ));
+    }
     let mut pixels = Vec::with_capacity((stride + 8) * (usize::from(tile.height) + 2));
     let first_row = &tile.pixels[..stride];
     let last_row = &tile.pixels[tile.pixels.len() - stride..];
@@ -746,7 +801,9 @@ pub(super) fn tile_buffer(tile: &RdpTile) -> image::RgbaImage {
         u32::from(tile.height) + 2,
         pixels,
     )
-    .expect("RDP tile dimensions match its pixel buffer")
+    .ok_or(rustterm::rdp::RdpError::Protocol(
+        "desktop tile pixel buffer",
+    ))
 }
 
 pub(super) fn tile_bounds(
@@ -811,11 +868,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn actual_pixels_and_pointer_coordinates_agree_at_fractional_display_scales() {
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(800.), px(400.)));
+        for scale in [1., 1.25, 1.5, 2.] {
+            let desktop = desktop_bounds(viewport, (1920, 1080), Zoom::Actual, (300., 100.), scale);
+            assert!((f32::from(desktop.size.width) * scale - 1920.).abs() < 0.01);
+            let remote = map_position(
+                point(px(100.), px(50.)),
+                viewport,
+                desktop,
+                (1920, 1080),
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                remote,
+                ((300. + 100. * scale) as u16, (100. + 50. * scale) as u16)
+            );
+        }
+    }
+
+    #[test]
+    fn resized_desktops_keep_the_center_and_edges_reachable_in_fit_modes() {
+        for scale in [1., 1.25, 1.5, 2.] {
+            for zoom in [Zoom::Fit, Zoom::Dynamic] {
+                for dimensions in [(1920, 1080), (1080, 1920), (2560, 1440), (3840, 2160)] {
+                    let viewport = Bounds::new(
+                        point(px(20.), px(76.)),
+                        size(px(1280. / scale), px(720. / scale)),
+                    );
+                    let desktop = desktop_bounds(viewport, dimensions, zoom, (0., 0.), scale);
+                    // Choose centers of source pixels, avoiding ambiguous
+                    // fractional boundaries between neighboring pixels.
+                    for (x, y) in [
+                        (0, 0),
+                        (dimensions.0 / 2, dimensions.1 / 2),
+                        (dimensions.0 - 1, dimensions.1 - 1),
+                    ] {
+                        let position = desktop.origin
+                            + point(
+                                desktop.size.width
+                                    * ((f32::from(x) + 0.5) / f32::from(dimensions.0)),
+                                desktop.size.height
+                                    * ((f32::from(y) + 0.5) / f32::from(dimensions.1)),
+                            );
+                        assert_eq!(
+                            map_position(position, viewport, desktop, dimensions, false),
+                            Some((x, y))
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn fitted_tiles_share_edges_and_cover_partial_edge_tiles() {
         let dimensions = (1531, 1081);
         let device_scale = 1.25;
         let viewport = Bounds::new(point(px(20.5), px(76.25)), size(px(831.25), px(567.75)));
-        let desktop = desktop_bounds(viewport, dimensions, Zoom::Fit, (0., 0.));
+        let desktop = desktop_bounds(viewport, dimensions, Zoom::Fit, (0., 0.), 1.);
         let left = tile_bounds(
             Bounds::new(point(0, 0), size(510, 510)),
             desktop,
@@ -850,6 +962,26 @@ mod tests {
     }
 
     #[test]
+    fn invalid_tile_dimensions_and_buffers_are_rejected_before_sampling() {
+        for (width, height, pixels) in [
+            (0, 1, vec![]),
+            (1, 0, vec![]),
+            (2, 2, vec![0; 4]),
+            (2, 1, vec![0; 12]),
+            (u16::MAX, u16::MAX, vec![]),
+        ] {
+            let tile = RdpTile {
+                x: 0,
+                y: 0,
+                width,
+                height,
+                pixels,
+            };
+            assert!(tile_buffer(&tile).is_err());
+        }
+    }
+
+    #[test]
     fn tile_gutter_repeats_edges_and_corners() {
         let tile = RdpTile {
             x: 0,
@@ -858,7 +990,7 @@ mod tests {
             height: 2,
             pixels: vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
         };
-        let buffer = tile_buffer(&tile);
+        let buffer = tile_buffer(&tile).unwrap();
         assert_eq!(buffer.dimensions(), (4, 4));
         for y in 0..4 {
             for x in 0..4 {
@@ -917,7 +1049,7 @@ mod tests {
     fn panned_tiles_exclude_offscreen_regions_and_clip_partial_tiles() {
         let dimensions = (1920, 1080);
         let viewport = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
-        let desktop = desktop_bounds(viewport, dimensions, Zoom::Actual, (1000., 480.));
+        let desktop = desktop_bounds(viewport, dimensions, Zoom::Actual, (1000., 480.), 1.);
         let first = tile_bounds(
             Bounds::new(point(0, 0), size(512, 512)),
             desktop,
@@ -939,7 +1071,7 @@ mod tests {
     #[test]
     fn fit_coordinates_exclude_letterbox_and_include_viewport_origin() {
         let viewport = Bounds::new(point(px(20.), px(76.)), size(px(800.), px(600.)));
-        let image = desktop_bounds(viewport, (1920, 1080), Zoom::Fit, (0., 0.));
+        let image = desktop_bounds(viewport, (1920, 1080), Zoom::Fit, (0., 0.), 1.);
         assert_eq!(image.origin, point(px(20.), px(151.)));
         assert_eq!(
             map_position(
@@ -976,7 +1108,7 @@ mod tests {
     #[test]
     fn actual_pixels_map_pan_without_losing_remote_coordinates() {
         let viewport = Bounds::new(point(px(10.), px(20.)), size(px(800.), px(600.)));
-        let image = desktop_bounds(viewport, (1920, 1080), Zoom::Actual, (1000., 480.));
+        let image = desktop_bounds(viewport, (1920, 1080), Zoom::Actual, (1000., 480.), 1.);
         assert_eq!(
             map_position(
                 point(px(10.), px(20.)),

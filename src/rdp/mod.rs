@@ -696,6 +696,17 @@ impl RdpClient {
         cache_directory: Option<std::path::PathBuf>,
         ssh: Option<crate::session::SshOptions>,
     ) -> Result<RdpHandle> {
+        Self::connect_with_initial_audio_mute(config, password, cache_directory, ssh, false)
+    }
+
+    /// Establish playback policy before the worker can receive the first audio block.
+    pub fn connect_with_initial_audio_mute(
+        config: RdpConfig,
+        password: Secret,
+        cache_directory: Option<std::path::PathBuf>,
+        ssh: Option<crate::session::SshOptions>,
+        initially_muted: bool,
+    ) -> Result<RdpHandle> {
         let connection = crate::connection_route::Prepared::resolve(config, ssh)
             .map_err(|_| RdpError::InvalidConfig)?;
         let (mut config, route) = connection.into_parts();
@@ -715,7 +726,7 @@ impl RdpClient {
         let (pointer_tx, pointer) = watch::channel(None);
         let (presented_tx, presented) = watch::channel(None);
         let stop = CancellationToken::new();
-        let audio_muted = Arc::new(AtomicBool::new(false));
+        let audio_muted = Arc::new(AtomicBool::new(initially_muted));
         let microphone_enabled = Arc::new(AtomicBool::new(config.audio_input));
         let locked = Arc::new(AtomicBool::new(false));
         let capture_transmission = Arc::new(Mutex::new(stop.child_token()));
@@ -927,8 +938,37 @@ mod tests {
         assert!(sender.control.audio_muted.load(Ordering::Acquire));
         sender.try_send(RdpCommand::SetAudioMuted(false)).unwrap();
         assert!(!sender.control.audio_muted.load(Ordering::Acquire));
-        let _old_mute = commands.try_recv().unwrap();
+        assert!(matches!(
+            commands.try_recv().unwrap().command,
+            RdpCommand::SetAudioMuted(false)
+        ));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn changing_audio_mute_with_a_full_input_queue_preserves_keys() {
+        let (sender, mut commands) = sender();
+        for scancode in 1..=4 {
+            sender
+                .try_send(RdpCommand::Key {
+                    scancode,
+                    pressed: true,
+                })
+                .unwrap();
+        }
+        sender.try_send(RdpCommand::SetAudioMuted(true)).unwrap();
+        assert!(sender.control.audio_muted.load(Ordering::Acquire));
+        sender.try_send(RdpCommand::SetAudioMuted(false)).unwrap();
         assert!(!sender.control.audio_muted.load(Ordering::Acquire));
+        assert!(matches!(
+            commands.try_recv().unwrap().command,
+            RdpCommand::SetAudioMuted(false)
+        ));
+        for scancode in 1..=4 {
+            assert!(matches!(commands.try_recv().unwrap().command,
+                RdpCommand::Key { scancode: key, pressed: true } if key == scancode));
+        }
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::{DragTarget, LeaveAction, Workspace};
-use crate::app::layout::{PaneNode, WorkspaceLayout};
+use crate::app::layout::{DockPanel, PaneNode, WorkspaceLayout};
 use crate::app::pane::{Pane, PaneEvent};
 use crate::app::ui;
 use crate::app::window_frame::WindowFrame;
@@ -13,13 +13,16 @@ use rustterm::i18n::tr;
 
 impl gpui::Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !window.is_window_active() && self.menu.take().is_some() {
-            self.restore_popup_focus(window, cx);
+        if !window.is_window_active() {
+            self.tab_history.finish();
+            if self.menu.take().is_some() {
+                self.restore_popup_focus(window, cx);
+            }
         }
         let frame = WindowFrame::new(window);
         frame.configure(window);
         let content_size = frame.content_size(window.viewport_size());
-        self.follow_left_tool(window, cx);
+        self.follow_dock_tool(window, cx);
         self.sync_tools(cx);
         self.sync_resources(window, cx);
         self.sync_docker(window, cx);
@@ -29,46 +32,59 @@ impl gpui::Render for Workspace {
         }
         self.schedule_workspace_persistence(cx);
         self.bind_modal(window, cx);
-        let panel_open = self.utility_is_open();
+        let immersive = window.is_fullscreen()
+            && matches!(self.panes.get(&self.focused), Some(Pane::Rdp(view)) if view.read(cx).has_desktop());
+        let immersive_id = immersive.then_some(self.focused);
+        if self.immersive_rdp != immersive_id {
+            self.immersive_rdp = immersive_id;
+            self.sync_visibility(cx);
+        }
+        let panel_open = !immersive && self.utility_is_open();
         let minimum = self.content_minimum(cx);
-        let layout = WorkspaceLayout::new(
+        let mut layout = WorkspaceLayout::new(
             f32::from(content_size.width),
             &self.config.settings,
-            self.sidebar_overlay_open,
+            self.sidebar_overlay_requested,
             self.preferred_content_minimum(cx).0,
             panel_open,
         );
-        if layout.sidebar_inline {
-            self.sidebar_overlay_open = false;
+        if immersive {
+            layout.sidebar_visible = false;
+            layout.sidebar_inline = false;
+            layout.files_docked = false;
+        }
+        if layout.sidebar_fits {
+            self.sidebar_overlay_requested = false;
         }
         let sidebar_loses_focus = self.sidebar_visible
             && !layout.sidebar_visible
             && self.sidebar_focus.contains_focused(window, cx);
         self.sidebar_visible = layout.sidebar_visible;
-        self.sidebar_width = layout.sidebar_width;
         // Compute from the current viewport, not the previous frame's bounds,
         // so resizing does not lag behind the window by one render.
+        let dock = if layout.sidebar_inline {
+            Some((DockPanel::Connections, layout.sidebar_width))
+        } else if panel_open && layout.files_docked {
+            Some((DockPanel::Tools, layout.files_width))
+        } else {
+            None
+        };
         let width = f32::from(content_size.width)
-            - if layout.sidebar_inline {
-                layout.sidebar_width + 5.
-            } else {
-                0.
-            }
-            - if layout.files_docked && panel_open {
-                layout.files_width + 5.
-            } else {
-                0.
-            };
+            - dock.map_or(0., |(_, width)| width + WorkspaceLayout::DIVIDER_WIDTH);
         let height = (f32::from(content_size.height)
-            - ui::TITLE_HEIGHT
-            - ui::STATUS_HEIGHT
+            - if immersive {
+                0.
+            } else {
+                ui::TITLE_HEIGHT + ui::STATUS_HEIGHT
+            }
             - if self.error.is_some() {
                 self.error_banner_height
             } else {
                 0.
             })
         .max(0.);
-        let compact = self.zoomed.is_none()
+        let compact = !immersive
+            && self.zoomed.is_none()
             && self
                 .tabs
                 .get(self.active)
@@ -126,12 +142,17 @@ impl gpui::Render for Workspace {
             self.restore_focus(window, cx);
         }
         let toolbar = self.render_titlebar(window, cx);
-        let statusbar = self.render_statusbar(window, cx);
-        let mut utility_panel = self.render_utility_panel(cx);
+        let statusbar = self.render_statusbar(dock.map(|(_, width)| width), window, cx);
+        let mut utility_panel = if immersive {
+            None
+        } else {
+            self.render_utility_panel(cx)
+        };
         let session_header = external_header
             .map(|terminal| terminal.update(cx, |view, cx| view.external_header(cx)));
         let node = self
-            .zoomed
+            .immersive_rdp
+            .or(self.zoomed)
             .or(self.compact_panes.then_some(self.focused))
             .map(PaneNode::Leaf)
             .or_else(|| {
@@ -149,12 +170,6 @@ impl gpui::Render for Workspace {
                     .into_any_element()
                 });
         let weak = cx.weak_entity();
-        let mut workspace = div().relative().flex().flex_1().min_h_0();
-        if layout.sidebar_inline {
-            workspace = workspace
-                .child(self.render_sidebar(window, cx))
-                .child(self.panel_divider("sidebar-divider", DragTarget::Sidebar, cx));
-        }
         let terminal = div()
             .relative()
             .flex_1()
@@ -175,20 +190,7 @@ impl gpui::Render for Workspace {
             )
             .child(content);
         let body = div().relative().flex_1().min_h_0().flex().child(terminal);
-        if layout.files_docked
-            && let Some(panel) = utility_panel.take()
-        {
-            workspace = workspace
-                .child(
-                    div()
-                        .w(px(layout.files_width))
-                        .h_full()
-                        .flex_shrink_0()
-                        .child(panel),
-                )
-                .child(self.panel_divider("files-divider", DragTarget::Files, cx));
-        }
-        workspace = workspace.child(
+        let mut workspace = div().relative().flex().flex_1().min_h_0().child(
             div()
                 .flex_1()
                 .min_w_0()
@@ -200,6 +202,19 @@ impl gpui::Render for Workspace {
                 .children(session_header)
                 .child(body),
         );
+        if let Some((panel, width)) = dock {
+            let content = match panel {
+                DockPanel::Connections => Some(self.render_sidebar(window, cx)),
+                DockPanel::Tools => utility_panel.take(),
+            };
+            workspace = workspace.child(self.panel_divider(panel, width, cx)).child(
+                div()
+                    .w(px(width))
+                    .h_full()
+                    .flex_shrink_0()
+                    .children(content),
+            );
+        }
         if let Some(panel) = utility_panel.take() {
             workspace = workspace.child(
                 div()
@@ -208,6 +223,8 @@ impl gpui::Render for Workspace {
                     .bottom_0()
                     .left_0()
                     .right_0()
+                    .flex()
+                    .justify_end()
                     .bg(rgba(0x00000055))
                     .occlude()
                     .on_mouse_down(
@@ -230,6 +247,11 @@ impl gpui::Render for Workspace {
         }
         let mut root = div()
             .track_focus(&self.workspace_focus)
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, _| {
+                if !event.modifiers.control {
+                    this.tab_history.finish();
+                }
+            }))
             .capture_key_down(
                 cx.listener(|this, event, window, cx| this.workspace_shortcuts(event, window, cx)),
             )
@@ -253,15 +275,12 @@ impl gpui::Render for Workspace {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                    if matches!(
-                        this.dragging.take(),
-                        Some(DragTarget::Sidebar | DragTarget::Files)
-                    ) {
+                cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                    if matches!(this.dragging.take(), Some(DragTarget::Panel { .. })) {
                         this.save(cx);
                     }
                     if let Some(Pane::Terminal(p)) = this.panes.get(&this.focused) {
-                        p.update(cx, |p, cx| p.drag_selection(event.position, true, cx));
+                        p.update(cx, |p, cx| p.drag_selection(event.position, true, window, cx));
                     }
                 }),
             )
@@ -289,13 +308,7 @@ impl gpui::Render for Workspace {
                 {
                     let handled = match event.keystroke.key.as_str() {
                         "tab" => {
-                            let count = this.tabs.len().max(1);
-                            let next = if modifiers.shift {
-                                (this.active + count - 1) % count
-                            } else {
-                                (this.active + 1) % count
-                            };
-                            this.set_active(next, window, cx);
+                            this.switch_tab(modifiers.shift, window, cx);
                             true
                         }
                         "j" if modifiers.shift => {
@@ -316,12 +329,9 @@ impl gpui::Render for Workspace {
                     && modifiers.shift
                     && !modifiers.alt
                     && !modifiers.platform
+                    && event.keystroke.key == "enter"
                 {
-                    match event.keystroke.key.as_str() {
-                        "b" => this.toggle_sidebar(window, cx),
-                        "enter" => this.toggle_zoom(window, cx),
-                        _ => return,
-                    }
+                    this.toggle_zoom(window, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                     return;
@@ -360,7 +370,7 @@ impl gpui::Render for Workspace {
                     } else {
                         window.focus_next();
                     }
-                    if this.sidebar_overlay_open {
+                    if this.sidebar_overlay_active() {
                         if !this.sidebar_focus.contains_focused(window, cx) {
                             this.focus_library(window, cx);
                         }
@@ -386,7 +396,7 @@ impl gpui::Render for Workspace {
                 }
             }))
             .child(self.activity_listener(cx))
-            .child(toolbar)
+            .when(!immersive, |d| d.child(toolbar))
             .child(workspace);
         if let Some(error) = &self.error {
             let entity = cx.weak_entity();
@@ -423,7 +433,7 @@ impl gpui::Render for Workspace {
             );
         }
         root = root
-            .child(statusbar)
+            .when(!immersive, |d| d.child(statusbar))
             .children(self.render_command_notice(window, cx));
         if layout.sidebar_visible && !layout.sidebar_inline {
             root = root.child(
@@ -433,12 +443,14 @@ impl gpui::Render for Workspace {
                     .bottom(px(ui::STATUS_HEIGHT))
                     .left_0()
                     .right_0()
+                    .flex()
+                    .justify_end()
                     .bg(rgba(0x00000066))
                     .occlude()
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| {
-                            this.sidebar_overlay_open = false;
+                            this.sidebar_overlay_requested = false;
                             this.restore_focus(window, cx);
                             cx.stop_propagation();
                             cx.notify();

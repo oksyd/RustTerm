@@ -141,6 +141,31 @@ async fn blocked_writer_keeps_output_snapshot_and_copy_live_without_reordering_i
 }
 
 #[tokio::test]
+async fn continuous_local_interaction_cannot_starve_the_remote_stream() {
+    let fixture = BlockedWriter::start();
+    let commands = fixture.session.commands.clone();
+    let flood = tokio::spawn(async move {
+        while commands
+            .send(ActorCommand::User(Command::Scroll(0)))
+            .await
+            .is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+    });
+    let data = format!("{}stream complete", "output\r\n".repeat(1000));
+    fixture
+        .output
+        .send(Output::Data(data.into_bytes()))
+        .await
+        .unwrap();
+    fixture.snapshot_containing("stream complete").await;
+    flood.abort();
+    let _ = flood.await;
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn saturated_outbox_preserves_accepted_input_and_continues_reading_output() {
     let mut fixture = BlockedWriter::start();
     for value in 0_u8..60 {

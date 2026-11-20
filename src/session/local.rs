@@ -369,14 +369,12 @@ pub(super) async fn run(
     shared: Arc<Shared>,
 ) {
     let opened = tokio::task::spawn_blocking(move || open_local(options, columns, rows)).await;
-    let pty = match opened {
-        Ok(Ok(pty)) => pty,
-        result => {
-            let message = match result {
-                Ok(Err(error)) => format!("{error:#}"),
-                Err(error) => error.to_string(),
-                _ => unreachable!(),
-            };
+    let pty = match opened
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| format!("{error:#}")))
+    {
+        Ok(pty) => pty,
+        Err(message) => {
             if shared.io_stop.is_cancelled() {
                 shared.transition(LifecycleEvent::Disconnected { exit_code: None });
             } else {

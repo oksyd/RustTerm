@@ -27,9 +27,10 @@ impl Rail {
         if data.len() > 65535 {
             return Err(Error::Limit("RAIL channel message"));
         }
-        if self.application.is_none() {
-            return Err(Error::Invalid("unrequested RAIL channel"));
-        }
+        let application = self
+            .application
+            .as_ref()
+            .ok_or(Error::Invalid("unrequested RAIL channel"))?;
         let mut reader = Reader::new(data);
         let mut actions = Vec::new();
         while !reader.is_empty() {
@@ -54,12 +55,7 @@ impl Rail {
                     actions.push(Action::Send(pdu(5, &0u32.to_le_bytes())));
                     // Standard RAIL only. Do not claim local move/size, Enhanced
                     // RemoteApp, IME synchronization or shell integration.
-                    let flags = 0x410u32
-                        | u32::from(
-                            self.application
-                                .as_ref()
-                                .is_some_and(|app| app.local_move_size),
-                        );
+                    let flags = 0x410u32 | u32::from(application.local_move_size);
                     actions.push(Action::Send(pdu(0x0b, &flags.to_le_bytes())));
                     for (param, value) in [(0x25u32, 1), (0x100b, 1), (0x45, 0), (0x21, 0)] {
                         let mut bytes = param.to_le_bytes().to_vec();
@@ -76,7 +72,7 @@ impl Rail {
                         work.extend_from_slice(&n.to_le_bytes());
                     }
                     actions.push(Action::Send(pdu(3, &work)));
-                    actions.push(Action::Send(execute(self.application.as_ref().unwrap())?));
+                    actions.push(Action::Send(execute(application)?));
                     self.started = true;
                     continue;
                 }

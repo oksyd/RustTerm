@@ -14,18 +14,23 @@ pub(super) fn page(schema: &TableSchema, request: &PageRequest) -> Result<String
     if schema.columns.is_empty() || request.offset > i64::MAX as u64 {
         return Err(DatabaseError::InvalidTableEdit);
     }
+    let source = quote_identifier(schema.engine, &schema.table.name);
     let names: Vec<_> = schema
         .columns
         .iter()
-        .map(|column| quote_identifier(schema.engine, &column.name))
+        .map(|column| format!("{source}.{}", quote_identifier(schema.engine, &column.name)))
         .collect();
-    let mut selected = names.clone();
-    if schema.engine == SqlEngine::Sqlite {
-        selected = names.iter().map(|name| {
-            format!("CASE WHEN typeof({name})='text' THEN hex(CAST({name} AS BLOB)) ELSE {name} END AS {name}")
-        }).collect();
-        selected.extend(names.iter().map(|name| format!("typeof({name})")));
-    }
+    // A typed table read must recover the exact bytes independently of the
+    // query preview and of PostgreSQL's session bytea_output setting.
+    let selected: Vec<_> = names
+        .iter()
+        .zip(&schema.columns)
+        .map(|(name, column)| match (schema.engine, column.kind) {
+            (SqlEngine::Mysql, ValueKind::Binary) => format!("HEX({name})"),
+            (SqlEngine::Postgres, ValueKind::Binary) => format!("pg_catalog.encode({name},'hex')"),
+            _ => name.clone(),
+        })
+        .collect();
     let mut sql = format!("SELECT {} FROM {}", selected.join(","), qualified(schema));
     if let Some(filter) = &request.filter {
         sql.push_str(" WHERE ");
@@ -158,28 +163,29 @@ pub(super) fn decode_rows(
         }
         let mut values = Vec::with_capacity(count);
         for (index, column) in schema.columns.iter().enumerate() {
-            let value = match &row[index] {
+            let value = match row[index].take() {
                 None => CellValue::Null,
                 Some(text) if schema.engine == SqlEngine::Sqlite => {
                     match row[index + count].as_deref() {
-                        Some("text") => match String::from_utf8(decode_hex(text)?) {
-                            Ok(value) => CellValue::Text(value),
-                            Err(error) => CellValue::InvalidText(error.into_bytes()),
-                        },
-                        Some("integer") => CellValue::Integer(text.clone()),
-                        Some("real") => CellValue::Real(text.clone()),
-                        Some("blob") => CellValue::Binary(decode_hex(text)?),
+                        Some("text") => CellValue::Text(text),
+                        Some("invalid text") => CellValue::InvalidText(decode_hex(&text)?),
+                        Some("integer") => CellValue::Integer(text),
+                        Some("real") => CellValue::Real(text),
+                        Some("blob") => CellValue::Binary(decode_hex(&text)?),
                         _ => return Err(DatabaseError::Protocol),
                     }
                 }
-                Some(text) => match CellValue::parse(column, text) {
+                Some(text) if column.kind == ValueKind::Binary => {
+                    CellValue::Binary(decode_hex(&text)?)
+                }
+                Some(text) => match CellValue::parse(column, &text) {
                     Ok(value) => value,
                     // An unsupported type or special numeric value can still be inspected.
                     // Its representation cannot be assigned through the cell editor.
-                    Err(_) => CellValue::Text(text.clone()),
+                    Err(_) => CellValue::Text(text),
                 },
             };
-            row[index] = value.display();
+            row[index] = schema.display_cell(&value);
             values.push(value);
         }
         row.truncate(count);
@@ -383,7 +389,10 @@ fn literal(engine: SqlEngine, value: &CellValue) -> Result<String> {
     Ok(match value {
         CellValue::Null => "NULL".into(),
         CellValue::Text(value) if engine == SqlEngine::Sqlite && value.contains('\0') => {
-            format!("CAST(X'{}' AS TEXT)", super::super::hex(value.as_bytes()))
+            format!(
+                "unistr({})",
+                quote_literal(engine, &value.replace('\\', r"\\").replace('\0', r"\u0000"))
+            )
         }
         CellValue::Text(value) if engine != SqlEngine::Postgres || !value.contains('\0') => {
             quote_literal(engine, value)

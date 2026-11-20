@@ -2,7 +2,9 @@ use rustterm::i18n::Message;
 use rustterm::i18n::messages as i18n_key;
 mod pages;
 mod security;
+mod shortcuts;
 mod updates;
+mod word_selection;
 use crate::app::updates::Updates;
 
 use super::{Fields, column, hint, parse_value};
@@ -16,7 +18,7 @@ use gpui::{
 };
 use rustterm::{
     app_lock,
-    config::{AppLockConfig, AppTheme, Secret, Settings},
+    config::{AppLockConfig, AppTheme, QuickOpenOrder, Secret, Settings, TabSwitchOrder},
     i18n::{Language, tr},
 };
 
@@ -31,7 +33,8 @@ const COLOR_FIELDS: &[&str] = &[
     i18n_key::WORKSPACE_WARN_COLOR_RGB,
     i18n_key::WORKSPACE_ERROR_COLOR_RGB,
 ];
-const HISTORY_FIELDS: &[&str] = &[
+const TERMINAL_FIELDS: &[&str] = &[
+    i18n_key::SETTINGS_WORD_DELIMITERS,
     i18n_key::WORKSPACE_HISTORY_LINE_LIMIT,
     i18n_key::WORKSPACE_HISTORY_PER_PANE_MIB,
     i18n_key::WORKSPACE_GLOBAL_HISTORY_MIB,
@@ -42,20 +45,23 @@ pub enum SettingsSection {
     General,
     Appearance,
     Terminal,
+    Shortcuts,
     Security,
     Updates,
 }
 impl SettingsSection {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::General,
         Self::Appearance,
         Self::Terminal,
+        Self::Shortcuts,
         Self::Security,
         Self::Updates,
     ];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Shortcuts => i18n_key::SETTINGS_SHORTCUTS,
             Self::General => i18n_key::CONNECTIONS_GENERAL,
             Self::Appearance => i18n_key::CONNECTIONS_APPEARANCE,
             Self::Terminal => i18n_key::CONNECTIONS_TERMINAL,
@@ -75,7 +81,11 @@ pub struct LockChange {
 #[derive(PartialEq, Eq)]
 struct SettingsDraft {
     fields: Vec<String>,
+    shortcuts: rustterm::config::Shortcuts,
     language: Language,
+    tab_switch_order: TabSwitchOrder,
+    quick_open_order: QuickOpenOrder,
+    sftp_follow_directory: bool,
     app_theme: AppTheme,
     sidebar_connection_details: bool,
     line_numbers: bool,
@@ -108,8 +118,10 @@ pub struct SettingsForm {
     values: Settings,
     initial: SettingsDraft,
     section: SettingsSection,
-    section_focus: [FocusHandle; 5],
-    scroll_handles: [ScrollHandle; 5],
+    shortcut_editor: shortcuts::ShortcutEditor,
+    word_preview: Entity<word_selection::WordSelectionPreview>,
+    section_focus: [FocusHandle; SettingsSection::ALL.len()],
+    scroll_handles: [ScrollHandle; SettingsSection::ALL.len()],
     updates: Entity<Updates>,
     _subscriptions: Vec<Subscription>,
     lock: LockFields,
@@ -127,6 +139,10 @@ impl SettingsForm {
         let fields = Fields::new(
             vec![
                 (i18n_key::UPDATES_PROXY, settings.update_proxy.clone()),
+                (
+                    i18n_key::SETTINGS_WORD_DELIMITERS,
+                    settings.word_delimiters.clone(),
+                ),
                 (
                     i18n_key::WORKSPACE_MONOSPACE_FONT,
                     settings.font_family.clone(),
@@ -170,9 +186,17 @@ impl SettingsForm {
             ],
             cx,
         );
+        let delimiter_field = fields.field(i18n_key::SETTINGS_WORD_DELIMITERS).clone();
+        delimiter_field.update(cx, |field, cx| field.set_literal(false, cx));
+        let word_preview =
+            cx.new(|cx| word_selection::WordSelectionPreview::new(delimiter_field, cx));
         let initial = SettingsDraft {
             fields: fields.values(cx),
+            shortcuts: settings.shortcuts.clone(),
             language: settings.language,
+            tab_switch_order: settings.tab_switch_order,
+            quick_open_order: settings.quick_open_order,
+            sftp_follow_directory: settings.sftp_follow_directory,
             app_theme: settings.app_theme,
             sidebar_connection_details: settings.sidebar_connection_details,
             line_numbers: settings.line_numbers,
@@ -193,6 +217,8 @@ impl SettingsForm {
             values: settings.clone(),
             initial,
             section: SettingsSection::General,
+            shortcut_editor: shortcuts::ShortcutEditor::new(cx),
+            word_preview,
             section_focus: std::array::from_fn(|_| cx.focus_handle()),
             scroll_handles: std::array::from_fn(|_| ScrollHandle::new()),
             _subscriptions: Vec::new(),
@@ -243,7 +269,11 @@ impl SettingsForm {
         self.initial
             != SettingsDraft {
                 fields: self.fields.values(cx),
+                shortcuts: self.values.shortcuts.clone(),
                 language: self.values.language,
+                tab_switch_order: self.values.tab_switch_order,
+                quick_open_order: self.values.quick_open_order,
+                sftp_follow_directory: self.values.sftp_follow_directory,
                 app_theme: self.values.app_theme,
                 sidebar_connection_details: self.values.sidebar_connection_details,
                 line_numbers: self.values.line_numbers,
@@ -262,13 +292,13 @@ impl SettingsForm {
 
     pub fn inputs(&self, cx: &App) -> Vec<Entity<TextInput>> {
         match self.section {
-            SettingsSection::General => Vec::new(),
+            SettingsSection::General | SettingsSection::Shortcuts => Vec::new(),
             SettingsSection::Appearance => {
                 let mut inputs = self.fields.selected_inputs(FONT_FIELDS);
                 inputs.extend(self.fields.selected_inputs(COLOR_FIELDS));
                 inputs
             }
-            SettingsSection::Terminal => self.fields.selected_inputs(HISTORY_FIELDS),
+            SettingsSection::Terminal => self.fields.selected_inputs(TERMINAL_FIELDS),
             SettingsSection::Security => self.security_inputs(cx),
             SettingsSection::Updates => self.fields.selected_inputs(&[i18n_key::UPDATES_PROXY]),
         }
@@ -295,6 +325,7 @@ impl SettingsForm {
         {
             return;
         }
+        self.shortcut_editor.cancel();
         self.section = section;
         self.section_focus[section as usize].focus(window);
         cx.notify();
@@ -358,6 +389,7 @@ impl SettingsForm {
         };
         settings = appearance().map_err(|error| (SettingsSection::Appearance, error))?;
         let history = || -> anyhow::Result<Settings> {
+            settings.word_delimiters = get(i18n_key::SETTINGS_WORD_DELIMITERS);
             settings.history_lines = parse_value(
                 i18n_key::WORKSPACE_HISTORY_LINE_LIMIT,
                 &get(i18n_key::WORKSPACE_HISTORY_LINE_LIMIT),
@@ -388,6 +420,7 @@ impl Render for SettingsForm {
             .width
             < px(720.);
         let body = match self.section {
+            SettingsSection::Shortcuts => self.shortcuts_page(window, cx),
             SettingsSection::General => self.general(cx),
             SettingsSection::Appearance => self.appearance(cx),
             SettingsSection::Terminal => self.terminal(cx),
@@ -399,6 +432,7 @@ impl Render for SettingsForm {
                 |section| {
                     let selected = section == self.section;
                     let icon = match section {
+                        SettingsSection::Shortcuts => Icon::Key,
                         SettingsSection::General => Icon::Settings,
                         SettingsSection::Appearance => Icon::Eye,
                         SettingsSection::Terminal => Icon::Terminal,

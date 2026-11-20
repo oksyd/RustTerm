@@ -76,6 +76,25 @@ fn custom_profiles_have_independent_state_cache_and_locks() {
 }
 
 #[test]
+fn picker_history_round_trips_without_changing_the_workspace_format() {
+    let root = tempfile::tempdir().unwrap();
+    let paths = fixture(root.path());
+    let mut config = with_workspace();
+    paths.save_config(&config).unwrap();
+    let workspace = paths.state.join("workspace.toml");
+    let layout = fs::read(&workspace).unwrap();
+    let id = config.profiles[0].id;
+    config.recent_connections.remember(id);
+    paths.save_config(&config).unwrap();
+    assert_eq!(paths.load_config().unwrap().recent_connections.ids(), [id]);
+    assert_eq!(fs::read(&workspace).unwrap(), layout);
+    storage::write_atomic(&paths.state.join("recent-connections.json"), b"broken").unwrap();
+    let restored = paths.load_config().unwrap();
+    assert_eq!(restored.workspace.layout, config.workspace.layout);
+    assert!(restored.recent_connections.ids().is_empty());
+}
+
+#[test]
 fn migrates_inline_workspace_without_changing_profiles_or_trust_records() {
     let root = tempfile::tempdir().unwrap();
     let paths = fixture(root.path());

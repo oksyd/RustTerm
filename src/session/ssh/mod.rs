@@ -7,6 +7,8 @@ pub(super) mod connection;
 mod dial;
 mod forwarding;
 
+const OUTPUT_CHUNK_BYTES: usize = 8 * 1024;
+
 #[cfg(test)]
 mod isolation_tests;
 
@@ -71,6 +73,7 @@ pub struct SshOptions {
     pub keepalive_secs: u64,
     pub keepalive_max: usize,
     pub shell_integration: bool,
+    pub production_protection: bool,
     pub jump_hosts: Vec<crate::config::SshJumpHost>,
     pub forwards: Vec<crate::config::PortForward>,
     pub auto_forward: crate::config::ssh::AutoForwardConfig,
@@ -117,7 +120,8 @@ async fn connect(
     shared: Arc<Shared>,
 ) -> SshResult<Transport> {
     let timeout = Duration::from_secs(options.timeout_secs.clamp(1, 600));
-    let shell_integration = options.shell_integration;
+    let protection = super::SessionProtection::from(options.production_protection);
+    let shell_integration = options.shell_integration && protection.allows_enhancements();
     for rule in &mut options.forwards {
         rule.bind_host = normalize_host(&rule.bind_host)
             .map_err(|error| (FailureKind::Protocol, error.to_string()))?;
@@ -213,12 +217,8 @@ async fn connect(
             let message = reader.wait().await;
             match message {
                 Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    for chunk in data.chunks(8192) {
-                        if !send_output(&read_output, Output::Data(chunk.to_vec()), &read_shared)
-                            .await
-                        {
-                            break;
-                        }
+                    if !send_data(&read_output, &data).await {
+                        break;
                     }
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) => {
@@ -317,7 +317,7 @@ async fn connect(
     *shared.resources.lock().unwrap_or_else(|e| e.into_inner()) = Some(resources);
     let (exec, exec_requests) = crate::session::exec::ExecClient::new(shared.io_stop.clone());
     *shared.docker.lock().unwrap_or_else(|e| e.into_inner()) =
-        Some(crate::docker::DockerClient::new(exec));
+        Some(crate::docker::DockerClient::new(exec, protection));
     let (forwarding, forwarding_task) = match options.forwarding_registry.take() {
         Some((registry, id)) => (registry.acquire(id, options).await, None),
         None => {
@@ -337,6 +337,7 @@ async fn connect(
             sftp_open,
             resource_requests,
             exec_requests,
+            protection,
             &monitor_shared.io_stop,
         )
         .await;
@@ -394,7 +395,7 @@ async fn expect_success(
                     Some(ChannelMsg::Data { data })
                     | Some(ChannelMsg::ExtendedData { data, .. }) => {
                         let used: usize = pending.iter().map(Vec::len).sum();
-                        if used.saturating_add(data.len()) > OUTPUT_CAPACITY * 8192 {
+                        if used.saturating_add(data.len()) > OUTPUT_CAPACITY * OUTPUT_CHUNK_BYTES {
                             return Err(crate::i18n::tr(
                                 i18n_key::CONNECTIONS_SSH_STARTUP_OUTPUT_EXCEEDED_THE_BUFFER_LIMIT,
                             )
@@ -412,6 +413,15 @@ async fn expect_success(
     )
     .await
 }
+async fn send_data(sender: &mpsc::Sender<Output>, data: &[u8]) -> bool {
+    for chunk in data.chunks(OUTPUT_CHUNK_BYTES) {
+        if sender.send(Output::Data(chunk.to_vec())).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 async fn send_output(sender: &mpsc::Sender<Output>, output: Output, _shared: &Shared) -> bool {
     // Shutdown continues draining this bounded queue while joining workers.
     // Cancelling here would silently discard an already received output chunk.

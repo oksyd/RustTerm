@@ -397,7 +397,10 @@ impl Clipboard {
                             };
                             match files {
                                 Ok(files) => {
-                                    let remote = self.remote_files.as_mut().unwrap();
+                                    let remote = self
+                                        .remote_files
+                                        .as_mut()
+                                        .ok_or(Error::Invalid("clipboard file offer state"))?;
                                     remote.files = Some(files.clone());
                                     actions.push(Action::Event(ChannelEvent::ClipboardFiles {
                                         offer_id: remote.id,

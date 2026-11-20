@@ -20,6 +20,9 @@ impl RdpView {
     }
 
     pub fn release_control(&mut self, cx: &mut Context<Self>) {
+        if self.fullscreen {
+            self.show_fullscreen_bar(cx);
+        }
         let held = self.captures_keyboard();
         self.drop_control();
         if held {
@@ -93,6 +96,7 @@ impl RdpView {
             return;
         }
         self.focus.focus(window);
+        self.hide_fullscreen_bar_later(cx);
         self.clipboard.begin_control();
         self.physical_modifiers = window.modifiers();
         self.release_gesture.reset();
@@ -146,12 +150,11 @@ impl RdpView {
             CaptureStatus::Active
                 if !keys_held && matches!(self.control, KeyboardControl::Pending(_)) =>
             {
-                let KeyboardControl::Pending(capture) =
-                    std::mem::replace(&mut self.control, KeyboardControl::Released)
-                else {
-                    unreachable!()
+                self.control = match std::mem::replace(&mut self.control, KeyboardControl::Released)
+                {
+                    KeyboardControl::Pending(capture) => KeyboardControl::Active(capture),
+                    state => state,
                 };
-                self.control = KeyboardControl::Active(capture);
                 cx.emit(PaneEvent::Activity);
                 cx.notify();
             }
@@ -174,6 +177,16 @@ impl RdpView {
             _ => {}
         }
         true
+    }
+
+    pub(super) fn control_badge(&self) -> &'static str {
+        match self.control {
+            KeyboardControl::Released => i18n_key::RDP_KEYBOARD_LOCAL,
+            KeyboardControl::Active(_) => i18n_key::RDP_KEYBOARD_REMOTE,
+            KeyboardControl::Pending(_) | KeyboardControl::Limited(_) => {
+                i18n_key::RDP_KEYBOARD_LIMITED
+            }
+        }
     }
 
     pub(super) fn control_status(&self) -> (&'static str, u32) {

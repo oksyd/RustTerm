@@ -309,7 +309,7 @@ pub(super) fn start(
 ) -> (mpsc::Receiver<Sample>, JoinHandle<()>) {
     let (send, receive) = mpsc::channel(1);
     let task = tokio::spawn(async move {
-        let docker = DockerClient::new(exec.clone());
+        let docker = DockerClient::new(exec.clone(), Default::default());
         let mut events = None;
         let mut next_docker = Instant::now();
         let mut next_events = Instant::now();

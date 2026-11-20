@@ -240,9 +240,7 @@ rdp-remote-audio-could-not-be-played-on-this-computer = 无法在本机播放远
 
 rdp-remote-clipboard-confirmed-press-ctrl-v-in-the-remote-desktop = 远程剪贴板已确认，请在远程桌面按 Ctrl+V 粘贴
 
-rdp-remote-clipboard-is-ready-use-copy-from-remote-to-copy = 远程剪贴板已就绪，点击“复制远程内容”即可复制到本机
-
-rdp-remote-clipboard-requested-use-copy-from-remote-when-text-is = 已请求远程剪贴板，内容就绪后请点击“复制远程内容”
+rdp-fetching-remote-clipboard = 正在获取远程剪贴板内容…
 
 rdp-remote-desktop-actions = 远程桌面操作
 
@@ -255,8 +253,6 @@ rdp-remote-resolution = 远程分辨率
 rdp-remote-text-copied-to-the-local-clipboard = 远程文本已复制到本机剪贴板
 
 rdp-remove-shared-directory = 移除共享目录
-
-rdp-request-remote-clipboard = 请求远程剪贴板
 
 rdp-requested-desktop-scale = 请求的远程缩放
 
@@ -423,3 +419,71 @@ rdp-remote-app-suspended = 远程应用桌面暂不可用或已锁定。
 rdp-remote-app-window-failed = 无法创建本地应用窗口。
 
 rdp-remote-app-no-windows = 应用当前没有可见窗口。关闭此连接可结束会话。
+
+rdp-display-dynamic = 远程分辨率跟随窗口
+
+rdp-display-fit = 本地缩放适应窗口
+
+rdp-display-current = 远程 { $width } × { $height } · 本地缩放 { $scale }%
+
+rdp-display-waiting = 已请求调整分辨率 · 等待服务端
+
+rdp-display-dynamic-help = 请求远程分辨率匹配当前窗口，需要服务端支持显示控制。
+
+rdp-clipboard-send-direction = 本地 → 远程
+
+rdp-clipboard-receive-direction = 远程 → 本地
+
+rdp-clipboard-content = 剪贴板
+
+rdp-clipboard-text = 文本
+
+rdp-clipboard-image = 图片
+
+rdp-clipboard-files = 文件
+
+rdp-clipboard-unavailable-detail = 远程剪贴板数据不可用，可能为空、格式不支持或被服务端拒绝。
+
+rdp-keyboard-local = 键盘：本地
+
+rdp-keyboard-remote = 远程 · Ctrl+Alt 释放
+
+rdp-keyboard-limited = 受限 · Ctrl+Alt 释放
+
+rdp-quality-timing = 平均 { $mean } ms · 最大 { $max } ms
+
+rdp-quality-sample-age = 最近采样
+
+rdp-quality-seconds-ago = { $seconds } 秒前
+
+rdp-quality-server-updates = 服务端画面更新 / 秒
+
+rdp-quality-input-queue = 输入排队
+
+rdp-quality-write-queue = 发送排队
+
+rdp-quality-processing = 协议与图形处理
+
+rdp-quality-paint = CPU 绘制
+
+rdp-quality-frame-age = 帧发布 → CPU 绘制
+
+rdp-quality-note = 指标说明
+
+rdp-quality-explanation = 静止桌面的低更新率正常。这些数值是本地 CPU 或队列耗时，不是网络往返或 GPU 呈现延迟。— 表示没有采样。
+
+rdp-clipboard-enabled = 此连接已启用共享剪贴板
+
+rdp-display-auto-short = 显示：自动
+
+rdp-display-fit-short = 显示：适应
+
+rdp-display-actual-short = 显示：100%
+
+rdp-previous-desktop-read-only = 上次的远程画面 · 只读
+
+rdp-pin-connection-bar = 固定连接栏
+
+rdp-release-keyboard-control = 释放键盘 · Ctrl+Alt
+
+rdp-mute-background-audio = 远程桌面切到后台时静音

@@ -426,6 +426,7 @@ mod tests {
         shared.transition(LifecycleEvent::Connected);
         let (commands, _) = mpsc::channel(8);
         let session = Session {
+            protection: Default::default(),
             commands,
             shared: shared.clone(),
         };

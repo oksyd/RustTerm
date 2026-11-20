@@ -10,14 +10,13 @@ use rustterm::i18n::tr;
 impl Workspace {
     pub(super) fn select_tool(&mut self, tool: SessionTool, cx: &mut Context<Self>) {
         self.release_rdp_control(cx);
-        self.left_tool = Some(tool);
-        self.sidebar_overlay_open = false;
+        self.dock_tool = Some(tool);
         self.tools.clear();
         self.tools.insert(self.focused, tool);
     }
 
-    pub(super) fn follow_left_tool(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tool) = self.left_tool else {
+    pub(super) fn follow_dock_tool(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tool) = self.dock_tool else {
             return;
         };
         let changed = self.tools.get(&self.focused) != Some(&tool);
@@ -39,16 +38,23 @@ impl Workspace {
         }
     }
 
-    pub(super) fn render_panel_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_panel_buttons(
+        &self,
+        dock_width: Option<f32>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut buttons = div()
             .id("panel-buttons")
             .h_full()
             .flex_shrink_0()
             .flex()
             .items_center()
-            .px_1()
+            .justify_end()
+            .pl_1()
+            .pr_3()
             .gap(px(2.))
-            .border_r_1()
+            .when_some(dock_width, |d, width| d.w(px(width)))
+            .border_l_1()
             .border_color(rgb(ui::colors().border));
         let terminal = self.panes.get(&self.focused).and_then(|pane| match pane {
             Pane::Terminal(view) => Some(view.read(cx)),
@@ -58,13 +64,6 @@ impl Workspace {
             || terminal.is_some_and(|view| view.sftp_client().is_some());
         let docker_available = terminal.is_some_and(|view| view.resource_session().is_some());
         for (id, tool, icon, label, available) in [
-            (
-                "dock-connections",
-                None,
-                Icon::Connections,
-                key::WORKSPACE_CONNECTIONS,
-                true,
-            ),
             (
                 "dock-files",
                 Some(SessionTool::Files),
@@ -86,8 +85,15 @@ impl Workspace {
                 key::DOCKER_TITLE,
                 docker_available,
             ),
+            (
+                "dock-connections",
+                None,
+                Icon::Connections,
+                key::WORKSPACE_CONNECTIONS,
+                true,
+            ),
         ] {
-            let selected = tool.map_or(self.sidebar_visible, |tool| self.left_tool == Some(tool));
+            let selected = tool.map_or(self.sidebar_visible, |tool| self.dock_tool == Some(tool));
             // An already open tool can always be closed, including after moving
             // to a session that cannot provide that tool. Its position is stable.
             let enabled = available || selected;
@@ -96,12 +102,14 @@ impl Workspace {
             } else {
                 ui::colors().muted
             };
-            let mut tooltip = tr(if tool.is_none() {
-                key::WORKSPACE_SHOW_HIDE_SIDEBAR_CTRL_SHIFT_B
+            let mut tooltip = if tool.is_none() {
+                self.config.settings.shortcuts.hint(
+                    rustterm::config::ShortcutAction::Sidebar,
+                    key::SETTINGS_TOGGLE_CONNECTION_SIDEBAR,
+                )
             } else {
-                label
-            })
-            .to_owned();
+                tr(label).to_owned()
+            };
             if !available {
                 let reason = if self
                     .pane_profiles

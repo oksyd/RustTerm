@@ -7,7 +7,7 @@ use gpui::{
 };
 use rustterm::i18n::messages as i18n_key;
 use rustterm::{
-    config::{RdpConfig, Secret, Settings},
+    config::{RdpConfig, RdpViewMode as Zoom, RdpViewState, Secret, Settings},
     i18n::{Message, tr},
     rdp::{
         RdpClient, RdpClipboardAction, RdpClipboardEvent, RdpCommand, RdpEvent, RdpFrame,
@@ -29,6 +29,7 @@ mod connection;
 mod control;
 mod cursor;
 mod file_clipboard;
+mod fullscreen;
 mod input;
 mod menu;
 mod performance;
@@ -39,6 +40,7 @@ mod render;
 pub struct RdpLaunch {
     pub ssh: Option<rustterm::session::SshOptions>,
     pub config: RdpConfig,
+    pub view: Option<RdpViewState>,
     pub secret: Secret,
 }
 
@@ -50,13 +52,6 @@ enum State {
     Connected,
     Disconnected,
     Failed,
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Zoom {
-    #[default]
-    Fit,
-    Actual,
 }
 
 struct FileClipboardRead {
@@ -87,6 +82,11 @@ impl FileTransferStatus {
     }
 }
 
+pub struct DesktopPreview {
+    images: Vec<render::TileImage>,
+    size: (u16, u16),
+}
+
 pub struct RdpView {
     index: usize,
     title: String,
@@ -105,9 +105,11 @@ pub struct RdpView {
     frames: Option<watch::Receiver<Option<Arc<RdpFrame>>>>,
     images: Vec<render::TileImage>,
     image_size: (u16, u16),
+    stale_desktop: bool,
     image_acknowledgement: Option<rustrdp::FrameToken>,
     consumed_acknowledgement: Option<rustrdp::FrameToken>,
     performance: performance::Performance,
+    quality: Option<performance::Quality>,
     hide_local_pointer: bool,
     cursor: cursor::CursorOverlay,
     desktop_size: (u16, u16),
@@ -119,6 +121,12 @@ pub struct RdpView {
     last_resize: Option<(u16, u16)>,
     zoom: Zoom,
     pan: (f32, f32),
+    restore_pan: Option<(u16, u16)>,
+    toolbar_pinned: bool,
+    fullscreen: bool,
+    toolbar_visible: bool,
+    toolbar_hovered: bool,
+    toolbar_task: Option<Task<()>>,
     visible: bool,
     unread: bool,
     closed: bool,
@@ -160,7 +168,7 @@ impl RdpView {
         index: usize,
         title: String,
         launch: RdpLaunch,
-        _settings: &Settings,
+        audio_muted: bool,
         window_state: WindowState,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -302,17 +310,38 @@ impl RdpView {
             frames: None,
             images: Vec::new(),
             image_size: (0, 0),
+            stale_desktop: false,
             image_acknowledgement: None,
             consumed_acknowledgement: None,
             performance: performance::Performance::default(),
+            quality: None,
             hide_local_pointer: false,
             cursor: cursor::CursorOverlay::default(),
             bounds: None,
             layout_size: (0., 0.),
             last_resize: None,
-            zoom: Zoom::Fit,
+            zoom: launch
+                .view
+                .map(|view| view.mode)
+                .filter(|mode| {
+                    *mode != Zoom::Dynamic
+                        || (launch.config.remote_app.is_none() && launch.config.monitor_count == 1)
+                })
+                .unwrap_or_else(|| {
+                    if launch.config.uses_dynamic_resolution() {
+                        Zoom::Dynamic
+                    } else {
+                        Zoom::Fit
+                    }
+                }),
             pan: (0., 0.),
-            visible: !locked,
+            restore_pan: launch.view.map(|view| view.pan),
+            toolbar_pinned: launch.view.is_some_and(|view| view.toolbar_pinned),
+            fullscreen: false,
+            toolbar_visible: true,
+            toolbar_hovered: false,
+            toolbar_task: None,
+            visible: false, // Workspace sets the actual pane visibility after placement.
             unread: false,
             closed: false,
             error: None,
@@ -323,7 +352,7 @@ impl RdpView {
             file_export_snapshot: None,
             incoming_files: None,
             content_publication: None,
-            audio_muted: false,
+            audio_muted,
             microphone_enabled: launch.config.audio_input,
             retry_allowed: false,
             control: control::KeyboardControl::Released,
@@ -349,6 +378,25 @@ impl RdpView {
             view.set_locked(true, cx);
         }
         view
+    }
+
+    pub fn take_desktop_preview(&mut self, config: &RdpConfig) -> Option<DesktopPreview> {
+        if !self.config.same_server(config) || config.remote_app.is_some() || self.images.is_empty()
+        {
+            return None;
+        }
+        self.invalidate_frame_acknowledgements();
+        Some(DesktopPreview {
+            images: std::mem::take(&mut self.images),
+            size: self.image_size,
+        })
+    }
+
+    pub fn restore_desktop_preview(&mut self, preview: DesktopPreview, cx: &mut Context<Self>) {
+        self.images = preview.images;
+        self.image_size = preview.size;
+        self.stale_desktop = true;
+        cx.notify();
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -444,9 +492,37 @@ impl RdpView {
         }
     }
 
+    pub fn manually_muted(&self) -> bool {
+        self.audio_muted
+    }
+
+    fn effective_audio_mute(&self) -> bool {
+        self.config.playback_muted(
+            self.audio_muted,
+            self.visible,
+            self.window_state.is_locked(),
+        )
+    }
+
+    fn sync_audio_mute(&mut self, cx: &mut Context<Self>) {
+        if self.config.audio_output && self.is_running() {
+            self.send(RdpCommand::SetAudioMuted(self.effective_audio_mute()), cx);
+        }
+    }
+
+    pub fn set_background_audio_mute(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.config.mute_audio_in_background != enabled {
+            self.config.mute_audio_in_background = enabled;
+            self.sync_audio_mute(cx);
+        }
+    }
+
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible != visible {
             self.visible = visible;
+            if self.config.mute_audio_in_background {
+                self.sync_audio_mute(cx);
+            }
             if !visible {
                 self.invalidate_frame_acknowledgements();
                 self.menu_open = false;
@@ -481,9 +557,7 @@ impl RdpView {
             );
             self.resize_task = None;
         }
-        if self.config.audio_output {
-            self.send(RdpCommand::SetAudioMuted(locked || self.audio_muted), cx);
-        }
+        self.sync_audio_mute(cx);
         cx.notify();
     }
 
@@ -549,6 +623,7 @@ impl RdpView {
                 || (self.config.remote_app.is_some() && self.applications.active.is_some()))
             && !self.menu_open
             && self.state == State::Connected
+            && !self.stale_desktop
             && !self.window_state.prompts.is_busy()
             && !self.closed
     }
@@ -647,18 +722,72 @@ impl RdpView {
         self.file_export_snapshot = None;
     }
 
+    pub fn has_desktop(&self) -> bool {
+        self.config.remote_app.is_none()
+    }
+
+    pub fn receiving_files(&self) -> bool {
+        self.incoming_files
+            .as_ref()
+            .is_some_and(|transfer| !transfer.ready)
+    }
+
+    pub fn view_state(&self) -> RdpViewState {
+        let pan = self.restore_pan.unwrap_or_else(|| {
+            let limits = self
+                .bounds
+                .map(|b| pan_limits(b.size, self.desktop_size, self.device_scale))
+                .unwrap_or_default();
+            (
+                normalized_pan(self.pan.0, limits.0),
+                normalized_pan(self.pan.1, limits.1),
+            )
+        });
+        RdpViewState {
+            mode: self.zoom,
+            pan,
+            toolbar_pinned: self.toolbar_pinned,
+        }
+    }
+
+    fn display_changed(&self, cx: &mut Context<Self>) {
+        cx.emit(PaneEvent::RdpViewChanged {
+            index: self.index,
+            view: self.view_state(),
+        });
+        cx.notify();
+    }
+
+    fn clamp_pan(&mut self, bounds: Bounds<Pixels>) {
+        let limits = pan_limits(bounds.size, self.desktop_size, self.device_scale);
+        if !self.stale_desktop
+            && self.state == State::Connected
+            && !self.images.is_empty()
+            && let Some((x, y)) = self.restore_pan.take()
+        {
+            self.pan = (
+                f32::from(x) / f32::from(u16::MAX) * limits.0,
+                f32::from(y) / f32::from(u16::MAX) * limits.1,
+            );
+        }
+        self.pan.0 = self.pan.0.clamp(0., limits.0);
+        self.pan.1 = self.pan.1.clamp(0., limits.1);
+    }
+
     fn request_resize(&mut self, cx: &mut Context<Self>) {
         // Returning to the last sent size must also cancel an intermediate size
         // still waiting in the debounce timer.
         self.resize_task = None;
-        if !self.config.uses_dynamic_resolution()
+        if self.zoom != Zoom::Dynamic
+            || self.config.remote_app.is_some()
+            || self.config.monitor_count > 1
             || self.state != State::Connected
             || !self.visible
             || self.window_state.is_locked()
         {
             return;
         }
-        let Some(requested) = resize_dimensions(self.layout_size, self.device_scale) else {
+        let Some(requested) = resize_dimensions(self.connection_layout(), self.device_scale) else {
             return;
         };
         if self.last_resize.unwrap_or(self.desktop_size) == requested {
@@ -670,6 +799,7 @@ impl RdpView {
             gpui::Timer::after(std::time::Duration::from_millis(120)).await;
             let _ = this.update(cx, |this, cx| {
                 if this.visible
+                    && this.zoom == Zoom::Dynamic
                     && !this.window_state.is_locked()
                     && this.state == State::Connected
                     && this.send(
@@ -693,6 +823,23 @@ impl RdpView {
             });
         }));
     }
+}
+
+fn normalized_pan(position: f32, limit: f32) -> u16 {
+    if limit <= 0. {
+        0
+    } else {
+        (position / limit * f32::from(u16::MAX))
+            .round()
+            .clamp(0., f32::from(u16::MAX)) as u16
+    }
+}
+
+fn pan_limits(viewport: gpui::Size<Pixels>, desktop: (u16, u16), scale: f32) -> (f32, f32) {
+    (
+        (f32::from(desktop.0) - f32::from(viewport.width) * scale).max(0.),
+        (f32::from(desktop.1) - f32::from(viewport.height) * scale).max(0.),
+    )
 }
 
 fn automatic_desktop_scale(device_scale: f32) -> u32 {

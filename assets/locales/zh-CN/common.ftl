@@ -26,7 +26,7 @@ common-cli-help =
     用法：rustterm [--config-dir PATH] [--panes 1|4] [--font NAME] [--font-size 8..40] [--shell PATH] [-- SHELL_ARGS...]
 
     配置：$XDG_CONFIG_HOME/rustterm 或 ~/.config/rustterm
-    快捷键：Ctrl+Shift+T 新建 · W 关闭分屏 · C/V 复制粘贴 · F 搜索 · S SFTP · D/E 分屏 · J 下个分屏 · Ctrl+Tab 切换标签
+    默认快捷键：Ctrl+Shift+T 新建 · W 关闭分屏 · C/V 复制粘贴 · F 搜索 · S SFTP · D/E 分屏 · J 下个分屏 · Ctrl+Tab 切换标签
     sz/rz 需要本机安装 lrzsz，收到握手后自动选择文件或保存目录。
     Shell 参数直接传递，密码与口令不会写入普通配置。
 

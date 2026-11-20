@@ -41,6 +41,16 @@ workspace-close-current-pane = 关闭当前分屏
 workspace-close-panes-confirmation = 关闭 { $count } 个分栏？
 
 workspace-close-tab = 关闭标签
+workspace-disconnect-named-session = 断开「{ $name }」？
+workspace-close-named-session = 关闭「{ $name }」？
+workspace-close-running-sessions = 其中 { $count } 个会话仍在运行。
+workspace-close-uploads = 尚未完成的上传将取消。
+workspace-close-downloads = 尚未完成的下载将取消。
+workspace-close-file-edits = 尚未上传的文件修改不会保存到服务器。
+workspace-close-filename = 正在编辑的文件名将丢弃。
+workspace-close-file-operation = 文件操作正在进行，关闭后可能无法查看操作结果。
+workspace-close-unsaved-edits = 未保存的编辑将丢弃。
+workspace-close-transaction = 事务尚未确认结束，请在关闭前检查事务状态。
 workspace-pin-tab = 固定标签
 workspace-unpin-tab = 取消固定标签
 workspace-new-tab-session = 新建会话
@@ -57,6 +67,11 @@ workspace-closing-connections-and-saving-settings = 正在结束连接并保存�
 workspace-command-name = 命令名称
 
 workspace-command-palette = 命令面板…
+
+workspace-quick-open-connection = 快速打开连接…
+workspace-quick-open-another-ssh = 回车新建 SSH 会话 · 已打开 { $count } 个
+workspace-quick-open-switch-desktop = 回车切到已打开的远程桌面
+workspace-quick-open-switch-session = 回车切到已打开的会话
 
 workspace-command-text = 命令内容
 
@@ -198,7 +213,6 @@ workspace-expand-ssh-tab-group = { $name } · { $count } 个标签。点击展�
 
 workspace-collapse-ssh-tab-group = { $name } · { $count } 个标签。点击折叠，拖动调整整组位置。
 
-workspace-hide-connection-library-ctrl-shift-b = 收起连接库 · Ctrl+Shift+B
 
 workspace-hide-tools = 收起工具
 
@@ -410,11 +424,9 @@ workspace-shell = Shell
 
 workspace-shortcuts-and-about-rustterm = 快捷键与关于 RustTerm
 
-workspace-show-connection-library-ctrl-shift-b = 显示连接库 · Ctrl+Shift+B
 
 workspace-show-connection-sidebar = 显示连接侧栏
 
-workspace-show-hide-sidebar-ctrl-shift-b = 显示 / 隐藏侧栏 · Ctrl+Shift+B
 
 workspace-show-line-numbers = 显示行号
 
@@ -497,3 +509,17 @@ workspace-no-ports = 打开 SSH 连接后可管理端口转发。
 workspace-all-connections = 所有连接
 
 workspace-speed-search = 快速定位：↑↓切换匹配项，回车打开，Esc 退出搜索。
+
+workspace-retry-countdown = { $seconds } 秒后重试 · 第 { $attempt }/5 次
+
+workspace-retry-connecting = 正在重连 · 第 { $attempt }/5 次
+
+workspace-retry-stopped = 自动重试已停止
+
+workspace-retry-now = 立即重试
+
+workspace-retry-stop = 停止重试
+
+workspace-retry-ssh-detail = 旧输出保留为只读。重连会新建 Shell，不会恢复或重新执行之前的命令。
+
+workspace-retry-rdp-detail = 旧画面保留为只读，能否恢复原会话由远程服务端决定。

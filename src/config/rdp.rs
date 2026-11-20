@@ -29,6 +29,8 @@ pub struct RdpConfig {
     pub clipboard: bool,
     pub clipboard_files: bool,
     pub audio_output: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub mute_audio_in_background: bool,
     pub audio_input: bool,
     pub monitor_count: u8,
     pub shared_folders: Vec<RdpSharedFolder>,
@@ -67,6 +69,7 @@ impl Default for RdpConfig {
             clipboard: true,
             clipboard_files: cfg!(target_os = "linux"),
             audio_output: cfg!(target_os = "linux"),
+            mute_audio_in_background: false,
             audio_input: false,
             monitor_count: 1,
             shared_folders: Vec::new(),
@@ -118,6 +121,10 @@ pub enum RdpQuality {
 }
 
 impl RdpConfig {
+    pub fn playback_muted(&self, manually_muted: bool, pane_visible: bool, locked: bool) -> bool {
+        locked || manually_muted || (self.mute_audio_in_background && !pane_visible)
+    }
+
     pub fn quality(&self) -> RdpQuality {
         match (
             self.color_depth,
@@ -307,6 +314,28 @@ mod tests {
     use crate::config::CredentialRef;
     use crate::i18n::messages as i18n_key;
     use uuid::Uuid;
+
+    #[test]
+    fn background_audio_policy_round_trips_and_respects_manual_mute_and_lock() {
+        let old: RdpConfig = toml::from_str("host = 'example.test'").unwrap();
+        assert!(!old.mute_audio_in_background);
+        assert!(
+            !toml::to_string(&old)
+                .unwrap()
+                .contains("mute_audio_in_background")
+        );
+        assert!(!old.playback_muted(false, false, false));
+        let custom: RdpConfig = toml::from_str("mute_audio_in_background = true").unwrap();
+        let saved: RdpConfig = toml::from_str(&toml::to_string(&custom).unwrap()).unwrap();
+        assert!(saved.playback_muted(false, false, false));
+        assert!(!saved.playback_muted(false, true, false));
+        for config in [old, saved] {
+            for visible in [false, true] {
+                assert!(config.playback_muted(true, visible, false));
+                assert!(config.playback_muted(false, visible, true));
+            }
+        }
+    }
 
     #[test]
     fn older_profiles_keep_clear_defaults_and_round_trip_custom_preferences() {

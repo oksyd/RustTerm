@@ -38,6 +38,7 @@ pub(super) enum MenuAction {
     FilterType(Option<super::connection_kind::ConnectionKind>),
     ActivateTab(usize),
     Palette,
+    QuickOpen,
     Forwards,
     NewTerminal,
     NewConnection,
@@ -140,9 +141,10 @@ impl Menu {
                             NewTerminal,
                         ),
                         MenuItem::new(i18n_key::COMMON_NEW_CONNECTION, "", NewConnection),
+                        MenuItem::new(i18n_key::WORKSPACE_QUICK_OPEN_CONNECTION, "", QuickOpen),
                         MenuItem::new(i18n_key::WORKSPACE_NEW_GROUP, "", NewGroup),
                         MenuItem::new(i18n_key::COMMON_SETTINGS_DIALOG, "Ctrl+,", Settings),
-                        MenuItem::new(i18n_key::WORKSPACE_COMMAND_PALETTE, "Ctrl+Shift+P", Palette),
+                        MenuItem::new(i18n_key::WORKSPACE_COMMAND_PALETTE, "", Palette),
                         MenuItem::new(i18n_key::SETTINGS_LOCK_RUSTTERM, "Ctrl+Shift+L", Lock),
                         MenuItem::new(i18n_key::WORKSPACE_QUIT, "", Quit),
                     ]
@@ -153,7 +155,7 @@ impl Menu {
                     &[
                         MenuItem::new(i18n_key::WORKSPACE_COPY_SELECTION, "Ctrl+Shift+C", Copy),
                         MenuItem::new(i18n_key::COMMON_PASTE, "Ctrl+Shift+V", Paste),
-                        MenuItem::new(i18n_key::REDIS_SEARCH_CURRENT_PANE, "Ctrl+Shift+F", Search),
+                        MenuItem::new(i18n_key::REDIS_SEARCH_CURRENT_PANE, "", Search),
                         MenuItem::new(i18n_key::WORKSPACE_FILTER_CONNECTION_PROFILES, "", Filter),
                     ]
                 }
@@ -161,11 +163,7 @@ impl Menu {
             Self::View => {
                 const {
                     &[
-                        MenuItem::new(
-                            i18n_key::WORKSPACE_SHOW_CONNECTION_SIDEBAR,
-                            "Ctrl+Shift+B",
-                            Sidebar,
-                        ),
+                        MenuItem::new(i18n_key::WORKSPACE_SHOW_CONNECTION_SIDEBAR, "", Sidebar),
                         MenuItem::new(
                             i18n_key::WORKSPACE_ZOOM_CURRENT_PANE,
                             "Ctrl+Shift+Enter",
@@ -751,10 +749,11 @@ impl Workspace {
             }
             NewTabSession | SetTabPinned(_) | CloseTab | CloseOtherTabs | CloseTabsToRight
             | CloseTabGroup => {
-                unreachable!("tab actions are dispatched with their explicit context")
+                return;
             }
-            NewConnection => unreachable!("submenu navigation is handled before command dispatch"),
-            Palette => self.toggle_palette(window, cx),
+            NewConnection => self.toggle_menu(Menu::NewConnection, window, cx),
+            Palette => self.toggle_palette(super::palette::PaletteScope::Commands, window, cx),
+            QuickOpen => self.toggle_palette(super::palette::PaletteScope::Connections, window, cx),
             Forwards => self.open_tunnels(window, cx),
             EditProfile | OpenProfile | OpenProfileRight | OpenProfileBelow | DeleteProfile => {
                 let Some(profile) = profile else { return };
@@ -782,7 +781,7 @@ impl Workspace {
                         self.connect_profile(profile, Some(Axis::Vertical), window, cx)
                     }
                     DeleteProfile => self.delete_profile(profile.id, window, cx),
-                    _ => unreachable!(),
+                    _ => return,
                 }
             }
             NewTerminal => self.pane_event(&PaneEvent::NewTab, window, cx),
@@ -860,7 +859,10 @@ impl Workspace {
             SplitHorizontal => self.split(Axis::Horizontal, window, cx),
             SplitVertical => self.split(Axis::Vertical, window, cx),
             NextPane => self.pane_event(&PaneEvent::NextPane, window, cx),
-            NextTab => self.pane_event(&PaneEvent::NextTab, window, cx),
+            NextTab => {
+                self.switch_tab(false, window, cx);
+                self.tab_history.finish();
+            }
             LineNumbers | LineTimestamps | Highlight => {
                 if matches!(action, LineNumbers) {
                     self.config.settings.line_numbers = !self.config.settings.line_numbers;

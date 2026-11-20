@@ -173,7 +173,7 @@ impl MessageChannel {
                 self.record_data(bytes.len());
                 Ok(Message::Accepted)
             }
-            _ => unreachable!(),
+            _ => Err(Error::Invalid("network autodetect request type")),
         }
     }
 }

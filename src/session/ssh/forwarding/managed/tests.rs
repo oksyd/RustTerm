@@ -36,6 +36,34 @@ fn manager() -> Manager {
 }
 
 #[tokio::test]
+async fn production_protection_preserves_settings_without_discovery_or_automatic_listeners() {
+    let (mut controller, _, connection, _) = fixture(&[]);
+    controller.protection = crate::session::SessionProtection::Production;
+    let mut manager = manager();
+    manager.protection = controller.protection;
+    let mut options = options(22, Vec::new());
+    let saved = manager.settings.clone();
+    assert!(!manager.needs_connection());
+    assert!(!manager.control(Control::Refresh, &mut options, &controller));
+    assert!(!manager.control(
+        Control::Hint(3000, ForwardProtocol::Http),
+        &mut options,
+        &controller
+    ));
+    assert!(!manager.control(
+        Control::Configure(saved.clone(), 1),
+        &mut options,
+        &controller
+    ));
+    manager.apply_sample(sample(vec![service(3000, true)]), &controller);
+    manager.apply_sample(sample(vec![service(4000, true)]), &controller);
+    assert!(manager.desired().is_empty());
+    assert_eq!(controller.settings(), saved);
+    assert!(!manager.needs_connection());
+    connection.close().await;
+}
+
+#[tokio::test]
 async fn baseline_ownership_and_explicit_stop_survive_discovery_and_restart() {
     let (controller, _, connection, _) = fixture(&[]);
     let mut manager = manager();

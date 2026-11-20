@@ -80,6 +80,7 @@ impl ForwardSettings {
 }
 #[derive(Clone)]
 pub struct ForwardController {
+    protection: crate::session::SessionProtection,
     control: mpsc::Sender<Control>,
     states: Arc<Mutex<Vec<ForwardStatus>>>,
     remote: Arc<Mutex<BTreeMap<(String, u16), RemoteRoute>>>,
@@ -132,11 +133,18 @@ pub(super) enum ForwardRequest {
     },
 }
 impl ForwardController {
+    pub fn protection(&self) -> crate::session::SessionProtection {
+        self.protection
+    }
+
     pub fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.states, &other.states)
     }
 
     pub(in crate::session) fn observe_output(&self, bytes: &[u8]) {
+        if !self.protection.allows_enhancements() {
+            return;
+        }
         if !self
             .settings
             .lock()
@@ -181,6 +189,9 @@ impl ForwardController {
         Ok(())
     }
     pub fn refresh(&self) -> Result<(), SendError> {
+        if !self.protection.allows_enhancements() {
+            return Err(SendError::Protected);
+        }
         self.send_control(Control::Refresh)
     }
     pub fn enable_rule(&self, id: Uuid, enabled: bool) -> Result<(), SendError> {
@@ -683,8 +694,8 @@ fn listen(
     connection: &ForwardConnection,
     runtime: &mut ForwardRuntime,
 ) {
-    let RulePhase::Running(token) = &runtime.rules[index].phase else {
-        unreachable!("only running local rules own listeners");
+    let Some(RulePhase::Running(token)) = runtime.rules.get(index).map(|rule| &rule.phase) else {
+        return;
     };
     let token = token.clone();
     let rule = rule.clone();
@@ -898,6 +909,7 @@ mod tests {
             keepalive_secs: 0,
             keepalive_max: 1,
             shell_integration: false,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: rules,
             auto_forward: Default::default(),
@@ -916,6 +928,7 @@ mod tests {
     ) {
         let (control, _) = mpsc::channel(1);
         let controller = ForwardController {
+            protection: Default::default(),
             control,
             states: Arc::new(Mutex::new(
                 rules.iter().cloned().map(ForwardStatus::new).collect(),

@@ -30,6 +30,9 @@ fn raw_drafts_detect_invalid_text_hidden_fields_and_empty_rows() {
     draft.shell_integration = !initial.shell_integration;
     assert_ne!(draft, initial);
     draft = initial.clone();
+    draft.production_protection = true;
+    assert_ne!(draft, initial);
+    draft = initial.clone();
     draft.database_tls = true;
     assert_ne!(draft, initial);
     draft = initial.clone();

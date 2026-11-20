@@ -1,4 +1,4 @@
-//! Receipt times are side metadata; terminal cells remain authoritative.
+//! Row metadata distinguishes emitted whitespace from unused grid padding.
 use alacritty_terminal::{
     grid::{Dimensions, Grid},
     index::{Column, Line, Point},
@@ -12,7 +12,7 @@ use std::{
     ops::Range,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LineTimestamp(u32);
 
 impl LineTimestamp {
@@ -47,10 +47,20 @@ pub(super) struct Observation {
     pub previous_time: Option<LineTimestamp>,
     pub enter_alternate: bool,
     pub reset: bool,
+    pub clear_screen: bool,
     edit: Option<(char, usize)>,
     scroll_region: Option<(usize, Option<usize>)>,
     reset_region: bool,
     reverse_index: bool,
+}
+
+impl Observation {
+    pub fn text() -> Self {
+        Self {
+            printed: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Perform for Observation {
@@ -76,10 +86,11 @@ impl Perform for Observation {
         if intermediates.is_empty() {
             let mut params = params.iter().map(|p| usize::from(p[0]));
             let first = params.next().unwrap_or(0);
+            self.clear_screen = action == 'J' && first == 2;
             if action == 'r' {
                 self.scroll_region = Some((first.max(1), params.next().filter(|p| *p != 0)));
             }
-            if matches!(action, 'J' | 'K' | 'X' | 'P' | 'L' | 'M' | 'S' | 'T') {
+            if matches!(action, 'J' | 'K' | 'X' | 'P' | '@' | 'L' | 'M' | 'S' | 'T') {
                 self.edit = Some((action, first));
             }
             self.bulk = action == 'b';
@@ -99,31 +110,53 @@ impl Perform for Observation {
 
 #[derive(Default)]
 pub(super) struct LineTimes {
+    #[cfg(test)]
+    pub observations: usize,
     parser: Parser,
-    times: HashMap<usize, LineTimestamp>,
+    times: HashMap<usize, RowMetadata>,
     primary: Option<LogicalLines>,
     primary_resized: bool,
     scroll_region: Option<Range<usize>>,
 }
 
-struct LogicalLines {
-    lines: Vec<LogicalTime>,
-    cursor: usize,
+#[derive(Clone, Copy)]
+struct RowMetadata {
+    time: LineTimestamp,
+    columns: usize,
+    linefeed: bool,
 }
 
-struct LogicalTime {
-    fingerprint: u64,
-    has_content: bool,
-    time: Option<LineTimestamp>,
-    rows: Vec<usize>,
+pub(super) struct LogicalLines {
+    pub lines: Vec<LogicalTime>,
+    pub cursor: usize,
+}
+
+pub(super) struct LogicalTime {
+    pub fingerprint: u64,
+    pub has_content: bool,
+    pub time: Option<LineTimestamp>,
+    pub rows: Vec<usize>,
+    last_length: usize,
+    trailing_spaces: usize,
+    pub linefeed: bool,
 }
 
 pub(super) fn address(grid: &Grid<Cell>, line: Line) -> usize {
     &grid[Point::new(line, Column(0))] as *const _ as usize
 }
 
+#[cfg(test)]
+thread_local! { pub(super) static LOGICAL_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 impl LineTimes {
+    pub fn observe_text(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut Observation::default(), bytes);
+    }
     pub fn observe(&mut self, byte: u8, grid: &Grid<Cell>, alternate: bool) -> Observation {
+        #[cfg(test)]
+        {
+            self.observations += 1;
+        }
         let mut event = Observation::default();
         self.parser.advance(&mut event, &[byte]);
         let rows = grid.screen_lines();
@@ -158,7 +191,7 @@ impl LineTimes {
                     'K' if param <= 2 && !(param == 0 && grid.cursor.input_needs_wrap) => {
                         Some(cursor..cursor + 1)
                     }
-                    'X' | 'P' => Some(cursor..cursor + 1),
+                    'X' | 'P' | '@' => Some(cursor..cursor + 1),
                     'L' if region.contains(&cursor) => {
                         Some(cursor..(cursor + count).min(region.end))
                     }
@@ -183,9 +216,12 @@ impl LineTimes {
 
     pub fn retire(&mut self, address: usize) {
         self.times.remove(&address);
+        if self.times.capacity() > self.times.len().saturating_mul(3).max(64) {
+            self.times.shrink_to_fit();
+        }
     }
 
-    pub fn written(&mut self, grid: &Grid<Cell>, now: LineTimestamp) {
+    pub fn written(&mut self, grid: &Grid<Cell>, now: LineTimestamp, linefeed: bool) {
         let line = grid.cursor.point.line;
         let previous = Line(line.0 - 1);
         let inherited = (previous >= grid.topmost_line()
@@ -194,16 +230,52 @@ impl LineTimes {
                 .contains(Flags::WRAPLINE))
         .then(|| self.get(grid, previous))
         .flatten();
-        self.times
+        let columns = if linefeed {
+            // LF records a line break, not spaces skipped by cursor movement.
+            0
+        } else if grid.cursor.input_needs_wrap {
+            grid.columns()
+        } else {
+            grid.cursor.point.column.0
+        };
+        let metadata = self
+            .times
             .entry(address(grid, line))
-            .or_insert(inherited.unwrap_or(now));
+            .or_insert(RowMetadata {
+                time: inherited.unwrap_or(now),
+                columns: 0,
+                linefeed: false,
+            });
+        // The parser already advanced the cursor. Keep this per-character path
+        // constant-time; reading/selection can inspect the completed grid row.
+        metadata.columns = metadata.columns.max(columns);
+        metadata.linefeed |= linefeed;
     }
 
-    pub fn cleanup_screen(&mut self, grid: &Grid<Cell>, rows: Range<usize>) {
+    pub fn cleanup_screen(&mut self, grid: &Grid<Cell>, rows: Range<usize>, event: &Observation) {
         for row in rows {
             let line = Line(row as i32);
-            if grid[line].line_length().0 == 0 {
-                self.retire(address(grid, line));
+            let key = address(grid, line);
+            let Some(metadata) = self.times.get_mut(&key) else {
+                continue;
+            };
+            let cursor = grid.cursor.point;
+            let old = metadata.columns;
+            let retained = match event.edit {
+                Some(('J' | 'K', 0)) if line == cursor.line => old.min(cursor.column.0),
+                Some(('J' | 'K', 1)) if line == cursor.line && old > cursor.column.0 + 1 => old,
+                Some(('X', count)) if cursor.column.0 + count.max(1) < old => old,
+                Some(('X', _)) => old.min(cursor.column.0),
+                Some(('P', count)) => old - count.max(1).min(old.saturating_sub(cursor.column.0)),
+                Some(('@', count)) if cursor.column.0 < old => {
+                    (old + count.max(1)).min(grid.columns())
+                }
+                Some(('@', _)) => old,
+                _ => 0,
+            };
+            metadata.columns = retained.max(grid[line].line_length().0);
+            if metadata.columns == 0 {
+                self.retire(key);
             }
         }
     }
@@ -211,17 +283,28 @@ impl LineTimes {
     pub fn stamp_bulk(&mut self, grid: &Grid<Cell>, event: &Observation, now: LineTimestamp) {
         if !event.repeat {
             for row in 0..grid.screen_lines() {
-                self.times.insert(address(grid, Line(row as i32)), now);
+                self.times.insert(
+                    address(grid, Line(row as i32)),
+                    RowMetadata {
+                        time: now,
+                        columns: grid.columns(),
+                        linefeed: false,
+                    },
+                );
             }
             return;
         }
         let mut line = grid.cursor.point.line;
-        if grid[line].line_length().0 == 0 {
-            return;
-        }
         let time = event.previous_time.unwrap_or(now);
+        self.written(grid, time, false);
         loop {
-            self.times.insert(address(grid, line), time);
+            self.times
+                .entry(address(grid, line))
+                .or_insert(RowMetadata {
+                    time,
+                    columns: grid[line].line_length().0,
+                    linefeed: false,
+                });
             let previous = Line(line.0 - 1);
             if previous < grid.topmost_line()
                 || !grid[previous][Column(grid.columns() - 1)]
@@ -234,31 +317,41 @@ impl LineTimes {
         }
     }
 
-    pub fn retain(&mut self, tracker: &super::reading::Tracker) {
-        self.times
-            .retain(|address, _| tracker.contains_address(*address));
-        if self.times.capacity() > tracker.positions.len().saturating_mul(2) {
-            self.times.shrink_to_fit();
-        }
-    }
-
     pub fn get(&self, grid: &Grid<Cell>, line: Line) -> Option<LineTimestamp> {
-        self.times.get(&address(grid, line)).copied()
+        self.times
+            .get(&address(grid, line))
+            .map(|metadata| metadata.time)
     }
 
-    pub fn before_resize(&mut self, grid: &Grid<Cell>, alternate: bool) {
-        if alternate {
-            self.primary_resized = true;
-        } else {
-            self.primary = Some(self.logical_lines(grid));
-        }
+    pub fn columns(&self, grid: &Grid<Cell>, line: Line) -> usize {
+        grid[line]
+            .line_length()
+            .0
+            .max(
+                self.times
+                    .get(&address(grid, line))
+                    .map_or(0, |metadata| metadata.columns),
+            )
+            .min(grid.columns())
     }
 
-    pub fn after_resize(&mut self, grid: &Grid<Cell>, alternate: bool) {
+    pub fn has_linefeed(&self, grid: &Grid<Cell>, line: Line) -> bool {
+        self.times
+            .get(&address(grid, line))
+            .is_some_and(|metadata| metadata.linefeed)
+    }
+
+    pub fn alternate_resized(&mut self) {
+        self.primary_resized = true;
+    }
+
+    pub fn after_resize(
+        &mut self,
+        grid: &Grid<Cell>,
+        previous: Option<LogicalLines>,
+    ) -> Option<LogicalLines> {
         self.scroll_region = None;
-        if !alternate && let Some(previous) = self.primary.take() {
-            self.restore(grid, previous);
-        }
+        previous.map(|previous| self.restore(grid, previous))
     }
 
     pub fn primary_restored(&mut self, grid: &Grid<Cell>) {
@@ -277,7 +370,9 @@ impl LineTimes {
         self.scroll_region = None;
     }
 
-    fn logical_lines(&self, grid: &Grid<Cell>) -> LogicalLines {
+    pub fn logical_lines(&self, grid: &Grid<Cell>) -> LogicalLines {
+        #[cfg(test)]
+        LOGICAL_SCANS.set(LOGICAL_SCANS.get() + 1);
         let mut lines = Vec::new();
         let mut cursor = 0;
         let mut hash = DefaultHasher::new();
@@ -317,6 +412,9 @@ impl LineTimes {
                     has_content,
                     time,
                     rows: std::mem::take(&mut rows),
+                    last_length: row.line_length().0,
+                    trailing_spaces: self.columns(grid, line).saturating_sub(row.line_length().0),
+                    linefeed: self.has_linefeed(grid, line),
                 });
                 hash = DefaultHasher::new();
                 has_content = false;
@@ -326,8 +424,8 @@ impl LineTimes {
         LogicalLines { lines, cursor }
     }
 
-    fn restore(&mut self, grid: &Grid<Cell>, previous: LogicalLines) {
-        let current = self.logical_lines(grid);
+    fn restore(&mut self, grid: &Grid<Cell>, previous: LogicalLines) -> LogicalLines {
+        let mut current = self.logical_lines(grid);
         let mut indices: HashMap<u64, Vec<usize>> = HashMap::new();
         for (index, line) in previous.lines.iter().enumerate() {
             if line.has_content {
@@ -409,13 +507,37 @@ impl LineTimes {
             }
         }
         self.times.clear();
-        for (line, matched) in current.lines.into_iter().zip(matches) {
-            if let Some(time) = matched.and_then(|index| previous.lines[index].time) {
-                for row in line.rows {
-                    self.times.insert(row, time);
+        for (line, matched) in current.lines.iter_mut().zip(matches) {
+            line.time = None;
+            line.linefeed = false;
+            line.trailing_spaces = 0;
+            if let Some(old) = matched.map(|index| &previous.lines[index])
+                && let Some(time) = old.time
+            {
+                line.time = Some(time);
+                line.linefeed = old.linefeed;
+                line.trailing_spaces = old
+                    .trailing_spaces
+                    .min(grid.columns().saturating_sub(line.last_length));
+                let count = line.rows.len();
+                for (index, &row) in line.rows.iter().enumerate() {
+                    let last = index + 1 == count;
+                    self.times.insert(
+                        row,
+                        RowMetadata {
+                            time,
+                            columns: if last {
+                                (line.last_length + old.trailing_spaces).min(grid.columns())
+                            } else {
+                                grid.columns()
+                            },
+                            linefeed: last && old.linefeed,
+                        },
+                    );
                 }
             }
         }
+        current
     }
 }
 

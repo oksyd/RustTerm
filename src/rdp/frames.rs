@@ -3,7 +3,7 @@ use std::{sync::Arc, time::Duration};
 use rustrdp::graphics::Damage;
 use tokio::time::Instant;
 
-use super::{RDP_TILE_SIZE, RdpFrame, RdpTile};
+use super::{RDP_TILE_SIZE, RdpError, RdpFrame, RdpTile, Result};
 
 /// Limit publication rate without delaying an update after an idle period.
 pub(super) struct FrameClock {
@@ -96,12 +96,12 @@ impl FrameSnapshot {
         self.audit.as_mut().map(std::mem::take)
     }
 
-    pub fn capture(&mut self, session: &mut rustrdp::Session) -> RdpFrame {
+    pub fn capture(&mut self, session: &mut rustrdp::Session) -> Result<RdpFrame> {
         let damage = session.take_graphics_damage();
         let mut frame =
-            self.capture_graphics(session.graphics(), damage, session.info().color_depth());
+            self.capture_graphics(session.graphics(), damage, session.info().color_depth())?;
         frame.remote_windows = session.remote_windows();
-        frame
+        Ok(frame)
     }
 
     pub fn capture_graphics(
@@ -109,14 +109,14 @@ impl FrameSnapshot {
         graphics: &rustrdp::graphics::Graphics,
         damage: Option<Damage>,
         bits_per_pixel: u16,
-    ) -> RdpFrame {
+    ) -> Result<RdpFrame> {
         self.update(
             graphics.width(),
             graphics.height(),
             graphics.pixels(),
             damage,
-        );
-        RdpFrame {
+        )?;
+        Ok(RdpFrame {
             remote_windows: Vec::new(),
             sequence: 0,
             published_at: std::time::Instant::now(),
@@ -126,11 +126,25 @@ impl FrameSnapshot {
             bits_per_pixel,
             tiles: self.tiles.clone(),
             hide_local_pointer: graphics.hide_local_pointer(),
-        }
+        })
     }
 
-    fn update(&mut self, width: u16, height: u16, pixels: &[u8], damage: Option<Damage>) {
-        debug_assert_eq!(pixels.len(), usize::from(width) * usize::from(height) * 4);
+    fn update(
+        &mut self,
+        width: u16,
+        height: u16,
+        pixels: &[u8],
+        damage: Option<Damage>,
+    ) -> Result<()> {
+        if width == 0
+            || height == 0
+            || usize::from(width)
+                .checked_mul(usize::from(height))
+                .and_then(|size| size.checked_mul(4))
+                != Some(pixels.len())
+        {
+            return Err(RdpError::Protocol("desktop snapshot pixel buffer"));
+        }
         if self.size != (width, height) {
             self.tiles.clear();
             for y in (0..height).step_by(usize::from(RDP_TILE_SIZE)) {
@@ -147,7 +161,7 @@ impl FrameSnapshot {
                 }
             }
             self.size = (width, height);
-            return;
+            return Ok(());
         }
         if let Some(audit) = &mut self.audit {
             audit.captures = audit.captures.saturating_add(1);
@@ -161,7 +175,7 @@ impl FrameSnapshot {
                 }
             }
         }
-        let Some(damage) = damage else { return };
+        let Some(damage) = damage else { return Ok(()) };
         for tile in &mut self.tiles {
             // A union can cover large unchanged areas between separate updates.
             // Comparing candidate rows also avoids uploads for identical bitmaps.
@@ -176,6 +190,7 @@ impl FrameSnapshot {
                 pixels: tile.read_pixels(width, pixels),
             });
         }
+        Ok(())
     }
 }
 
@@ -218,6 +233,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn invalid_snapshot_buffers_fail_before_mutating_cached_tiles() {
+        let mut snapshot = FrameSnapshot::default();
+        snapshot.update(1, 1, &[1, 2, 3, 255], None).unwrap();
+        let original = snapshot.tiles[0].clone();
+        for (width, height, pixels) in [(2, 2, &[0; 4][..]), (0, 1, &[][..]), (1, 0, &[][..])] {
+            assert!(snapshot.update(width, height, pixels, None).is_err());
+            assert_eq!(snapshot.size, (1, 1));
+            assert!(Arc::ptr_eq(&snapshot.tiles[0], &original));
+        }
+    }
+
+    #[test]
     fn separate_cursor_keeps_desktop_tiles_shared_through_repeated_motion() {
         for composed in [true, false] {
             let mut session = super::super::input_worker::test_session();
@@ -233,11 +260,11 @@ mod tests {
             packet.extend(shape);
             session.process(&packet).unwrap();
             let mut snapshot = FrameSnapshot::default();
-            let mut previous = snapshot.capture(&mut session);
+            let mut previous = snapshot.capture(&mut session).unwrap();
             let mut copied_bytes = 0;
             for x in 1..=300 {
                 session.input(rustrdp::Input::Pointer { x, y: 20 }).unwrap();
-                let next = snapshot.capture(&mut session);
+                let next = snapshot.capture(&mut session).unwrap();
                 for (old, new) in previous.tiles.iter().zip(&next.tiles) {
                     if !Arc::ptr_eq(old, new) {
                         copied_bytes += new.pixels.len();
@@ -371,7 +398,7 @@ mod tests {
             .map(|value| (value % 251) as u8)
             .collect();
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(width, 2, &pixels, None);
+        snapshot.update(width, 2, &pixels, None).unwrap();
         assert_eq!(snapshot.tiles.len(), 2);
         let first = &snapshot.tiles[0];
         let edge = &snapshot.tiles[1];
@@ -399,36 +426,40 @@ mod tests {
         let width = RDP_TILE_SIZE * 3;
         let mut pixels = vec![0; usize::from(width) * 4];
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(width, 1, &pixels, None);
+        snapshot.update(width, 1, &pixels, None).unwrap();
         let initial = snapshot.tiles.clone();
         pixels[0] = 1;
-        snapshot.update(
-            width,
-            1,
-            &pixels,
-            Some(Damage {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            }),
-        );
+        snapshot
+            .update(
+                width,
+                1,
+                &pixels,
+                Some(Damage {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }),
+            )
+            .unwrap();
         let skipped = snapshot.tiles.clone();
         assert!(!Arc::ptr_eq(&initial[0], &skipped[0]));
         assert!(Arc::ptr_eq(&initial[1], &skipped[1]));
         assert!(Arc::ptr_eq(&initial[2], &skipped[2]));
         pixels[usize::from(RDP_TILE_SIZE * 2) * 4] = 2;
-        snapshot.update(
-            width,
-            1,
-            &pixels,
-            Some(Damage {
-                x: RDP_TILE_SIZE * 2,
-                y: 0,
-                width: 1,
-                height: 1,
-            }),
-        );
+        snapshot
+            .update(
+                width,
+                1,
+                &pixels,
+                Some(Damage {
+                    x: RDP_TILE_SIZE * 2,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }),
+            )
+            .unwrap();
         assert!(Arc::ptr_eq(&skipped[0], &snapshot.tiles[0]));
         assert!(Arc::ptr_eq(&initial[1], &snapshot.tiles[1]));
         assert_eq!(snapshot.tiles[0].pixels[0], 1);
@@ -442,20 +473,22 @@ mod tests {
         let width = RDP_TILE_SIZE * 3;
         let mut pixels = vec![0; usize::from(width) * 4];
         let mut snapshot = FrameSnapshot::with_audit(true);
-        snapshot.update(width, 1, &pixels, None);
+        snapshot.update(width, 1, &pixels, None).unwrap();
         pixels[0] = 1;
         pixels[usize::from(RDP_TILE_SIZE * 2) * 4] = 2;
-        snapshot.update(
-            width,
-            1,
-            &pixels,
-            Some(Damage {
-                x: 0,
-                y: 0,
-                width: 1,
-                height: 1,
-            }),
-        );
+        snapshot
+            .update(
+                width,
+                1,
+                &pixels,
+                Some(Damage {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                }),
+            )
+            .unwrap();
         let audit = snapshot.take_audit().unwrap();
         assert_eq!(
             (audit.captures, audit.checked_tiles, audit.mismatched_tiles),
@@ -463,7 +496,7 @@ mod tests {
         );
         assert_eq!(snapshot.tiles[0].pixels[0], 1);
         assert_eq!(snapshot.tiles[2].pixels[0], 0);
-        snapshot.update(width, 1, &pixels, None);
+        snapshot.update(width, 1, &pixels, None).unwrap();
         let audit = snapshot.take_audit().unwrap();
         assert_eq!(
             (audit.captures, audit.checked_tiles, audit.mismatched_tiles),
@@ -482,7 +515,7 @@ mod tests {
         let width = RDP_TILE_SIZE * 3;
         let mut pixels = vec![0; usize::from(width) * 4];
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(width, 1, &pixels, None);
+        snapshot.update(width, 1, &pixels, None).unwrap();
         let initial = snapshot.tiles.clone();
         pixels[0] = 1;
         pixels[usize::from(width) * 4 - 1] = 2;
@@ -492,11 +525,11 @@ mod tests {
             width,
             height: 1,
         });
-        snapshot.update(width, 1, &pixels, full);
+        snapshot.update(width, 1, &pixels, full).unwrap();
         assert!(Arc::ptr_eq(&initial[1], &snapshot.tiles[1]));
         let changed = snapshot.tiles.clone();
-        snapshot.update(width, 1, &pixels, full);
-        snapshot.update(width, 1, &pixels, None);
+        snapshot.update(width, 1, &pixels, full).unwrap();
+        snapshot.update(width, 1, &pixels, None).unwrap();
         for (before, after) in changed.iter().zip(&snapshot.tiles) {
             assert!(Arc::ptr_eq(before, after));
         }
@@ -505,9 +538,9 @@ mod tests {
     #[test]
     fn resizing_rebuilds_tiles_even_with_the_same_pixel_count() {
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(2, 1, &[1; 8], None);
+        snapshot.update(2, 1, &[1; 8], None).unwrap();
         let old = snapshot.tiles[0].clone();
-        snapshot.update(1, 2, &[2; 8], None);
+        snapshot.update(1, 2, &[2; 8], None).unwrap();
         assert_eq!(snapshot.tiles.len(), 1);
         assert_eq!((snapshot.tiles[0].width, snapshot.tiles[0].height), (1, 2));
         assert!(!Arc::ptr_eq(&old, &snapshot.tiles[0]));
@@ -519,21 +552,23 @@ mod tests {
         let side = RDP_TILE_SIZE + 1;
         let mut pixels = vec![0; usize::from(side) * usize::from(side) * 4];
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(side, side, &pixels, None);
+        snapshot.update(side, side, &pixels, None).unwrap();
         let initial = snapshot.tiles.clone();
         let corner = pixels.len() - 4;
         pixels[corner..].copy_from_slice(&[1, 2, 3, 255]);
-        snapshot.update(
-            side,
-            side,
-            &pixels,
-            Some(Damage {
-                x: side - 1,
-                y: side - 1,
-                width: 1,
-                height: 1,
-            }),
-        );
+        snapshot
+            .update(
+                side,
+                side,
+                &pixels,
+                Some(Damage {
+                    x: side - 1,
+                    y: side - 1,
+                    width: 1,
+                    height: 1,
+                }),
+            )
+            .unwrap();
         assert_eq!(snapshot.tiles.len(), 4);
         for (before, after) in initial.iter().zip(&snapshot.tiles).take(3) {
             assert!(Arc::ptr_eq(before, after));
@@ -545,19 +580,21 @@ mod tests {
     #[test]
     fn full_damage_replaces_pixels_after_a_same_size_reset() {
         let mut snapshot = FrameSnapshot::default();
-        snapshot.update(2, 1, &[1; 8], None);
+        snapshot.update(2, 1, &[1; 8], None).unwrap();
         let old = snapshot.tiles[0].clone();
-        snapshot.update(
-            2,
-            1,
-            &[0; 8],
-            Some(Damage {
-                x: 0,
-                y: 0,
-                width: 2,
-                height: 1,
-            }),
-        );
+        snapshot
+            .update(
+                2,
+                1,
+                &[0; 8],
+                Some(Damage {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                }),
+            )
+            .unwrap();
         assert!(!Arc::ptr_eq(&old, &snapshot.tiles[0]));
         assert_eq!(snapshot.tiles[0].pixels, [0; 8]);
     }

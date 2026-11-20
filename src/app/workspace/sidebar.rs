@@ -101,6 +101,20 @@ struct LibrarySection<'a> {
     collapsed: bool,
 }
 
+fn open_panes_by_profile<'a, T>(
+    pane_order: impl Iterator<Item = usize>,
+    profiles: &HashMap<usize, Profile>,
+    panes: &'a HashMap<usize, T>,
+) -> HashMap<Uuid, Vec<&'a T>> {
+    let mut open = HashMap::<_, Vec<_>>::new();
+    for id in pane_order {
+        if let (Some(profile), Some(pane)) = (profiles.get(&id), panes.get(&id)) {
+            open.entry(profile.id).or_default().push(pane);
+        }
+    }
+    open
+}
+
 // Rendering and keyboard navigation share the same visible tree and row order.
 fn library_sections<'a>(
     config: &'a AppConfig,
@@ -486,13 +500,12 @@ impl Workspace {
             .capture_key_down(cx.listener(|this, event, window, cx| {
                 this.sidebar_key(event, window, cx);
             }))
-            .w(px(self.sidebar_width))
-            .h_full()
+            .size_full()
             .flex_shrink_0()
             .flex()
             .flex_col()
             .bg(rgb(ui::colors().surface))
-            .border_r_1()
+            .border_l_1()
             .border_color(rgb(ui::colors().border))
             .child(
                 div()
@@ -619,6 +632,13 @@ impl Workspace {
             .track_scroll(&self.sidebar_scroll)
             .pb_2();
         let mut matched = 0;
+        let open_by_profile = std::cell::LazyCell::new(|| {
+            open_panes_by_profile(
+                self.tabs.iter().flat_map(|tab| tab.layout.leaves()),
+                &self.pane_profiles,
+                &self.panes,
+            )
+        });
         for (group_index, section) in sections.into_iter().enumerate() {
             let LibrarySection {
                 id: group,
@@ -839,17 +859,7 @@ impl Workspace {
                 let id = profile.id;
                 let glyph = Icon::for_connection(&profile.connection);
                 let selected = selected == Some(id);
-                let open: Vec<_> = self
-                    .tabs
-                    .iter()
-                    .flat_map(|tab| tab.layout.leaves())
-                    .filter(|pane| {
-                        self.pane_profiles
-                            .get(pane)
-                            .is_some_and(|profile| profile.id == id)
-                    })
-                    .filter_map(|pane| self.panes.get(&pane))
-                    .collect();
+                let open = open_by_profile.get(&id).map_or(&[][..], Vec::as_slice);
                 let open_count = open.len();
                 let status = open
                     .iter()
@@ -893,6 +903,7 @@ impl Workspace {
                 } else {
                     rustterm::trf!(i18n_key::WORKSPACE_OPEN_PANE_COUNT_HELP, count = open_count)
                 };
+                let protected = matches!(&profile.connection, Connection::Ssh(config) if config.production_protection);
                 let tooltip = format!("{path} / {}\n{detail}\n{hint}", profile.name);
                 tree = tree.child(
                     div()
@@ -943,6 +954,7 @@ impl Workspace {
                                                     speed_query,
                                                 )),
                                         )
+                                        .when(protected, |row| row.child(ui::production_badge()))
                                         .when(open_count > 1, |d| {
                                             d.child(
                                                 div()
@@ -1059,6 +1071,28 @@ pub(super) fn telnet_target(settings: &rustterm::config::TelnetConfig) -> String
 mod tests {
     use super::*;
     use rustterm::config::LocalConfig;
+
+    #[test]
+    fn open_panes_follow_tab_order_and_only_include_live_profile_bindings() {
+        let ssh = Profile::local("first", LocalConfig::default());
+        let other = Profile::local("second", LocalConfig::default());
+        let profiles = HashMap::from([
+            (1, ssh.clone()),
+            (2, other.clone()),
+            (3, ssh.clone()),
+            (4, ssh.clone()),
+        ]);
+        let mut panes =
+            HashMap::from([(1, "stopped"), (2, "other"), (3, "running"), (5, "unsaved")]);
+        let order = [5, 3, 2, 4, 1];
+        let open = open_panes_by_profile(order.into_iter(), &profiles, &panes);
+        assert_eq!(open.len(), 2);
+        assert_eq!(open[&ssh.id], [&"running", &"stopped"]);
+        assert_eq!(open[&other.id], [&"other"]);
+        panes.remove(&3);
+        let open = open_panes_by_profile(order.into_iter(), &profiles, &panes);
+        assert_eq!(open[&ssh.id], [&"stopped"]);
+    }
 
     pub(super) fn library() -> AppConfig {
         let company = Group::new("Company A");

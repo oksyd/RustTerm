@@ -41,6 +41,7 @@ fn native_window_control(button: Stateful<Div>, area: WindowControlArea) -> Stat
 }
 
 const TITLEBAR_BUTTON_WIDTH: f32 = 38.;
+const TITLEBAR_BRAND_WIDTH: f32 = 150.;
 const TITLEBAR_BUTTON_VISUAL_SIZE: f32 = 28.;
 const WINDOW_CONTROL_GAP: f32 = 12.;
 const TITLEBAR_RIGHT_PADDING: f32 = 8.;
@@ -104,6 +105,61 @@ fn titlebar_button(
 }
 
 impl Workspace {
+    fn titlebar_brand(&self, menu: Option<Menu>, cx: &Context<Self>) -> Stateful<Div> {
+        div()
+            .id("application-menu")
+            .h(px(TITLEBAR_BUTTON_VISUAL_SIZE))
+            .px(px(7.))
+            .gap(px(6.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgba(0))
+            .child(
+                icon(Icon::Logo)
+                    .size(px(16.))
+                    .text_color(rgb(ui::colors().brand)),
+            )
+            .child("RustTerm")
+            .when(!self.lock_screen.locked, |button| {
+                button
+                    .occlude()
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .when(menu.is_some(), |button| {
+                        button.bg(rgb(ui::colors().selected))
+                    })
+                    .hover(|s| {
+                        s.bg(rgb(ui::colors().hover))
+                            .text_color(rgb(ui::colors().text))
+                    })
+                    .focus(|s| s.border_color(rgb(ui::colors().accent)))
+                    .tooltip(|_, cx| {
+                        cx.new(|_| ui::Tooltip(tr(i18n_key::WORKSPACE_APPLICATION_MENU).to_owned()))
+                            .into()
+                    })
+                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    })
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.toggle_menu(this.application_menu().unwrap_or(Menu::File), window, cx);
+                    }))
+                    .child(
+                        icon(if menu.is_some() {
+                            Icon::ChevronUp
+                        } else {
+                            Icon::ChevronDown
+                        })
+                        .size(px(12.))
+                        .text_color(rgb(ui::colors().muted)),
+                    )
+            })
+    }
+
     fn caption_mouse_down(
         &mut self,
         event: &MouseDownEvent,
@@ -133,8 +189,11 @@ impl Workspace {
         // Keep its native resize frame/shadow, but draw our own title and controls.
         let custom_titlebar = cfg!(target_os = "windows")
             || matches!(window.window_decorations(), Decorations::Client { .. });
-        let corners = WindowFrame::new(window).corners;
+        let frame = WindowFrame::new(window);
+        let corners = frame.corners;
         let application_menu = self.application_menu().filter(|_| !self.lock_screen.locked);
+        let show_tabs = !self.lock_screen.locked && application_menu.is_none();
+        let width = f32::from(frame.content_size(window.viewport_size()).width);
         let controls = window.window_controls();
         let show_settings = !self.lock_screen.locked;
         let show_minimize = custom_titlebar && controls.minimize;
@@ -178,20 +237,6 @@ impl Workspace {
                     .id("window-title")
                     .absolute()
                     .inset_0()
-                    .flex()
-                    .items_center()
-                    .pl(px(52.))
-                    .gap(px(7.))
-                    .overflow_hidden()
-                    .when(application_menu.is_none(), |title| {
-                        title
-                            .child(
-                                icon(Icon::Logo)
-                                    .size(px(16.))
-                                    .text_color(rgb(ui::colors().brand)),
-                            )
-                            .child("RustTerm")
-                    })
                     .when(cfg!(target_os = "windows"), |title| {
                         title.child(
                             div()
@@ -222,116 +267,90 @@ impl Workspace {
                             window.show_window_menu(event.position);
                         }
                     }),
-            );
-        if !self.lock_screen.locked {
-            if let Some(selected) = application_menu {
-                let mut categories = div()
-                    .id("application-menu-bar")
-                    .relative()
+            )
+            .child(
+                div()
                     .h_full()
-                    .flex()
                     .flex_shrink_0()
-                    .occlude();
-                for (index, (category, label)) in APPLICATION_MENUS.into_iter().enumerate() {
-                    let entity = cx.entity();
-                    categories = categories.child(
-                        div()
-                            .id(("titlebar-menu-category", index))
-                            .relative()
-                            .h_full()
-                            .flex_shrink_0()
-                            .px(px(12.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .when(index == 0, |button| button.rounded_tl(corners.top_left))
-                            .text_color(rgb(if selected == category {
-                                ui::colors().text
-                            } else {
-                                ui::colors().muted
-                            }))
-                            .when(selected == category, |button| {
-                                button.bg(rgb(ui::colors().selected))
-                            })
-                            .hover(|style| {
-                                style
-                                    .bg(rgb(ui::colors().hover))
-                                    .text_color(rgb(ui::colors().text))
-                            })
-                            .on_hover(cx.listener(move |this, hovered, window, cx| {
-                                if *hovered && this.application_menu().is_some() {
-                                    this.switch_application_menu(category, window, cx);
-                                }
-                            }))
-                            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_menu(category, window, cx);
-                            }))
-                            .child(tr(label))
-                            .child(
-                                canvas(
-                                    move |bounds, _, cx| {
-                                        entity.update(cx, |this, cx| {
-                                            this.record_application_menu_bounds(
-                                                category, bounds, cx,
-                                            )
-                                        });
-                                    },
-                                    |_, _, _, _| {},
-                                )
-                                .absolute()
-                                .inset_0(),
-                            ),
-                    );
-                }
-                bar = bar.child(categories);
-            } else {
-                bar = bar.child(
-                    icon_button(
-                        "application-menu",
-                        Icon::Menu,
-                        i18n_key::WORKSPACE_APPLICATION_MENU,
-                    )
-                    .relative()
-                    .occlude()
-                    .tab_index(0)
-                    .w(px(36.))
-                    .h_full()
-                    .rounded_tl(corners.top_left)
-                    .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.toggle_menu(Menu::File, window, cx);
-                    })),
+                    .flex()
+                    .items_center()
+                    .pl(px(6.))
+                    .when(show_tabs, |slot| slot.w(px(TITLEBAR_BRAND_WIDTH)))
+                    .child(self.titlebar_brand(application_menu, cx)),
+            );
+        if let Some(selected) = application_menu {
+            let mut categories = div()
+                .id("application-menu-bar")
+                .relative()
+                .h_full()
+                .flex()
+                .flex_shrink_0()
+                .occlude();
+            for (index, (category, label)) in APPLICATION_MENUS.into_iter().enumerate() {
+                let entity = cx.entity();
+                categories = categories.child(
+                    div()
+                        .id(("titlebar-menu-category", index))
+                        .relative()
+                        .h_full()
+                        .flex_shrink_0()
+                        .px(px(12.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(rgb(if selected == category {
+                            ui::colors().text
+                        } else {
+                            ui::colors().muted
+                        }))
+                        .when(selected == category, |button| {
+                            button.bg(rgb(ui::colors().selected))
+                        })
+                        .hover(|style| {
+                            style
+                                .bg(rgb(ui::colors().hover))
+                                .text_color(rgb(ui::colors().text))
+                        })
+                        .on_hover(cx.listener(move |this, hovered, window, cx| {
+                            if *hovered && this.application_menu().is_some() {
+                                this.switch_application_menu(category, window, cx);
+                            }
+                        }))
+                        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.toggle_menu(category, window, cx);
+                        }))
+                        .child(tr(label))
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.record_application_menu_bounds(category, bounds, cx)
+                                    });
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        ),
                 );
             }
+            bar = bar.child(categories);
         }
-        if self.lock_screen.locked || application_menu.is_some() {
-            bar = bar.child(div().flex_1());
-        } else {
-            // Reserve a stable brand/drag area aligned with the library at normal widths.
-            let width = f32::from(
-                WindowFrame::new(window)
-                    .content_size(window.viewport_size())
-                    .width,
-            );
-            let brand = if width >= 1100. {
-                self.sidebar_width + 5.
-            } else {
-                172.
-            };
+        if show_tabs {
             bar = bar
-                .child(div().w(px(brand - 36.)).flex_shrink_0())
-                .child(self.render_tabs((width - brand - actions_width - 24.).max(0.), cx))
+                .child(self.render_tabs(
+                    (width - TITLEBAR_BRAND_WIDTH - actions_width - 24.).max(0.),
+                    cx,
+                ))
                 .child(div().w(px(24.)).h_full().flex_shrink_0());
+        } else {
+            bar = bar.child(div().flex_1());
         }
         let mut actions = div()
             .id("titlebar-actions")
@@ -443,7 +462,7 @@ impl Workspace {
             title
         }
     }
-    fn workspace_tab_label(&self, tab: &Tab) -> AnyElement {
+    fn workspace_tab_label(&self, tab: &Tab, cx: &gpui::App) -> AnyElement {
         let leaves = tab.layout.leaves();
         let mut label = div()
             .flex_1()
@@ -461,6 +480,7 @@ impl Workspace {
                 .map(|profile| &profile.name)
                 .unwrap_or(&tab.title)
                 .clone();
+            let protected = matches!(self.panes.get(id), Some(crate::app::pane::Pane::Terminal(view)) if view.read(cx).production_protected());
             let suffix = self.session_names.suffix(*id);
             label = label.child(
                 div()
@@ -477,6 +497,7 @@ impl Workspace {
                             .text_ellipsis()
                             .child(name),
                     )
+                    .when(protected, |label| label.child(ui::production_badge()))
                     // Keep the distinguishing number visible when the name is clipped.
                     .when(!suffix.is_empty(), |label| {
                         label.child(div().flex_shrink_0().child(suffix))
@@ -569,7 +590,7 @@ impl Workspace {
                 active && matches!(glyph, Icon::Terminal | Icon::Ssh | Icon::SplitHorizontal),
                 |icon| icon.text_color(rgb(ui::colors().accent)),
             ))
-            .child(self.workspace_tab_label(tab))
+            .child(self.workspace_tab_label(tab, cx))
             .when(unread, |d| {
                 d.child(
                     div()
@@ -907,7 +928,12 @@ impl Workspace {
             )
             .into_any_element()
     }
-    pub(super) fn render_statusbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_statusbar(
+        &self,
+        dock_width: Option<f32>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let corners = WindowFrame::new(window).corners;
         let compact = f32::from(window.viewport_size().width) < 760.;
         let pane = self.panes.get(&self.focused);
@@ -971,22 +997,13 @@ impl Workspace {
         } else {
             format!("{protocol} · {state}")
         };
-        div()
-            .h(px(ui::STATUS_HEIGHT))
-            .flex_shrink_0()
+        let session_status = div()
             .flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .items_center()
             .overflow_hidden()
-            .bg(rgb(ui::colors().status))
-            .rounded_bl(corners.bottom_left)
-            .rounded_br(corners.bottom_right)
-            .pl(corners.bottom_left)
-            .pr(corners.bottom_right)
-            .border_t_1()
-            .border_color(rgb(ui::colors().border))
-            .text_size(px(11.))
-            .text_color(rgb(ui::colors().muted))
-            .child(self.render_panel_buttons(cx))
             .child(match pane {
                 Some(Pane::Rdp(view)) => {
                     view.update(cx, |view, cx| view.render_status(compact, cx))
@@ -1069,7 +1086,23 @@ impl Workspace {
                     })),
                 )
             })
-            .children(self.render_transfer_status(cx))
+            .children(self.render_transfer_status(cx));
+        div()
+            .h(px(ui::STATUS_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .bg(rgb(ui::colors().status))
+            .rounded_bl(corners.bottom_left)
+            .rounded_br(corners.bottom_right)
+            .pl(corners.bottom_left)
+            .border_t_1()
+            .border_color(rgb(ui::colors().border))
+            .text_size(px(11.))
+            .text_color(rgb(ui::colors().muted))
+            .child(session_status)
+            .child(self.render_panel_buttons(dock_width, cx))
             .into_any_element()
     }
 }

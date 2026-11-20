@@ -474,8 +474,11 @@ fn reassemble(
             return Err(Error::Invalid("dynamic channel continuation"));
         }
         current.data.extend_from_slice(data);
-        return Ok((current.data.len() == current.length)
-            .then(|| fragment.take().expect("complete fragment").data));
+        return Ok(if current.data.len() == current.length {
+            fragment.take().map(|complete| complete.data)
+        } else {
+            None
+        });
     }
     if data.len() > maximum {
         return Err(Error::Limit("dynamic channel message"));

@@ -16,9 +16,12 @@ use std::{
 use tokio::sync::mpsc;
 
 mod outbox;
+mod output;
 use outbox::Outbox;
 #[cfg(test)]
 mod backpressure_tests;
+#[cfg(test)]
+mod performance_tests;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -40,16 +43,20 @@ pub(super) async fn run(
         let mut deferred_input = std::collections::VecDeque::new();
         let mut deferred_resize = None;
         let mut outbox = Outbox::default();
+        let mut output_buffer = output::OutputBuffer::default();
         let mut read_eof = false;
         let mut exit_received = false;
         let mut exit_code = None;
         let mut drain_deadline = None;
         let mut next_search_step = tokio::time::Instant::now();
         let mut scheduled_query = 0;
+        let mut foreground_streak = 0usize;
         loop {
             if shared.io_stop.is_cancelled() || (read_eof && exit_received && !transfer.active()) {
                 break;
             }
+            // Even tiny, immediately ready messages yield to other sessions.
+            tokio::task::yield_now().await;
             if transfer.active() {
                 outbox.quarantine(&mut deferred_resize);
             }
@@ -68,7 +75,12 @@ pub(super) async fn run(
             let selection_deadline = transfer.deadline();
             let prefix_deadline = transfer.prefix_deadline();
             let transfer_active = transfer.active();
+            let output_waiting = output_buffer.pending() || !transport.output.is_empty();
+            // Prioritize interaction and writes, but admit output after a bounded
+            // foreground burst so scrolling/search cannot starve the remote stream.
+            let foreground_ready = foreground_streak < 8 || !output_waiting;
             tokio::select! {
+                biased;
                 _ = shared.io_stop.cancelled() => break,
                 permit = transport.input.reserve(), if write_pending => {
                     let Ok(permit) = permit else {
@@ -82,7 +94,7 @@ pub(super) async fn run(
                     let write = deferred_resize.take().or_else(|| outbox.pop()).expect("pending terminal write");
                     permit.send(write);
                 },
-                _ = tokio::time::sleep_until(prefix_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if prefix_deadline.is_some() => {
+                _ = tokio::time::sleep_until(prefix_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))), if prefix_deadline.is_some() && !output_buffer.pending() => {
                     let bytes = transfer.flush_prefix();
                     if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
                         shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_TERMINAL_PROTOCOL_RESPONSE)));
@@ -116,9 +128,12 @@ pub(super) async fn run(
                     break;
                 },
                 _ = shared.budget_notify.notified() => apply_budget(&mut terminal, &shared),
-                _ = shared.snapshot_notify.notified() => publish_snapshot(&mut terminal, &shared),
+                _ = shared.snapshot_notify.notified(), if foreground_ready => {
+                    foreground_streak = foreground_streak.saturating_add(1);
+                    publish_snapshot(&mut terminal, &shared);
+                },
                 _ = tokio::time::sleep_until(next_search_step), if !search.query.is_empty() && !search.complete && !search.paused => {
-                    let progress = terminal.search_step(128);
+                    let progress = terminal.search_step_budgeted(128, Duration::from_millis(1));
                     next_search_step = tokio::time::Instant::now() + if progress.complete { Duration::from_millis(250) } else { POLL_INTERVAL };
                     shared.changed();
                 },
@@ -128,42 +143,13 @@ pub(super) async fn run(
                     shared.transition(LifecycleEvent::Closing);
                     match result { Ok(Ok(code)) => exit_code = code, Ok(Err(message)) => { shared.transition(LifecycleEvent::failed(FailureKind::Process, message)); break; }, Err(_) => { shared.transition(LifecycleEvent::failed(FailureKind::Process, crate::i18n::tr(i18n_key::CONNECTIONS_THE_TRANSPORT_TASK_ENDED_UNEXPECTEDLY))); break; } }
                 }
-                output = transport.output.recv(), if !read_eof => match output {
-                    Some(Output::Data(bytes)) => {
-                        match transfer.receive(bytes).await {
-                            Ok(bytes) => {
-                                if let Some(forwarding) = shared.forwarding.lock().unwrap_or_else(|e| e.into_inner()).clone() {
-                                    forwarding.observe_output(&bytes);
-                                }
-                                if transfer.take_discard_deferred() {
-                                    discard_pending_writes(&mut transfer, &mut outbox, &mut deferred_input, &shared);
-                                }
-                                if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
-                                    if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_PROTOCOL_RESPONSE_THE_CONNECTION_HAS_STOPPED))); }
-                                    break;
-                                }
-                            },
-                            Err(kind) => { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_PROTOCOL_RESPONSE))); break; }
-                        }
-                    }
-                    Some(Output::Eof) | None => {
-                        read_eof = true;
-                        drain_deadline.get_or_insert(tokio::time::Instant::now() + if transfer.active() { SHUTDOWN_TIMEOUT } else { EXIT_DRAIN_TIMEOUT });
-                        shared.transition(LifecycleEvent::Closing);
-                    },
-                    Some(Output::Error(kind,message)) => {
-                        // Transport cancellation also wakes pending reads/writes
-                        // with errors. An intentional disconnect is not a failure.
-                        if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind,message)); }
-                        break;
-                    },
-                },
                 command = async {
                     if !transfer_active && let Some(command) = deferred_input.pop_front() {
                         return Some(command);
                     }
                     commands.recv().await
-                }, if transfer_active || outbox.can_accept_command() => {
+                }, if foreground_ready && (transfer_active || outbox.can_accept_command()) => {
+                    foreground_streak = foreground_streak.saturating_add(1);
                     let Some(command) = command else { break; };
                     match command {
                         ActorCommand::ZmodemStart { id, selection } => {
@@ -203,7 +189,42 @@ pub(super) async fn run(
                             break;
                         }
                     }
-                }
+                },
+                output = output_buffer.next(&mut transport.output), if !read_eof => match output {
+                    Some(Output::Data(bytes)) => {
+                        foreground_streak = 0;
+                        let started = std::time::Instant::now();
+                        let count = bytes.len();
+                        match transfer.receive(bytes).await {
+                            Ok(bytes) => {
+                                if let Some(forwarding) = shared.forwarding.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                                    forwarding.observe_output(&bytes);
+                                }
+                                if transfer.take_discard_deferred() {
+                                    discard_pending_writes(&mut transfer, &mut outbox, &mut deferred_input, &shared);
+                                }
+                                if let Err(kind) = feed_output(&bytes, &mut terminal, &shared, &mut outbox) {
+                                    if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_PROTOCOL_RESPONSE_THE_CONNECTION_HAS_STOPPED))); }
+                                    break;
+                                }
+                            },
+                            Err(kind) => { shared.transition(LifecycleEvent::failed(kind, crate::i18n::tr(i18n_key::CONNECTIONS_CANNOT_DELIVER_THE_FILE_TRANSFER_PROTOCOL_RESPONSE))); break; }
+                        }
+                        output_buffer.parsed(count, started);
+                    }
+                    Some(Output::Eof) | None => {
+                        read_eof = true;
+                        drain_deadline.get_or_insert(tokio::time::Instant::now() + if transfer.active() { SHUTDOWN_TIMEOUT } else { EXIT_DRAIN_TIMEOUT });
+                        shared.transition(LifecycleEvent::Closing);
+                    },
+                    Some(Output::Error(kind,message)) => {
+                        // Transport cancellation also wakes pending reads/writes
+                        // with errors. An intentional disconnect is not a failure.
+                        if !shared.io_stop.is_cancelled() { shared.transition(LifecycleEvent::failed(kind,message)); }
+                        break;
+                    },
+                },
+
             }
         }
         let discard_protocol = transfer.active();
@@ -273,7 +294,7 @@ pub(super) async fn run(
             _ = shared.budget_notify.notified() => apply_budget(&mut terminal, &shared),
             _ = shared.snapshot_notify.notified() => publish_snapshot(&mut terminal, &shared),
             _ = tokio::time::sleep_until(next_search_step), if !search.query.is_empty() && !search.complete && !search.paused => {
-                    let progress = terminal.search_step(128);
+                    let progress = terminal.search_step_budgeted(128, Duration::from_millis(1));
                     next_search_step = tokio::time::Instant::now() + if progress.complete { Duration::from_millis(250) } else { POLL_INTERVAL };
                     shared.changed();
                 },
@@ -453,6 +474,10 @@ fn command_effect(
             terminal.scroll(lines);
             None
         }
+        ActorCommand::User(Command::ScrollFractional(lines)) => {
+            terminal.scroll_fractional(lines);
+            None
+        }
         ActorCommand::User(Command::AlternateScroll(lines)) if connected => Some(
             WriteCommand::UserInput(terminal.encode_alternate_scroll(lines)),
         ),
@@ -483,8 +508,40 @@ fn command_effect(
             terminal.reveal_command(id);
             None
         }
+        ActorCommand::User(Command::ToggleCommandFold { id }) => {
+            terminal.toggle_command_fold(id);
+            None
+        }
+        ActorCommand::User(Command::RevealCommandBlock { id }) => {
+            terminal.reveal_command_block(id);
+            None
+        }
+        ActorCommand::User(Command::SearchScoped {
+            query,
+            case_sensitive,
+            scope,
+        }) => {
+            terminal.start_scoped_search(query, case_sensitive, scope);
+            None
+        }
+        ActorCommand::User(Command::SelectCommandBlock { id }) => {
+            terminal.select_command_block(id);
+            None
+        }
         ActorCommand::User(Command::BeginSelection { column, row, kind }) => {
             terminal.begin_selection(column, row, kind);
+            None
+        }
+        ActorCommand::User(Command::BeginSelectionAt {
+            position,
+            kind,
+            extend,
+        }) => {
+            terminal.begin_selection_at(position, kind, extend);
+            None
+        }
+        ActorCommand::User(Command::UpdateSelectionAt(position)) => {
+            terminal.update_selection_at(position);
             None
         }
         ActorCommand::User(Command::UpdateSelection { column, row }) => {
@@ -499,12 +556,29 @@ fn command_effect(
             terminal.select_all();
             None
         }
-        ActorCommand::CopySelection(reply) => {
+        ActorCommand::CopyCommandBlock { id, part, reply } => {
             if !reply.is_closed()
                 && !shared.evicted.load(Ordering::Acquire)
                 && !shared.actor_stop.is_cancelled()
             {
-                let _ = reply.send(terminal.selected_text());
+                let _ = reply.send(terminal.copy_command_block(id, part));
+            }
+            return None;
+        }
+        ActorCommand::CopySelection {
+            search_query,
+            reply,
+        } => {
+            if !reply.is_closed()
+                && !shared.evicted.load(Ordering::Acquire)
+                && !shared.actor_stop.is_cancelled()
+            {
+                let text = if search_query {
+                    terminal.selection_search_query()
+                } else {
+                    terminal.selected_text()
+                };
+                let _ = reply.send(text);
             }
             return None;
         }
@@ -545,6 +619,10 @@ fn command_effect(
         }
         ActorCommand::User(Command::SetHighlight(enabled)) => {
             terminal.set_highlight(enabled);
+            None
+        }
+        ActorCommand::User(Command::SetWordDelimiters(delimiters)) => {
+            terminal.set_word_delimiters(&delimiters);
             None
         }
         ActorCommand::User(Command::SetSelectionHighlight(enabled)) => {
@@ -684,7 +762,11 @@ mod tests {
         let mut terminal = Terminal::new(80, 24, 0);
         let shared = Shared::new(&terminal);
         let (commands, mut receiver) = mpsc::channel(4);
-        let session = Session { commands, shared };
+        let session = Session {
+            commands,
+            shared,
+            protection: Default::default(),
+        };
         let first = session.resize(81, 25).unwrap();
         // Identical dimensions must still have independent completion receipts.
         let second = session.resize(81, 25).unwrap();
@@ -881,6 +963,7 @@ mod tests {
             Command::Scroll(1),
             Command::SetHighlight(false),
             Command::SetSelectionHighlight(false),
+            Command::SetWordDelimiters("-".into()),
             Command::SetTheme(crate::config::Theme::default()),
             Command::Search {
                 query: "ready".into(),
@@ -951,7 +1034,10 @@ mod tests {
         publish_snapshot(&mut terminal, &shared);
         let (reply, mut receipt) = tokio::sync::oneshot::channel();
         command_effect(
-            ActorCommand::CopySelection(reply),
+            ActorCommand::CopySelection {
+                search_query: false,
+                reply,
+            },
             &mut terminal,
             &shared,
             false,
@@ -976,6 +1062,7 @@ mod tests {
             })
             .unwrap();
         let mut first = session.copy_selection().unwrap();
+        let mut search = session.selection_search_query().unwrap();
         session
             .send(Command::BeginSelection {
                 column: 6,
@@ -985,17 +1072,91 @@ mod tests {
             .unwrap();
         let cancelled = session.copy_selection().unwrap();
         let mut last = session.copy_selection().unwrap();
+        // Changing tabs only stops snapshots; explicit requests still complete.
+        session.set_visible(false);
         drop(cancelled);
         while let Ok(command) = commands.try_recv() {
             command_effect(command, &mut terminal, &session.shared, false);
         }
         assert_eq!(first.try_recv().unwrap().as_deref(), Some("first"));
+        assert_eq!(search.try_recv().unwrap().as_deref(), Some("first"));
         assert_eq!(last.try_recv().unwrap().as_deref(), Some("last"));
         assert!(matches!(
             commands.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
+
+    #[test]
+    fn enclosed_selection_copies_without_writing_to_the_connected_shell() {
+        let (mut session, mut terminal, mut commands) = Session::create(40, 3, 16).unwrap();
+        session.protection = super::super::SessionProtection::Production;
+        session.shared.transition(LifecycleEvent::Connected);
+        terminal.feed(b"\x1b[?1003h\x1b[?1006h[alpha beta] ()");
+        session
+            .send(Command::BeginSelection {
+                column: 3,
+                row: 0,
+                kind: SelectionKind::Enclosed,
+            })
+            .unwrap();
+        session
+            .send(Command::UpdateSelection { column: 3, row: 0 })
+            .unwrap();
+        let mut selected = session.copy_selection().unwrap();
+        session
+            .send(Command::BeginSelection {
+                column: 13,
+                row: 0,
+                kind: SelectionKind::Enclosed,
+            })
+            .unwrap();
+        let mut empty = session.copy_selection().unwrap();
+        while let Ok(command) = commands.try_recv() {
+            assert!(command_effect(command, &mut terminal, &session.shared, true).is_none());
+        }
+        assert_eq!(selected.try_recv().unwrap().as_deref(), Some("alpha beta"));
+        assert_eq!(empty.try_recv().unwrap(), None);
+    }
+
+    #[test]
+    fn pointer_selection_and_shift_extension_are_ordered_local_actions_in_a_production_session() {
+        use crate::terminal::{
+            SelectionPoint as P,
+            SelectionSide::{Left, Right},
+        };
+        let (mut session, mut terminal, mut commands) = Session::create(24, 4, 16).unwrap();
+        session.protection = super::super::SessionProtection::Production;
+        session.shared.transition(LifecycleEvent::Connected);
+        terminal.feed(b"\x1b[?1003h\x1b[?1006halpha beta");
+        session
+            .send(Command::BeginSelectionAt {
+                position: P::new(0, 0, Left),
+                kind: SelectionKind::Character,
+                extend: false,
+            })
+            .unwrap();
+        session
+            .send(Command::UpdateSelectionAt(P::new(4, 0, Left)))
+            .unwrap();
+        let mut partial = session.copy_selection().unwrap();
+        session
+            .send(Command::BeginSelectionAt {
+                position: P::new(9, 0, Right),
+                kind: SelectionKind::Character,
+                extend: true,
+            })
+            .unwrap();
+        let mut extended = session.copy_selection().unwrap();
+        session.send(Command::ClearSelection).unwrap();
+        while let Ok(command) = commands.try_recv() {
+            assert!(command_effect(command, &mut terminal, &session.shared, true).is_none());
+        }
+        assert_eq!(partial.try_recv().unwrap().as_deref(), Some("alph"));
+        assert_eq!(extended.try_recv().unwrap().as_deref(), Some("alpha beta"));
+        assert!(!terminal.snapshot().has_selection);
+    }
+
     #[test]
     fn stale_alternate_scroll_is_acknowledged_without_writing_or_following_output() {
         let mut terminal = Terminal::new(20, 3, 20);

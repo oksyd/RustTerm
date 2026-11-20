@@ -95,24 +95,21 @@ fn image(shape: &PointerShape, geometry: Geometry) -> Option<Image> {
     let mut pixels = vec![0; usize::from(width) * usize::from(height) * 4];
     shape.composite_overlay(&mut pixels).ok()?;
     Some(prepare_image(
-        pixels,
-        (u32::from(width), u32::from(height)),
+        image::RgbaImage::from_raw(u32::from(width), u32::from(height), pixels)?,
         geometry,
     ))
 }
 
-fn prepare_image(mut pixels: Vec<u8>, dimensions: (u32, u32), geometry: Geometry) -> Image {
+fn prepare_image(mut buffer: image::RgbaImage, geometry: Geometry) -> Image {
     // Resize in premultiplied space so transparent edges cannot bleed color.
     // Wayland consumes this directly; Win32 converts back when uploading.
-    for pixel in pixels.as_chunks_mut::<4>().0 {
+    for image::Rgba(pixel) in buffer.pixels_mut() {
         for channel in 0..3 {
             pixel[channel] = ((u16::from(pixel[channel]) * u16::from(pixel[3]) + 127) / 255) as u8;
         }
         #[cfg(target_endian = "big")]
         pixel.reverse();
     }
-    let buffer = image::RgbaImage::from_raw(dimensions.0, dimensions.1, pixels)
-        .expect("validated cursor image");
     let pixels = if buffer.dimensions() == (geometry.width, geometry.height) {
         buffer.into_raw()
     } else {
@@ -293,12 +290,13 @@ mod tests {
             hotspot: (0, 0),
             scale: 1,
         };
-        let converted = prepare_image(vec![200, 100, 50, 128, 255, 255, 255, 0], (2, 1), geometry);
+        let buffer =
+            image::RgbaImage::from_raw(2, 1, vec![200, 100, 50, 128, 255, 255, 255, 0]).unwrap();
+        let converted = prepare_image(buffer.clone(), geometry);
         #[cfg(target_endian = "little")]
         assert_eq!(converted.pixels, [100, 50, 25, 128, 0, 0, 0, 0]);
         let scaled = prepare_image(
-            vec![200, 100, 50, 128, 255, 255, 255, 0],
-            (2, 1),
+            buffer,
             Geometry {
                 width: 8,
                 ..geometry

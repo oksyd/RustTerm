@@ -14,6 +14,12 @@ const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_SHELL_BYTES: usize = 256 * 1024;
 
+#[derive(Clone, Copy)]
+enum ShellText {
+    Command,
+    Output,
+}
+
 #[derive(Clone, Debug)]
 pub struct ShellCommand {
     pub id: u64,
@@ -56,6 +62,8 @@ pub struct ShellSnapshot {
     /// Search hooks or recognition of the shell's standard Readline prompt.
     pub history_search_supported: bool,
     pub focused_command: Option<u64>,
+    /// An earlier failed command can be reached from this viewport.
+    pub can_navigate_to_previous_failure: bool,
     pub command_unavailable: bool,
     pub command_insert_blocked: bool,
     pub cwd: Option<String>,
@@ -204,6 +212,8 @@ impl Terminal {
         self.reconcile_rows();
         match marker.split(';').next().unwrap_or_default() {
             "A" => {
+                self.redraws.clear();
+                self.finish_command_block();
                 self.shell.prompt = None;
                 self.shell.snapshot.at_prompt = false;
                 // Prompt redraws do not override a mode reported by ZLE. A/B
@@ -216,6 +226,7 @@ impl Terminal {
                 }
             }
             "B" => {
+                self.redraws.clear();
                 self.shell.prompt = self.shell_anchor();
                 self.shell.readline_prompt = (self.shell.snapshot.shell == Some("bash"))
                     .then(|| {
@@ -244,19 +255,30 @@ impl Terminal {
                     .shell
                     .prompt
                     .and_then(|(id, _)| self.main_tracker.positions.get(&id))
-                    .and_then(|&row| self.row_stamp(row));
+                    .and_then(|row| self.row_stamp(row));
                 self.shell.active = self
                     .shell
                     .prompt
                     .take()
-                    .and_then(|start| self.shell_text(start, MAX_COMMAND_BYTES))
+                    .and_then(|start| self.shell_text(start, ShellText::Command))
                     .map(|text| text.trim_end_matches('\n').to_owned());
                 self.shell.output_start = self.shell_anchor();
+                self.begin_command_block(
+                    self.shell.command_start,
+                    self.shell.output_start,
+                    self.shell.active.clone().unwrap_or_default(),
+                );
             }
             "D" => {
+                self.redraws.clear();
                 self.shell.snapshot.at_prompt = false;
                 self.shell.snapshot.interaction = ShellInteraction::Unknown;
                 let duration = self.shell.started_at.take().map(|time| time.elapsed());
+                let exit_status = marker
+                    .split(';')
+                    .nth(1)
+                    .and_then(|status| status.parse().ok());
+                self.complete_command_block(exit_status, duration.unwrap_or_default());
                 let Some(command) = self
                     .shell
                     .active
@@ -269,7 +291,7 @@ impl Terminal {
                     .shell
                     .output_start
                     .filter(|_| self.cache_command_output)
-                    .and_then(|start| self.shell_text(start, MAX_OUTPUT_BYTES))
+                    .and_then(|start| self.shell_text(start, ShellText::Output))
                     .map(Arc::from);
                 let output_anchor = self
                     .shell
@@ -278,10 +300,7 @@ impl Terminal {
                     // Selection can still use the live grid without a text cache.
                     .filter(|_| output.is_some() || !self.cache_command_output)
                     .and_then(|start| self.command_output_anchor(start));
-                let exit_status = marker
-                    .split(';')
-                    .nth(1)
-                    .and_then(|status| status.parse().ok());
+
                 self.shell.next_id = self.shell.next_id.wrapping_add(1);
                 let record = ShellCommand {
                     id: self.shell.next_id,
@@ -308,9 +327,13 @@ impl Terminal {
         }
     }
 
-    pub(super) fn shell_snapshot(&self) -> ShellSnapshot {
+    pub(super) fn shell_snapshot(&self, viewport_top: usize) -> ShellSnapshot {
         let mut snapshot = self.shell.snapshot.clone();
         snapshot.interaction = self.shell_interaction();
+        snapshot.can_navigate_to_previous_failure = !self.is_alternate()
+            && self
+                .command_navigation_target(true, true, viewport_top)
+                .is_some();
         // Bash has no ZLE-style search hooks. Its standard Readline search
         // prompt can still be recognized while shell integration is at a prompt.
         snapshot.history_search_supported |= snapshot.shell == Some("bash");
@@ -492,41 +515,11 @@ impl Terminal {
             return;
         }
         self.reconcile_rows();
-        let focused = self.shell.snapshot.focused_command;
-        let grid = self.term.grid();
-        let top = grid.history_size() - grid.display_offset();
-        let following = grid.display_offset() == 0 && focused.is_none();
-        let candidate = self
-            .shell
-            .snapshot
-            .commands
-            .iter()
-            .filter(|command| !failed_only || command.exit_status.is_some_and(|code| code != 0))
-            .filter_map(|command| {
-                let anchor = command.anchors.command?;
-                self.stamp_valid(anchor).then_some((command.id, anchor.id))
-            })
-            .filter(|(id, row)| {
-                if let Some(focused) = focused {
-                    if previous {
-                        *id < focused
-                    } else {
-                        *id > focused
-                    }
-                } else {
-                    let position = self.main_tracker.positions[row];
-                    if previous {
-                        following || position < top
-                    } else {
-                        !following && position > top
-                    }
-                }
-            });
-        let target = if previous {
-            candidate.last()
-        } else {
-            candidate.into_iter().next()
-        };
+        let target = self.command_navigation_target(
+            previous,
+            failed_only,
+            self.viewport().physical_extent().start,
+        );
         if let Some((id, row)) = target {
             self.shell.snapshot.command_unavailable = false;
             self.shell.snapshot.focused_command = Some(id);
@@ -539,6 +532,38 @@ impl Terminal {
         } else {
             self.shell.snapshot.command_unavailable = true;
             self.version = self.version.wrapping_add(1);
+        }
+    }
+
+    fn command_navigation_target(
+        &self,
+        previous: bool,
+        failed_only: bool,
+        viewport_top: usize,
+    ) -> Option<(u64, u64)> {
+        let focused = self.shell.snapshot.focused_command;
+        let following = self.term.grid().display_offset() == 0 && focused.is_none();
+        let mut candidates = self
+            .shell
+            .snapshot
+            .commands
+            .iter()
+            .filter(|command| !failed_only || command.exit_status.is_some_and(|code| code != 0))
+            .filter_map(|command| {
+                let anchor = command.anchors.command?;
+                let position = self.main_tracker.positions.get(&anchor.id)?;
+                let in_direction = match (focused, previous) {
+                    (Some(id), true) => command.id < id,
+                    (Some(id), false) => command.id > id,
+                    (None, true) => following || position < viewport_top,
+                    (None, false) => !following && position > viewport_top,
+                };
+                (in_direction && self.stamp_valid(anchor)).then_some((command.id, anchor.id))
+            });
+        if previous {
+            candidates.next_back()
+        } else {
+            candidates.next()
         }
     }
 
@@ -586,7 +611,7 @@ impl Terminal {
         let Some(anchor) = anchor.filter(|anchor| {
             let mut previous = None;
             anchor.stamps.iter().all(|&stamp| {
-                let Some(&index) = self.main_tracker.positions.get(&stamp.id) else {
+                let Some(index) = self.main_tracker.positions.get(&stamp.id) else {
                     return false;
                 };
                 let valid =
@@ -607,7 +632,8 @@ impl Terminal {
         };
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
         selection.update(end, Side::Right);
-        self.selection_origin = Some(anchor.start.0);
+        self.expand_at(start.line);
+        self.selection_origin = Some(reading::SelectionOrigin::from(&anchor));
         self.viewport_anchor = Some(anchor.start.0);
         self.restore_viewport();
         self.selection_anchor = Some(anchor);
@@ -637,8 +663,12 @@ impl Terminal {
         Some((self.main_tracker.id_at(row)?, grid.cursor.point.column.0))
     }
 
-    fn shell_text(&self, (id, column): (u64, usize), limit: usize) -> Option<String> {
-        let start = *self.main_tracker.positions.get(&id)?;
+    fn shell_text(&self, (id, column): (u64, usize), kind: ShellText) -> Option<String> {
+        let limit = match kind {
+            ShellText::Command => MAX_COMMAND_BYTES,
+            ShellText::Output => MAX_OUTPUT_BYTES,
+        };
+        let start = self.main_tracker.positions.get(&id)?;
         let grid = self.term.grid();
         let end = (grid.cursor.point.line.0 + grid.history_size() as i32) as usize;
         if start > end || end - start > MAX_OUTPUT_BYTES {
@@ -656,15 +686,15 @@ impl Terminal {
             if first > last {
                 return None;
             }
-            let current = self.row_text(line, first..last, true);
+            let current = self.row_text(line, first..last.min(self.content_columns(line)), true);
             let wrapped = grid[Point::new(line, Column(self.size.columns as usize - 1))]
                 .flags
                 .contains(Flags::WRAPLINE);
-            text.push_str(if wrapped {
-                &current
+            if matches!(kind, ShellText::Command) && !wrapped {
+                text.push_str(current.trim_end_matches(' '));
             } else {
-                current.trim_end_matches(' ')
-            });
+                text.push_str(&current);
+            }
             if row != end && !wrapped {
                 text.push('\n');
             }
@@ -866,6 +896,51 @@ mod tests {
     }
 
     #[test]
+    fn previous_failure_availability_follows_focus_viewport_and_retained_rows() {
+        let mut terminal = Terminal::new(32, 3, 8);
+        let available =
+            |terminal: &Terminal| terminal.snapshot().shell.can_navigate_to_previous_failure;
+        for (name, status, expected) in [("ok", 0, false), ("bad", 2, true), ("ok", 0, true)] {
+            terminal.feed(
+                format!("\x1b]133;B\x07{name}\r\n\x1b]133;C\x07result\r\n\x1b]133;D;{status}\x07")
+                    .as_bytes(),
+            );
+            assert_eq!(available(&terminal), expected);
+        }
+        terminal.navigate_command(true, true);
+        assert_eq!(terminal.snapshot().shell.focused_command, Some(2));
+        assert!(!available(&terminal));
+        terminal.scroll_to_bottom();
+        assert!(available(&terminal));
+        terminal.scroll(100);
+        assert!(!available(&terminal));
+        terminal.scroll_to_bottom();
+        terminal.feed(b"\x1b[?1049h");
+        assert!(!available(&terminal));
+        terminal.feed(b"\x1b[?1049l");
+        assert!(available(&terminal));
+        for _ in 0..16 {
+            terminal.feed(b"more output\r\n");
+        }
+        assert!(!available(&terminal));
+        assert!(
+            terminal
+                .command_history()
+                .iter()
+                .any(|command| command.exit_status == Some(2))
+        );
+    }
+
+    #[test]
+    fn overwritten_failure_is_not_a_navigation_target() {
+        let mut terminal = Terminal::new(24, 5, 20);
+        terminal.feed(b"\x1b]133;B\x07fail\r\n\x1b]133;C\x07\x1b]133;D;1\x07");
+        assert!(terminal.snapshot().shell.can_navigate_to_previous_failure);
+        terminal.feed(b"\x1b[1;1Hpass");
+        assert!(!terminal.snapshot().shell.can_navigate_to_previous_failure);
+    }
+
+    #[test]
     fn command_navigation_and_selection_use_retained_content() {
         let mut terminal = Terminal::new(24, 3, 100);
         for (name, status) in [("first", 0), ("failed", 2), ("last", 0)] {
@@ -878,6 +953,9 @@ mod tests {
         terminal.select_command_output(None);
         assert_eq!(terminal.selected_text().as_deref(), Some("failed output\n"));
         terminal.begin_selection(0, 0, SelectionKind::Character);
+        assert_eq!(terminal.selected_text(), None);
+        terminal.update_selection(1, 0);
+        terminal.update_selection(0, 0);
         assert_eq!(terminal.selected_text().as_deref(), Some("f"));
         terminal.navigate_command(false, false);
         assert_eq!(terminal.snapshot().shell.focused_command, Some(3));

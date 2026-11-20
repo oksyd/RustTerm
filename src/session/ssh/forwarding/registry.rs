@@ -41,6 +41,7 @@ impl ForwardRegistry {
             let mut entries = self.0.entries.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = entries.get(&id)
                 && entry.identity == identity
+                && entry.controller.protection == options.production_protection.into()
                 && !entry.task.is_finished()
             {
                 // New terminal authentication can refresh credentials without

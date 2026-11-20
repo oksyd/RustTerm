@@ -21,6 +21,7 @@ pub struct SshConfig {
     pub keepalive_secs: u64,
     pub keepalive_max: usize,
     pub shell_integration: bool,
+    pub production_protection: bool,
     pub jump_hosts: Vec<SshJumpHost>,
     pub forwards: Vec<PortForward>,
     pub auto_forward: AutoForwardConfig,
@@ -37,6 +38,7 @@ impl Default for SshConfig {
             keepalive_secs: 30,
             keepalive_max: 3,
             shell_integration: true,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
             auto_forward: AutoForwardConfig::default(),
@@ -506,6 +508,7 @@ mod tests {
             keepalive_secs: 60,
             keepalive_max: 4,
             shell_integration: false,
+            production_protection: false,
             ..left.clone()
         };
         assert!(left.same_auth_identity(&right));
@@ -543,9 +546,24 @@ mod tests {
         assert!(previous.shell_integration);
         let disabled = SshConfig {
             shell_integration: false,
+            production_protection: false,
             ..previous
         };
         let restored: SshConfig = toml::from_str(&toml::to_string(&disabled).unwrap()).unwrap();
         assert_eq!(restored, disabled);
+    }
+
+    #[test]
+    fn production_protection_preserves_saved_enhancements_and_legacy_defaults() {
+        let legacy: SshConfig = toml::from_str("host = 'example.test'").unwrap();
+        assert!(!legacy.production_protection);
+        let mut config = legacy;
+        config.production_protection = true;
+        config.auto_forward.enabled = true;
+        let restored: SshConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored, config);
+        config.production_protection = false;
+        assert!(config.shell_integration);
+        assert!(config.auto_forward.enabled);
     }
 }

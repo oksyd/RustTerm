@@ -108,7 +108,7 @@ impl Connection {
     pub(super) async fn synchronize(&mut self) -> Result<()> {
         self.connection
             .as_mut()
-            .expect("open connection")
+            .ok_or(DatabaseError::Disconnected)?
             .ping()
             .await
             .map_err(classify)
@@ -124,7 +124,7 @@ impl Connection {
         let mut query = self
             .connection
             .as_mut()
-            .expect("open connection")
+            .ok_or(DatabaseError::Disconnected)?
             .query_iter(sql)
             .await
             .map_err(classify)?;
@@ -173,22 +173,25 @@ async fn disconnect(connection: Conn) {
 fn display_value(column: &mysql_async::Column, value: &Value) -> Result<Option<String>> {
     match value {
         Value::NULL => Ok(None),
-        Value::Bytes(bytes) => Ok(Some(if binary_column(column) {
-            format!("0x{}", super::hex(bytes))
-        } else {
-            super::display_bytes(bytes)
-        })),
+        Value::Bytes(bytes) => Ok(Some(
+            if matches!(
+                column.column_type(),
+                ColumnType::MYSQL_TYPE_BIT | ColumnType::MYSQL_TYPE_GEOMETRY
+            ) {
+                format!("0x{}", super::hex(bytes))
+            } else if binary_column(column) {
+                super::display_blob(bytes)
+            } else {
+                super::display_bytes(bytes)
+            },
+        )),
         _ => Err(DatabaseError::Protocol),
     }
 }
 
 fn binary_column(column: &mysql_async::Column) -> bool {
-    matches!(
-        column.column_type(),
-        ColumnType::MYSQL_TYPE_BIT | ColumnType::MYSQL_TYPE_GEOMETRY
-    ) || (column
-        .flags()
-        .contains(mysql_async::consts::ColumnFlags::BINARY_FLAG)
+    // The binary character set distinguishes BLOB from TEXT with a binary collation.
+    column.character_set() == 63
         && matches!(
             column.column_type(),
             ColumnType::MYSQL_TYPE_STRING
@@ -198,7 +201,7 @@ fn binary_column(column: &mysql_async::Column) -> bool {
                 | ColumnType::MYSQL_TYPE_BLOB
                 | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
                 | ColumnType::MYSQL_TYPE_LONG_BLOB
-        ))
+        )
 }
 
 fn classify(error: mysql_async::Error) -> DatabaseError {
@@ -215,5 +218,33 @@ fn classify(error: mysql_async::Error) -> DatabaseError {
         Error::Io(_) | Error::Driver(DriverError::ConnectionClosed) => DatabaseError::Disconnected,
         Error::Url(_) => DatabaseError::InvalidConfig,
         _ => DatabaseError::Protocol,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mysql_async::{Column, consts::ColumnFlags};
+
+    #[test]
+    fn empty_binary_strings_and_typed_binary_values_keep_their_identity() {
+        use ColumnType::*;
+        for (kind, charset, bytes, expected) in [
+            (MYSQL_TYPE_BLOB, 63, b"".as_slice(), "0x"),
+            (MYSQL_TYPE_BLOB, 46, b"", ""),
+            (MYSQL_TYPE_BLOB, 46, b"0x41", "0x41"),
+            (MYSQL_TYPE_BIT, 63, b"A", "0x41"),
+            (MYSQL_TYPE_GEOMETRY, 63, b"A", "0x41"),
+        ] {
+            let column = Column::new(kind)
+                .with_character_set(charset)
+                .with_flags(ColumnFlags::BINARY_FLAG);
+            assert_eq!(
+                display_value(&column, &Value::Bytes(bytes.to_vec()))
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
     }
 }

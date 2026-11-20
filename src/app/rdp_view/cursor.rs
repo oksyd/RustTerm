@@ -190,9 +190,13 @@ impl CursorOverlay {
                 height,
                 pixels,
             };
-            let image = Arc::new(RenderImage::new(vec![image::Frame::new(
-                super::render::tile_buffer(&tile),
-            )]));
+            let Ok(buffer) = super::render::tile_buffer(&tile) else {
+                return PaintStats {
+                    errors: 1,
+                    ..PaintStats::default()
+                };
+            };
+            let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
             super::render::retire_images(window, self.image.replace(image).into_iter().collect());
             self.prepared = Some(key);
             self.uploaded = false;

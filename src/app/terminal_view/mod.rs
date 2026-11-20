@@ -4,11 +4,15 @@
 mod activity;
 mod chrome;
 mod clipboard;
+mod colors;
 mod completion;
 mod context_menu;
+mod folding;
 mod input;
 mod lifecycle;
+mod links;
 mod paint;
+mod paste_preview;
 mod render;
 mod shell;
 mod snapshot;
@@ -43,6 +47,7 @@ enum TerminalKind {
 pub struct TerminalView {
     runs: Vec<Session>,
     viewed_run: usize,
+    awaiting_reconnect: bool,
     generation: usize,
     settings: Settings,
     unread: bool,
@@ -50,6 +55,7 @@ pub struct TerminalView {
     observed_view_revision: u64,
     observed_insert_ready: bool,
     observed_directory: Option<(rustterm::config::Uuid, String)>,
+    sftp_follow_override: Option<bool>,
     trust_prompt: bool,
     zmodem_prompt: Option<(rustterm::config::Uuid, u64)>,
     zmodem: Option<ZmodemStatus>,
@@ -57,23 +63,30 @@ pub struct TerminalView {
     selection_drag: Option<input::SelectionDrag>,
     selection_pointer: Option<Point<Pixels>>,
     search_input: Entity<TextInput>,
+    search_seed_task: Option<Task<()>>,
     search_open: bool,
     search_case: bool,
+    search_scope: rustterm::terminal::SearchScope,
     show_final_alternate: bool,
     _search_subscription: Subscription,
     snapshot: Option<Arc<Snapshot>>,
     snapshot_task: Option<Task<()>>,
+    gutter_cache: paint::GutterCache<gpui::ShapedLine>,
+    row_cache: paint::cache::RowCache<paint::cache::PaintedRow>,
     command_task: Option<Task<()>>,
     focus: FocusHandle,
     menu_focus: FocusHandle,
     menu_open: bool,
     context_menu_position: Option<Point<Pixels>>,
-    menu_index: usize,
+    context_block: Option<(rustterm::config::Uuid, u64)>,
+    selected_pane_action: chrome::PaneMenuAction,
+    context_menu_index: usize,
     menu_scroll: ScrollHandle,
     _menu_blur: Subscription,
     index: usize,
     shell: String,
     display_name: String,
+    configured_production: bool,
     target: Option<String>,
     local_shell: Option<String>,
     kind: TerminalKind,
@@ -101,12 +114,15 @@ pub struct TerminalView {
     surface_visible: bool,
     preedit: String,
     preedit_selection: Range<usize>,
-    paste_pending: bool,
+    hovered_link: Option<rustterm::terminal::TerminalLink>,
+    link_press: Option<links::LinkPress>,
+    paste_preview: Option<paste_preview::PastePreview>,
     copy_task: Option<Task<()>>,
     primary_copy_task: Option<Task<()>>,
     mouse_button: Option<u8>,
     last_mouse: (u16, u16),
     wheel: input::WheelState,
+    frame_motion: input::FrameMotion,
     poll_wake: Arc<tokio::sync::Notify>,
     _poll: Task<()>,
     _focus: Subscription,
@@ -115,6 +131,25 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    pub fn production_protected(&self) -> bool {
+        self.runs
+            .last()
+            .is_some_and(|run| run.protection().is_production())
+    }
+
+    pub fn protection_pending(&self) -> bool {
+        self.kind == TerminalKind::Ssh
+            && !self.runs.is_empty()
+            && self.production_protected() != self.configured_production
+    }
+
+    pub fn set_configured_production(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.configured_production != enabled {
+            self.configured_production = enabled;
+            cx.notify();
+        }
+    }
+
     pub fn is_container(&self) -> bool {
         self.kind == TerminalKind::Container
     }
@@ -180,6 +215,7 @@ impl TerminalView {
         self.display_name = profile.name.clone();
         match &profile.connection {
             Connection::Ssh(ssh) => {
+                self.configured_production = ssh.production_protection;
                 self.kind = TerminalKind::Ssh;
                 let host = if ssh.host.contains(':') && !ssh.host.starts_with('[') {
                     format!("[{}]", ssh.host)

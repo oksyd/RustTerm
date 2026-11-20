@@ -47,6 +47,57 @@ impl SettingsForm {
             }));
         column()
             .child(setting_row(i18n_key::COMMON_LANGUAGE, None, language))
+            .child(setting_row(
+                i18n_key::SETTINGS_TAB_SWITCH_ORDER,
+                Some(i18n_key::SETTINGS_TAB_SWITCH_HELP),
+                div().flex().flex_wrap().gap_1().children(
+                    [
+                        (TabSwitchOrder::TabBar, i18n_key::SETTINGS_TAB_SWITCH_BAR),
+                        (
+                            TabSwitchOrder::RecentlyUsed,
+                            i18n_key::SETTINGS_TAB_SWITCH_RECENT,
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(order, label)| {
+                        ui::choice_button(label, label, self.values.tab_switch_order == order, true)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.values.tab_switch_order = order;
+                                cx.notify();
+                            }))
+                    }),
+                ),
+            ))
+            .child(setting_row(
+                i18n_key::SETTINGS_QUICK_OPEN_ORDER,
+                Some(i18n_key::SETTINGS_QUICK_OPEN_ORDER_HELP),
+                div().flex().flex_wrap().gap_1().children(
+                    [
+                        (
+                            QuickOpenOrder::RecentlyUsed,
+                            i18n_key::SETTINGS_TAB_SWITCH_RECENT,
+                        ),
+                        (
+                            QuickOpenOrder::ConnectionList,
+                            i18n_key::SETTINGS_CONNECTION_LIST,
+                        ),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (order, label))| {
+                        ui::choice_button(
+                            ("quick-open-order", index),
+                            label,
+                            self.values.quick_open_order == order,
+                            true,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.values.quick_open_order = order;
+                            cx.notify();
+                        }))
+                    }),
+                ),
+            ))
             .child(section_heading(
                 i18n_key::CONNECTIONS_STARTUP_AND_CONNECTIONS,
             ))
@@ -320,6 +371,20 @@ impl SettingsForm {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.values.highlight_selection_matches =
                         !this.values.highlight_selection_matches;
+                    cx.notify();
+                })),
+            )
+            .child(self.word_selection_settings(cx))
+            .child(section_heading(i18n_key::WORKSPACE_SFTP_FILE_MANAGER))
+            .child(
+                toggle(
+                    "sftp-default-follow",
+                    i18n_key::SETTINGS_SFTP_FOLLOW_DIRECTORY,
+                    Some(i18n_key::SETTINGS_SFTP_FOLLOW_DIRECTORY_HELP),
+                    self.values.sftp_follow_directory,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.values.sftp_follow_directory = !this.values.sftp_follow_directory;
                     cx.notify();
                 })),
             )

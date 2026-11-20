@@ -132,7 +132,7 @@ impl Workspace {
     }
 
     pub(super) fn active_ports(&self) -> Option<Entity<TunnelPanel>> {
-        (self.left_tool == Some(SessionTool::Ports))
+        (self.dock_tool == Some(SessionTool::Ports))
             .then(|| self.ports.panel.clone())
             .flatten()
     }
@@ -171,7 +171,7 @@ impl Workspace {
     }
 
     fn sync_port_panel(&mut self, cx: &mut Context<Self>) {
-        if self.left_tool != Some(SessionTool::Ports) && self.ports.panel.is_none() {
+        if self.dock_tool != Some(SessionTool::Ports) && self.ports.panel.is_none() {
             return;
         }
         let mut connections: Vec<_> = self

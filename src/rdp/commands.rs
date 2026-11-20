@@ -8,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 struct State {
     queue: VecDeque<QueuedCommand>,
+    // Playback reads the latest atomic value. Only one device wakeup is needed.
+    playback_wakeup: Option<bool>,
     payload_bytes: usize,
     senders: usize,
     receiver_alive: bool,
@@ -41,6 +43,7 @@ pub(super) fn channel(capacity: usize, byte_limit: usize) -> (Sender, Receiver) 
     let shared = Arc::new(Shared {
         state: Mutex::new(State {
             queue: VecDeque::with_capacity(capacity + 1),
+            playback_wakeup: None,
             payload_bytes: 0,
             senders: 1,
             receiver_alive: true,
@@ -80,6 +83,12 @@ impl Sender {
                 paste.cancel();
             }
             return Err(SendError::Closed);
+        }
+        if let RdpCommand::SetAudioMuted(muted) = command.command {
+            state.playback_wakeup = Some(muted);
+            drop(state);
+            self.shared.ready.notify_one();
+            return Ok(());
         }
         let release = matches!(command.command, RdpCommand::ReleaseAll);
         if state.recovering {
@@ -177,6 +186,9 @@ impl Receiver {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if let Some(muted) = state.playback_wakeup.take() {
+            return Ok(QueuedCommand::new(RdpCommand::SetAudioMuted(muted), None));
+        }
         if let Some(command) = state.queue.pop_front() {
             state.payload_bytes -= payload_bytes(&command.command);
             if state.queue.is_empty() {
@@ -197,12 +209,12 @@ impl Receiver {
 
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
-        self.shared
+        let state = self
+            .shared
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .queue
-            .len()
+            .unwrap_or_else(|error| error.into_inner());
+        state.queue.len() + usize::from(state.playback_wakeup.is_some())
     }
 
     #[cfg(test)]

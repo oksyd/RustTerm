@@ -370,7 +370,7 @@ async fn mysql_streams_empty_and_multiple_results_and_stops_at_limit() {
         assert_eq!(result.results[2].affected_rows, 5);
         assert!(client.is_connected());
         let binary = client.execute("binary".into(), 1).await.unwrap();
-        assert_eq!(binary.results[0].rows[0], [Some("0x41".into()), None]);
+        assert_eq!(binary.results[0].rows[0], [Some("A".into()), None]);
         let result = client.execute("truncate".into(), 1).await.unwrap();
         assert!(result.results[0].truncated);
         assert!(client.is_connected());

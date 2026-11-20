@@ -176,7 +176,9 @@ impl Workspace {
                 if connections::needs_password(&tunnel) && secret.expose().is_empty() {
                     return Err(i18n_key::CONNECTIONS_SAVE_A_PASSWORD_IN_THE_SSH_TUNNEL_PROFILE_BEFORE_TESTING.into());
                 }
-                let Connection::Ssh(config) = &tunnel.connection else { unreachable!("validated SSH route") };
+                let Connection::Ssh(config) = &tunnel.connection else {
+                    return Err(i18n_key::CONNECTIONS_INVALID_SSH_ROUTE.into());
+                };
                 Some(connections::ssh_options(config, &secret, known_hosts))
             } else { None };
             if let Some(options) = &mut ssh {

@@ -38,7 +38,7 @@ impl DisplayControl {
         self.desktop_scale = monitors
             .iter()
             .find(|monitor| monitor.primary)
-            .expect("validated monitor layout has a primary")
+            .ok_or(Error::Invalid("monitor layout has no primary"))?
             .scale;
         self.pending_layout = Some(monitors);
         self.send_layout()

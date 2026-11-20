@@ -160,7 +160,12 @@ impl Connection {
         CancelHandle::ClickHouse(self.clone(), marker)
     }
     pub(super) async fn cancel(&self, marker: &str) -> Result<bool> {
-        let Some(done) = self.active.lock().unwrap().clone() else {
+        let Some(done) = self
+            .active
+            .lock()
+            .map_err(|_| DatabaseError::Runtime)?
+            .clone()
+        else {
             return Ok(false);
         };
         // A cancel can arrive while the HTTP request is still being submitted.
@@ -202,7 +207,7 @@ impl Connection {
     ) -> Result<ResultSet> {
         let completion = if matches!(mode, RequestMode::Query) {
             let done = CancellationToken::new();
-            *self.active.lock().unwrap() = Some(done.clone());
+            *self.active.lock().map_err(|_| DatabaseError::Runtime)? = Some(done.clone());
             Some(done.drop_guard())
         } else {
             None

@@ -81,24 +81,30 @@ impl TableSchema {
         original: Option<&CellValue>,
         text: &str,
     ) -> Result<CellValue> {
-        let column = self
-            .columns
-            .get(column)
+        let kind = self
+            .cell_kind(column, original)
             .ok_or(DatabaseError::InvalidTableEdit)?;
-        let kind = if self.engine == SqlEngine::Sqlite {
-            match original {
-                Some(CellValue::Text(_)) => ValueKind::Text,
-                Some(CellValue::Integer(_)) => ValueKind::Integer,
-                Some(CellValue::Real(_)) => ValueKind::Float,
-                Some(CellValue::Boolean(_)) => ValueKind::Boolean,
-                Some(CellValue::Binary(_)) => ValueKind::Binary,
-                Some(CellValue::InvalidText(_)) => return Err(DatabaseError::InvalidTableEdit),
-                _ => column.kind,
-            }
-        } else {
-            column.kind
-        };
         CellValue::parse_kind(kind, text)
+    }
+
+    pub fn cell_kind(&self, column: usize, original: Option<&CellValue>) -> Option<ValueKind> {
+        let declared = self.columns.get(column)?.kind;
+        Some(match (self.engine, original) {
+            (SqlEngine::Sqlite, Some(CellValue::Text(_))) => ValueKind::Text,
+            (SqlEngine::Sqlite, Some(CellValue::Integer(_))) => ValueKind::Integer,
+            (SqlEngine::Sqlite, Some(CellValue::Real(_))) => ValueKind::Float,
+            (SqlEngine::Sqlite, Some(CellValue::Boolean(_))) => ValueKind::Boolean,
+            (SqlEngine::Sqlite, Some(CellValue::Binary(_))) => ValueKind::Binary,
+            (SqlEngine::Sqlite, Some(CellValue::InvalidText(_))) => return None,
+            _ => declared,
+        })
+    }
+
+    pub fn display_cell(&self, value: &CellValue) -> Option<String> {
+        match value {
+            CellValue::Binary(bytes) => Some(super::display_blob(bytes)),
+            _ => value.display(),
+        }
     }
 }
 
@@ -146,6 +152,7 @@ impl CellValue {
         Ok(value)
     }
 
+    /// Lossless input representation for the cell editor, including hex for binary data.
     pub fn display(&self) -> Option<String> {
         match self {
             Self::Null => None,
@@ -286,7 +293,7 @@ impl DatabaseClient {
         let mut output = self
             .request(super::Command::Sql {
                 sql,
-                row_limit: request.limit + 1,
+                rows: super::QueryRows::Table(request.limit + 1),
             })
             .await?;
         super::ensure_complete(&output)?;

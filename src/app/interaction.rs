@@ -43,6 +43,11 @@ impl PromptGate {
         self.0.load(Ordering::Acquire) & WINDOW_LOCKED != 0
     }
 
+    /// Changes when the window locks, including a lock/unlock between callbacks.
+    pub fn lock_epoch(&self) -> u64 {
+        self.0.load(Ordering::Acquire) & !PROMPT_BUSY
+    }
+
     fn set_locked(&self, locked: bool) {
         if locked {
             let _ = self
@@ -86,7 +91,9 @@ mod tests {
     #[test]
     fn locking_invalidates_pending_prompts_even_after_unlocking() {
         let gate = PromptGate::default();
+        let epoch = gate.lock_epoch();
         let permit = gate.acquire().unwrap();
+        assert_eq!(gate.lock_epoch(), epoch);
         assert!(permit.is_valid());
         gate.set_locked(true);
         assert!(gate.is_blocked());
@@ -94,6 +101,7 @@ mod tests {
         assert!(!permit.is_valid());
         assert!(gate.acquire().is_none());
         gate.set_locked(false);
+        assert_ne!(gate.lock_epoch(), epoch);
         assert!(!gate.is_blocked());
         assert!(!permit.is_valid());
         assert!(gate.acquire().is_none());

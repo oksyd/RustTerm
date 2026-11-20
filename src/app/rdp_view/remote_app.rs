@@ -265,7 +265,7 @@ impl RdpView {
             .and_then(|frames| frames.borrow().clone());
         if let Some(frame) = frame {
             for handle in self.applications.native.values() {
-                let _ = handle.update(cx, |view, window, cx| {
+                let result = handle.update(cx, |view, window, cx| {
                     view.desktop_size = (frame.width, frame.height);
                     view.hide_local_pointer = frame.hide_local_pointer;
                     if !view.window_state.is_locked()
@@ -274,10 +274,24 @@ impl RdpView {
                             frame.remote_windows.iter().find(|w| w.id == view.remote.id)
                     {
                         view.surface.update(remote, &frame);
-                        view.refresh_images(window);
+                        view.refresh_images(window)?;
                     }
                     cx.notify();
+                    Ok::<_, rustterm::rdp::RdpError>(())
                 });
+                if let Ok(Err(error)) = result {
+                    self.window_state.record_with_context(
+                        error.diagnostic_code(),
+                        error.diagnostic_context(),
+                        self.index,
+                    );
+                    self.disconnect();
+                    self.state = State::Failed;
+                    self.error = Some(Message::from_error(error));
+                    self.close_application_windows(cx);
+                    cx.notify();
+                    return;
+                }
             }
         }
     }

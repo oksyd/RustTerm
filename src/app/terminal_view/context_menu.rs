@@ -12,27 +12,37 @@ enum Action {
     Copy,
     Paste,
     SelectAll,
+    SelectBlock,
+    CopyCommand,
+    CopyOutput,
     Find,
     Bottom,
 }
 
-const ACTIONS: [(Action, &str, &str); 5] = [
+const ACTIONS: [(Action, &str, &str); 8] = [
     (
         Action::Copy,
         i18n_key::WORKSPACE_COPY_SELECTION,
         "Ctrl+Shift+C",
     ),
     (Action::Paste, i18n_key::COMMON_PASTE, "Ctrl+Shift+V"),
+    (Action::CopyCommand, i18n_key::TERMINAL_COPY_COMMAND, ""),
+    (
+        Action::CopyOutput,
+        i18n_key::TERMINAL_COPY_COMMAND_OUTPUT,
+        "",
+    ),
+    (
+        Action::SelectBlock,
+        i18n_key::TERMINAL_SELECT_COMMAND_BLOCK,
+        "",
+    ),
     (
         Action::SelectAll,
         i18n_key::COMMON_SELECT_ALL,
         "Ctrl+Shift+A",
     ),
-    (
-        Action::Find,
-        i18n_key::WORKSPACE_SEARCH_TERMINAL_OUTPUT,
-        "Ctrl+Shift+F",
-    ),
+    (Action::Find, i18n_key::WORKSPACE_SEARCH_TERMINAL_OUTPUT, ""),
     (
         Action::Bottom,
         i18n_key::TERMINAL_SCROLL_TO_BOTTOM,
@@ -56,11 +66,42 @@ impl TerminalView {
         }
         self.menu_open = true;
         self.context_menu_position = Some(position);
-        self.menu_index = self.context_menu_enabled_index(0, false);
+        self.context_block = self.history_run().zip(self.block_at_position(position));
+        self.context_menu_index = self.context_menu_enabled_index(0, false);
         self.menu_scroll.scroll_to_item(0);
         cx.emit(PaneEvent::Focused(self.index));
         self.menu_focus.focus(window);
         cx.notify();
+    }
+
+    pub(super) fn open_keyboard_context_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| super::folding::keyboard_block(snapshot));
+        if let Some(bounds) = self.cursor_bounds().or(self.bounds) {
+            self.open_context_menu(bounds.origin, window, cx);
+            if self.context_menu_position.is_some() {
+                self.context_block = self.history_run().zip(target);
+                self.context_menu_index = self.context_menu_enabled_index(0, false);
+            }
+        }
+    }
+
+    fn selected_menu_block(&self) -> Option<&rustterm::terminal::CommandBlock> {
+        let (run, id) = self.context_block?;
+        if Some(run) != self.history_run() || self.show_final_alternate {
+            return None;
+        }
+        self.snapshot
+            .as_ref()?
+            .command_blocks
+            .iter()
+            .find(|block| block.marker.id == id)
     }
 
     fn context_action_enabled(&self, action: Action) -> bool {
@@ -70,7 +111,13 @@ impl TerminalView {
                     && self.snapshot.as_ref().is_some_and(|s| s.has_selection)
             }
             Action::Paste => self.can_send_input(),
-            Action::SelectAll => !self.show_final_alternate && self.snapshot.is_some(),
+            Action::SelectAll => {
+                !self.show_final_alternate && self.snapshot.as_ref().is_some_and(|s| s.has_content)
+            }
+            Action::SelectBlock | Action::CopyCommand => self.selected_menu_block().is_some(),
+            Action::CopyOutput => self
+                .selected_menu_block()
+                .is_some_and(|block| block.marker.output_rows > 0),
             Action::Find => self.snapshot.is_some(),
             Action::Bottom => {
                 !self.show_final_alternate
@@ -99,11 +146,30 @@ impl TerminalView {
         {
             return;
         }
+        let block = self.selected_menu_block().map(|block| block.marker.id);
         self.close_menu(window, cx);
         match action {
             Action::Copy => self.copy_selection(cx),
             Action::Paste => self.paste(window, cx),
             Action::SelectAll => self.send(Command::SelectAll, cx),
+            Action::CopyCommand | Action::CopyOutput => {
+                if let Some(id) = block {
+                    self.copy_block(
+                        id,
+                        if matches!(action, Action::CopyCommand) {
+                            rustterm::terminal::BlockCopy::Command
+                        } else {
+                            rustterm::terminal::BlockCopy::Output
+                        },
+                        cx,
+                    );
+                }
+            }
+            Action::SelectBlock => {
+                if let Some(id) = block {
+                    self.select_block(id, cx);
+                }
+            }
             Action::Find => self.open_search(window, cx),
             Action::Bottom => self.send(Command::ScrollToBottom, cx),
         }
@@ -115,7 +181,7 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.menu_index = self.menu_index.min(ACTIONS.len() - 1);
+        self.context_menu_index = self.context_menu_index.min(ACTIONS.len() - 1);
         let key = event.keystroke.key.as_str();
         match key {
             "escape" => self.close_menu(window, cx),
@@ -124,16 +190,17 @@ impl TerminalView {
                     .iter()
                     .map(|(action, _, _)| self.context_action_enabled(*action))
                     .collect();
-                if let Some(index) = ui::popup::next_index(event, self.menu_index, &enabled) {
-                    self.menu_index = index;
+                if let Some(index) = ui::popup::next_index(event, self.context_menu_index, &enabled)
+                {
+                    self.context_menu_index = index;
                 }
             }
             "enter" | "return" | "space" => {
-                self.context_menu_action(ACTIONS[self.menu_index].0, window, cx)
+                self.context_menu_action(ACTIONS[self.context_menu_index].0, window, cx)
             }
             _ => {}
         }
-        self.menu_scroll.scroll_to_item(self.menu_index);
+        self.menu_scroll.scroll_to_item(self.context_menu_index);
         cx.stop_propagation();
         window.prevent_default();
         cx.notify();
@@ -163,17 +230,31 @@ impl TerminalView {
             .track_focus(&self.menu_focus)
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
         for (index, (action, label, shortcut)) in ACTIONS.into_iter().enumerate() {
+            let shortcut = if matches!(action, Action::Find) {
+                self.settings
+                    .shortcuts
+                    .label(rustterm::config::ShortcutAction::Search)
+            } else {
+                shortcut
+            };
+            if matches!(
+                action,
+                Action::SelectBlock | Action::CopyCommand | Action::CopyOutput
+            ) && self.context_block.is_none()
+            {
+                continue;
+            }
             let enabled = self.context_action_enabled(action);
             popup = popup.child(
                 ui::popup::row(
                     ("terminal-context-action", index),
                     enabled,
-                    index == self.menu_index,
+                    index == self.context_menu_index,
                 )
                 .when(enabled, |d| {
                     d.on_mouse_move(cx.listener(move |this, _, _, cx| {
-                        if this.menu_index != index {
-                            this.menu_index = index;
+                        if this.context_menu_index != index {
+                            this.context_menu_index = index;
                             cx.notify();
                         }
                     }))
@@ -185,7 +266,7 @@ impl TerminalView {
                             .flex_shrink_0()
                             .text_size(px(9.))
                             .text_color(rgb(ui::colors().muted))
-                            .child(shortcut),
+                            .child(shortcut.to_owned()),
                     )
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {

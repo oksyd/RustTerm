@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 impl Workspace {
     pub(super) fn save(&mut self, cx: &mut Context<Self>) {
+        self.palette.invalidate_connections();
         if self.saving {
             self.save_again = true;
             return;

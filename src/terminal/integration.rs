@@ -125,7 +125,7 @@ pub fn prepare(
                 format!("source {}", quote_fish(&format!("{path}/init.fish"))),
             ]
         }
-        _ => unreachable!(),
+        _ => return Ok(None),
     };
     Ok(Some(ShellIntegration {
         directory,
@@ -171,6 +171,114 @@ mod test_process;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn interactive_bash(integrated: bool, startup: &str, input: &[u8]) -> std::process::Output {
+        let home = tempfile::tempdir().unwrap();
+        let rc = home.path().join(".bashrc");
+        std::fs::write(&rc, format!("unset HISTFILE\nPS1='test> '\n{startup}\n")).unwrap();
+        let integration = integrated.then(|| {
+            prepare("/bin/bash", &[], &BTreeMap::new())
+                .unwrap()
+                .unwrap()
+        });
+        let arguments = integration.as_ref().map_or_else(
+            || {
+                vec![
+                    "--rcfile".into(),
+                    rc.to_string_lossy().into_owned(),
+                    "-i".into(),
+                ]
+            },
+            |integration| integration.arguments.clone(),
+        );
+        test_process::output(
+            test_process::command("/bin/bash")
+                .args(arguments)
+                .env("HOME", home.path()),
+            input,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn observations(output: &std::process::Output) -> Vec<String> {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("OBSERVED "))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_integration_does_not_repeat_error_traps() {
+        for errtrace in [false, true] {
+            let startup = format!(
+                "{}\ntrap 'builtin printf \"\\nOBSERVED ERR:%s:%s\\n\" \"$?\" \"$BASH_COMMAND\"' ERR",
+                if errtrace { "set -E" } else { "set +E" },
+            );
+            let input = b"false\ntrue | false\nfalse || true\nexit 0\n";
+            let plain = interactive_bash(false, &startup, input);
+            let integrated = interactive_bash(true, &startup, input);
+            assert!(plain.status.success());
+            assert_eq!(integrated.status.code(), plain.status.code());
+            assert_eq!(
+                observations(&plain),
+                ["OBSERVED ERR:1:false", "OBSERVED ERR:1:false"]
+            );
+            assert_eq!(observations(&integrated), observations(&plain));
+            assert!(String::from_utf8_lossy(&integrated.stdout).contains("\x1b]133;D;1\x07"));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_integration_preserves_prompt_status_and_pipelines() {
+        for prompt in [
+            r#"PROMPT_COMMAND='builtin printf "\nOBSERVED PROMPT:%s:%s\n" "$?" "${PIPESTATUS[*]}"'"#,
+            r#"PROMPT_COMMAND=('builtin printf "\nOBSERVED PROMPT:%s:%s\n" "$?" "${PIPESTATUS[*]}"' 'builtin printf "\nOBSERVED NEXT:%s:%s\n" "$?" "${PIPESTATUS[*]}"')"#,
+        ] {
+            let input = b"false\nbuiltin printf '\\nOBSERVED STATUS:%s:%s\\n' \"$?\" \"${PIPESTATUS[*]}\"\nfalse | true\ntrue | false\nset -o pipefail\nfalse | true\nexit 7\n";
+            let plain = interactive_bash(false, prompt, input);
+            let integrated = interactive_bash(true, prompt, input);
+            assert_eq!(plain.status.code(), Some(7));
+            assert_eq!(integrated.status.code(), plain.status.code());
+            let expected = observations(&plain);
+            for required in [
+                "OBSERVED PROMPT:1:1",
+                "OBSERVED PROMPT:0:1 0",
+                "OBSERVED PROMPT:1:0 1",
+                "OBSERVED PROMPT:1:1 0",
+                "OBSERVED STATUS:1:1",
+            ] {
+                assert!(expected.iter().any(|line| line == required), "{expected:?}");
+            }
+            assert_eq!(observations(&integrated), expected);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_integration_preserves_strict_mode_and_conditional_execution() {
+        let startup = r#"set -Eeuo pipefail
+trap 'builtin printf "\nOBSERVED ERR:%s:%s\n" "$?" "$BASH_COMMAND"' ERR"#;
+        let input = b"false || builtin printf '\\nOBSERVED RECOVERED\\n'\nfalse && builtin printf '\\nOBSERVED UNEXPECTED\\n'\nif false; then builtin printf '\\nOBSERVED UNEXPECTED\\n'; fi\nbuiltin printf '\\nOBSERVED BEFORE_FAILURE\\n'\nfalse\nbuiltin printf '\\nOBSERVED UNEXPECTED\\n'\n";
+        let plain = interactive_bash(false, startup, input);
+        let integrated = interactive_bash(true, startup, input);
+        assert_eq!(plain.status.code(), Some(1));
+        assert_eq!(integrated.status.code(), plain.status.code());
+        assert_eq!(
+            observations(&plain),
+            [
+                "OBSERVED RECOVERED",
+                "OBSERVED BEFORE_FAILURE",
+                "OBSERVED ERR:1:false"
+            ]
+        );
+        assert_eq!(observations(&integrated), observations(&plain));
+    }
 
     #[cfg(unix)]
     fn remote_bash(profile: &str, input: &[u8]) -> (std::process::Output, tempfile::TempDir) {
@@ -228,6 +336,26 @@ mod tests {
         assert!(transcript.contains("LOGIN"));
         assert!(transcript.contains("\x1b]133;P;RustTerm=bash\x07"));
         assert!(transcript.contains("\x1b]133;D;1\x07"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_bash_preserves_error_traps_and_handled_failures() {
+        let startup = r#"PS1='test> '
+set -Eeuo pipefail
+trap 'builtin printf "\nOBSERVED ERR:%s:%s\n" "$?" "$BASH_COMMAND"' ERR"#;
+        let input =
+            b"false && true\nbuiltin printf '\\nOBSERVED SURVIVED\\n'\nset +e\nfalse\nexit 7\n";
+        let plain = interactive_bash(false, startup, input);
+        let (remote, _) = remote_bash(startup, input);
+        assert_eq!(plain.status.code(), Some(7));
+        assert_eq!(remote.status.code(), plain.status.code());
+        assert_eq!(
+            observations(&plain),
+            ["OBSERVED SURVIVED", "OBSERVED ERR:1:false"]
+        );
+        assert_eq!(observations(&remote), observations(&plain));
+        assert!(String::from_utf8_lossy(&remote.stdout).contains("\x1b]133;D;1\x07"));
     }
 
     #[test]

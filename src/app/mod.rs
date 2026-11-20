@@ -1,5 +1,6 @@
 use rustterm::i18n::messages as i18n_key;
 mod auth_prompt;
+mod clipboard;
 mod command_view;
 mod database_view;
 mod diagnostics;

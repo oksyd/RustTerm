@@ -108,6 +108,13 @@ impl RdpView {
         let Some(snapshot) = self.file_export_snapshot.take() else {
             return;
         };
+        self.clipboard.operation = Some(clipboard::Operation::Receive(
+            if content.png.is_some() || content.dib.is_some() {
+                clipboard::ContentKind::Image
+            } else {
+                clipboard::ContentKind::Text
+            },
+        ));
         self.clipboard.cancel_export();
         self.content_publication = None;
         if !cx.has_global::<FileClipboard>() {

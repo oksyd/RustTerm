@@ -7,7 +7,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
             // Include legacy updates or local cursor changes after END.
             // The snapshot cache shares all unchanged completed tiles.
             self.graphics.completed = None;
-            let mut frame = self.graphics.snapshot.capture(&mut self.session);
+            let mut frame = self.graphics.snapshot.capture(&mut self.session)?;
             frame.acknowledgement = self.graphics.acknowledgement.clone();
             let elapsed = started.elapsed();
             self.performance.snapshot_time += elapsed;
@@ -79,15 +79,23 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
             }
             let started = Instant::now();
             let mut snapshot_time = Duration::ZERO;
+            let mut snapshot_error = None;
             let on_frame = |completed: rustrdp::GraphicsFrame<'_>| {
                 // END can be followed by the next frame in the same PDU.
                 // Capture here, before those later updates mutate the desktop.
                 let capture_started = Instant::now();
-                let mut frame = self.graphics.snapshot.capture_graphics(
+                let frame = self.graphics.snapshot.capture_graphics(
                     completed.graphics,
                     completed.damage,
                     completed.bits_per_pixel,
                 );
+                let mut frame = match frame {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        snapshot_error = Some(error);
+                        return;
+                    }
+                };
                 self.graphics.acknowledgement = completed.acknowledgement;
                 frame.acknowledgement = self.graphics.acknowledgement.clone();
                 self.graphics.completed = Some(frame);
@@ -107,6 +115,9 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                     self.session.process_with_frames(&packet, on_frame)
                 }
             })?;
+            if let Some(error) = snapshot_error {
+                return Err(error);
+            }
             if self.graphics.separate_pointer {
                 let current = self.session.graphics().pointer();
                 self.graphics.pointer.send_if_modified(|previous| {
@@ -165,7 +176,7 @@ impl<R: tokio::io::AsyncRead + Unpin> Worker<'_, R> {
                     .clipboard
                     .request
                     .take()
-                    .expect("pending paste was checked");
+                    .ok_or(RdpError::Protocol("clipboard paste request state"))?;
                 self.events
                     .send(RdpEvent::Clipboard {
                         revision: request.revision,

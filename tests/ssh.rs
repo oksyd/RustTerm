@@ -358,6 +358,7 @@ impl Fixture {
             keepalive_secs: 1,
             keepalive_max: 2,
             shell_integration: false,
+            production_protection: false,
             jump_hosts: Vec::new(),
             forwards: Vec::new(),
             auto_forward: Default::default(),
@@ -412,6 +413,61 @@ async fn text(session: &Session) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[tokio::test]
+async fn production_protection_uses_plain_shell_despite_saved_enhancements() {
+    let server = Fixture::new(None).await;
+    let directory = private_directory();
+    let path = directory.path().join("hosts.toml");
+    server.trust(&path);
+    let mut options = server.options(&path, SshAuth::Password("secret".into()));
+    options.shell_integration = true;
+    options.production_protection = true;
+    options.auto_forward.enabled = true;
+    let session = Session::spawn_ssh(options, 80, 24, 100).unwrap();
+    until(|| session.state() == SessionState::Connected).await;
+    assert!(server.handler.exec_commands.lock().unwrap().is_empty());
+    assert!(session.protection().is_production());
+    assert!(session.resources().is_none());
+    assert_eq!(
+        session
+            .send_shell_action(rustterm::session::ShellAction::EnableIntegration { shell: "bash" }),
+        Err(rustterm::session::SendError::Protected)
+    );
+    assert_eq!(
+        session.send_shell_action(rustterm::session::ShellAction::RestoreDirectory {
+            shell: "bash",
+            directory: "/srv".into()
+        }),
+        Err(rustterm::session::SendError::Protected)
+    );
+    assert_eq!(
+        session.send(Command::Paste("first\nsecond".into())),
+        Err(rustterm::session::SendError::PasteReviewRequired)
+    );
+    assert!(server.handler.received.lock().unwrap().is_empty());
+    let controller = session.forwarding().unwrap();
+    assert!(controller.settings().automatic.enabled);
+    assert_eq!(
+        controller.refresh(),
+        Err(rustterm::session::SendError::Protected)
+    );
+    let mut settings = controller.settings();
+    settings.automatic.enabled = false;
+    controller.configure(settings.clone()).unwrap();
+    settings.automatic.enabled = true;
+    controller.configure(settings.clone()).unwrap();
+    assert_eq!(controller.settings(), settings);
+    session
+        .send(Command::Input(b"user input".to_vec()))
+        .unwrap();
+    until(|| server.handler.received.lock().unwrap().as_slice() == b"user input").await;
+    session.paste_confirmed("first\nsecond".into()).unwrap();
+    until(|| server.handler.received.lock().unwrap().as_slice() == b"user inputfirst\rsecond")
+        .await;
+    assert!(server.handler.exec_commands.lock().unwrap().is_empty());
+    session.close();
 }
 
 #[tokio::test]
@@ -674,6 +730,7 @@ async fn stalled_handshake_times_out_and_can_be_cancelled() {
         keepalive_secs: 1,
         keepalive_max: 2,
         shell_integration: false,
+        production_protection: false,
         jump_hosts: Vec::new(),
         forwards: Vec::new(),
         auto_forward: Default::default(),
@@ -839,6 +896,15 @@ async fn keyboard_interactive_uses_secret_challenge_responses() {
 
 #[tokio::test]
 async fn local_and_socks_forwarding_relay_and_stop_existing_streams() {
+    forwarding_relay(false).await;
+}
+
+#[tokio::test]
+async fn production_protection_keeps_explicit_local_and_socks_forwarding() {
+    forwarding_relay(true).await;
+}
+
+async fn forwarding_relay(production_protection: bool) {
     use rustterm::{
         config::{ForwardKind, PortForward},
         session::ForwardState,
@@ -855,6 +921,7 @@ async fn local_and_socks_forwarding_relay_and_stop_existing_streams() {
         let local_port = local.local_addr().unwrap().port();
         let dynamic_port = dynamic.local_addr().unwrap().port();
         let mut options = server.options(&path, SshAuth::Password("secret".into()));
+        options.production_protection = production_protection;
         options.forwards = vec![
             PortForward {
                 id: uuid::Uuid::new_v4(),
@@ -1212,4 +1279,34 @@ async fn remote_forwarding_accepts_registered_routes_and_cancels_listener() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn production_protection_does_not_reuse_an_unprotected_forwarding_manager() {
+    let server = Fixture::new(None).await;
+    let directory = private_directory();
+    let path = directory.path().join("hosts");
+    server.trust(&path);
+    let registry = rustterm::session::ForwardRegistry::default();
+    let id = uuid::Uuid::new_v4();
+    let mut options = server.options(&path, SshAuth::Password("secret".into()));
+    options.forwarding_registry = Some((registry.clone(), id));
+    let original = Session::spawn_ssh(options.clone(), 80, 24, 100).unwrap();
+    until(|| original.forwarding().is_some()).await;
+    let old = original.forwarding().unwrap();
+    options.production_protection = true;
+    options.auto_forward.enabled = true;
+    let protected = Session::spawn_ssh(options.clone(), 80, 24, 100).unwrap();
+    until(|| protected.forwarding().is_some()).await;
+    let current = protected.forwarding().unwrap();
+    assert!(!old.same_instance(&current));
+    assert!(current.protection().is_production());
+    let another = Session::spawn_ssh(options, 80, 24, 100).unwrap();
+    until(|| another.forwarding().is_some()).await;
+    assert!(current.same_instance(&another.forwarding().unwrap()));
+    assert!(server.handler.exec_commands.lock().unwrap().is_empty());
+    original.close();
+    protected.close();
+    another.close();
+    registry.stop_all();
 }

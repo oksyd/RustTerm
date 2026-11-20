@@ -13,11 +13,8 @@ impl DatabaseView {
         if self.page != WorkspacePage::Document {
             return None;
         }
-        self.documents[self.active_document]
-            .output
-            .as_ref()?
-            .results
-            .get(self.documents[self.active_document].result_index)
+        let document = self.documents.get(self.active_document)?;
+        document.output.as_ref()?.results.get(document.result_index)
     }
 
     pub(super) fn filter_rows(&mut self, cx: &mut Context<Self>) {
@@ -73,7 +70,8 @@ impl DatabaseView {
         if input.focus_handle().is_focused(window)
             && let Some(text) = input.selected_text()
         {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+            let text = text.to_owned();
+            crate::app::clipboard::write(cx, ClipboardItem::new_string(text));
         } else if self.documents[self.active_document].selected_cell.is_some() {
             self.copy_cell(cx);
         } else {
@@ -106,9 +104,10 @@ impl DatabaseView {
             cx.notify();
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            String::from_utf8(output).expect("UTF-8 result values"),
-        ));
+        crate::app::clipboard::write(
+            cx,
+            ClipboardItem::new_string(String::from_utf8(output).expect("UTF-8 result values")),
+        );
         self.show_success(
             i18n_key::DATABASE_DISPLAYED_ROWS_COPIED_WITH_COLUMN_NAMES_NULL_IS_WRITTEN_AS,
             cx,
@@ -130,9 +129,10 @@ impl DatabaseView {
         else {
             return;
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            cell.as_deref().unwrap_or("\\N").to_owned(),
-        ));
+        crate::app::clipboard::write(
+            cx,
+            ClipboardItem::new_string(cell.as_deref().unwrap_or("\\N").to_owned()),
+        );
         self.show_success(
             i18n_key::DATABASE_SELECTED_CELL_COPIED_NULL_IS_WRITTEN_AS_N,
             cx,

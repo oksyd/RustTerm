@@ -16,6 +16,34 @@ fn marked(snapshot: &Snapshot) -> Vec<(usize, usize)> {
 }
 
 #[test]
+fn word_delimiters_apply_to_selection_and_matches_across_history_updates() {
+    let mut terminal = Terminal::new(40, 3, 100);
+    terminal.feed(b"api-prod-01  other-prod prodX");
+    terminal.begin_selection(5, 0, SelectionKind::Word);
+    assert_eq!(terminal.selected_text().as_deref(), Some("api-prod-01"));
+
+    terminal.set_word_delimiters("-");
+    terminal.set_history_limits(256, 64 * 1024);
+    terminal.resize(48, 3);
+    terminal.begin_selection(5, 0, SelectionKind::Word);
+    assert_eq!(terminal.selected_text().as_deref(), Some("prod"));
+    assert_eq!(
+        marked(&terminal.snapshot()),
+        (4..8).chain(19..23).map(|col| (0, col)).collect::<Vec<_>>()
+    );
+
+    terminal.set_word_delimiters("");
+    terminal.begin_selection(5, 0, SelectionKind::Word);
+    assert_eq!(terminal.selected_text().as_deref(), Some("api-prod-01"));
+    terminal.set_word_delimiters(&crate::terminal::default_word_delimiters());
+    terminal.feed("\r\n码●段 ● 码●段".as_bytes());
+    terminal.set_word_delimiters("●");
+    terminal.freeze();
+    terminal.begin_selection(3, 1, SelectionKind::Word);
+    assert_eq!(terminal.selected_text().as_deref(), Some("段"));
+}
+
+#[test]
 fn double_click_matches_whole_tokens_case_sensitively_and_preserves_text_colors() {
     let mut terminal = Terminal::new(64, 3, 100);
     terminal.feed(b"error error_count myerror ERROR \x1b[31merror\x1b[0m");
@@ -30,7 +58,11 @@ fn double_click_matches_whole_tokens_case_sensitively_and_preserves_text_colors(
             .map(|column| (0, column))
             .collect::<Vec<_>>()
     );
-    for (before, after) in before.lines[0].cells.iter().zip(&after.lines[0].cells) {
+    for (before, after) in before.lines[0]
+        .cells
+        .iter()
+        .zip(after.lines[0].cells.iter())
+    {
         assert_eq!(
             (&before.text, before.foreground, before.background),
             (&after.text, after.foreground, after.background)
@@ -75,7 +107,11 @@ fn single_click_blank_line_selection_and_large_selections_do_not_flash_matches()
     assert!(marked(&terminal.snapshot()).is_empty());
     terminal.select_all();
     assert!(terminal.selection_query().is_none());
-    assert!(terminal.selection_visible_marks().is_none());
+    assert!(
+        terminal
+            .selection_visible_marks(&terminal.viewport())
+            .is_none()
+    );
     terminal.begin_selection(0, 0, SelectionKind::Word);
     assert_eq!(marked(&terminal.snapshot()).len(), 6);
 }
@@ -216,16 +252,15 @@ fn matches_partially_outside_the_viewport_have_complete_word_context() {
 }
 
 #[test]
-fn height_changes_preserve_matches_and_column_reflow_clears_invalidated_selection() {
+fn height_and_width_changes_preserve_selection_and_rebuild_occurrence_positions() {
     let mut terminal = Terminal::new(20, 3, 100);
     terminal.feed(b"word word");
     terminal.begin_selection(1, 0, SelectionKind::Word);
     terminal.resize(20, 6);
     assert_eq!(marked(&terminal.snapshot()).len(), 8);
     terminal.resize(10, 6);
-    assert!(terminal.snapshot().selection_invalidated);
-    assert!(marked(&terminal.snapshot()).is_empty());
-    terminal.begin_selection(1, 0, SelectionKind::Word);
+    assert!(!terminal.snapshot().selection_invalidated);
+    assert_eq!(terminal.selected_text().as_deref(), Some("word"));
     assert_eq!(marked(&terminal.snapshot()).len(), 8);
 }
 
@@ -257,15 +292,21 @@ fn unchanged_view_reuses_cache_and_offscreen_selection_only_matches_visible_outp
     terminal.feed(b"word\r\nother\r\nword\r\nother\r\nword");
     terminal.scroll(2);
     terminal.begin_selection(1, 0, SelectionKind::Word);
-    let first = terminal.selection_visible_marks().unwrap();
+    let first = terminal
+        .selection_visible_marks(&terminal.viewport())
+        .unwrap();
     assert!(Arc::ptr_eq(
         &first,
-        &terminal.selection_visible_marks().unwrap()
+        &terminal
+            .selection_visible_marks(&terminal.viewport())
+            .unwrap()
     ));
     terminal.scroll(-2);
     assert_eq!(terminal.selected_text().as_deref(), Some("word"));
     assert_eq!(marked(&terminal.snapshot()).len(), 8);
-    let next = terminal.selection_visible_marks().unwrap();
+    let next = terminal
+        .selection_visible_marks(&terminal.viewport())
+        .unwrap();
     assert!(!Arc::ptr_eq(&first, &next));
     assert_eq!(next.len(), 60);
 }
@@ -275,10 +316,18 @@ fn overlong_words_and_combining_sequences_are_bounded_before_matching() {
     let mut terminal = Terminal::new(300, 4, 100);
     terminal.feed("a".repeat(MAX_QUERY_CELLS + 1).as_bytes());
     terminal.begin_selection(0, 0, SelectionKind::Word);
-    assert!(terminal.selection_visible_marks().is_none());
+    assert!(
+        terminal
+            .selection_visible_marks(&terminal.viewport())
+            .is_none()
+    );
     terminal.clear_selection();
     terminal.feed(b"\r\n");
     terminal.feed(format!("{} ", format!("a{}", "\u{301}".repeat(32)).repeat(20)).as_bytes());
     terminal.begin_selection(0, 1, SelectionKind::Word);
-    assert!(terminal.selection_visible_marks().is_none());
+    assert!(
+        terminal
+            .selection_visible_marks(&terminal.viewport())
+            .is_none()
+    );
 }

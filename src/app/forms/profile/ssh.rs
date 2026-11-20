@@ -297,6 +297,7 @@ impl ProfileForm {
                 &get(i18n_key::WORKSPACE_KEEPALIVE_FAILURE_LIMIT),
             )?,
             shell_integration: self.shell_integration,
+            production_protection: self.production_protection,
         };
         preserve_current_credential_reference(
             &mut config,
@@ -605,6 +606,18 @@ impl ProfileForm {
                 body.child(div().text_color(rgb(ui::colors().danger)).child(tr(error)))
             })
             .child(self.credential_editor(cx))
+            .child(
+                ui::toggle_row(
+                    "ssh-production-protection",
+                    tr(i18n_key::CONNECTIONS_SSH_PRODUCTION_PROTECTION),
+                    Some(tr(i18n_key::CONNECTIONS_PRODUCTION_DESCRIPTION)),
+                    self.production_protection,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.production_protection = !this.production_protection;
+                    cx.notify();
+                })),
+            )
             .into_any_element()
     }
 
@@ -613,8 +626,9 @@ impl ProfileForm {
             .child(ui::toggle_row(
                 "ssh-shell-integration", tr(i18n_key::CONNECTIONS_SHELL_INTEGRATION),
                 Some(tr(i18n_key::CONNECTIONS_AUTOMATICALLY_INTEGRATES_BASH_ZSH_AND_FISH_WITHOUT_CHANGING_YOUR_STARTUP)),
-                self.shell_integration,
-            ).on_click(cx.listener(|this, _, _, cx| {
+                self.shell_integration && !self.production_protection,
+            ).when(self.production_protection, |row| row.opacity(0.5)).on_click(cx.listener(|this, _, _, cx| {
+                if this.production_protection { return; }
                 this.shell_integration = !this.shell_integration;
                 cx.notify();
             })))
