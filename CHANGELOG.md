@@ -1,8 +1,17 @@
+## [0.1.17] - 2026-11-20
+
+### ⚡ Performance
+
+- *(workspace)* Cache quick open results
 ## [0.1.16] - 2026-11-16
 
 ### 🐛 Bug Fixes
 
 - Ci
+
+### ⚙️ Miscellaneous Tasks
+
+- Release rustterm version 0.1.16
 ## [0.1.15] - 2026-11-16
 
 ### 🐛 Bug Fixes
