@@ -83,6 +83,9 @@ workspace-quick-open-switch-session = Enter switches to the open session
 
 workspace-command-text = Command text
 
+workspace-command-history = Command history
+workspace-history-insert-keys = Enter to insert into the terminal · Tab for other actions
+
 workspace-commands = Commands
 
 workspace-configuration-needs-attention-error = Configuration needs attention: { $error }
@@ -104,8 +107,6 @@ workspace-connections = Connections
 workspace-enabled-port-count = Enabled port forwards: { $count }
 
 workspace-copy-connection-address = Copy connection address
-
-workspace-copy-output-command = Copy output: { $command }
 
 workspace-copy-paste = Copy / paste
 
@@ -205,9 +206,9 @@ workspace-filter-connection-profiles = Filter connection profiles
 
 workspace-filter-sessions = Filter sessions
 
-workspace-follow-terminal = Follow terminal
+workspace-follow-terminal = Follow terminal directory
 
-workspace-follow-terminal-directory-in-sftp = Follow terminal directory in SFTP
+workspace-follow-terminal-directory-in-sftp = Start following terminal directory
 
 workspace-font-size = Font size
 
@@ -241,8 +242,6 @@ workspace-history-per-pane-mib = History per pane (MiB)
 workspace-host = Host
 
 workspace-increase-decrease-reset-font-size = Increase / decrease / reset font size
-
-workspace-insert-command-command = Insert command: { $command }
 
 workspace-invalid-public-key = Invalid public key
 
@@ -420,7 +419,7 @@ workspace-running-sessions-are-unaffected-you-can-also-remove-credentials-that =
 
 workspace-rustterm-version-linux-desktop-terminal = RustTerm { $version } · Linux desktop terminal
 
-workspace-save-command-command = Save command: { $command }
+workspace-save-history-command = Save command…
 
 workspace-save-your-changes = Save your changes?
 

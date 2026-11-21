@@ -275,7 +275,7 @@ impl Workspace {
         };
         self.persist_workspace(cx);
         self.lock_screen.locked = true;
-        self.palette.open = false;
+        self.palette.hide();
         self.authentication
             .update(cx, |prompt, cx| prompt.suspend(cx));
         self.lock_screen.unlock_hash = Some(hash);

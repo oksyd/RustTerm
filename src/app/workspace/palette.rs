@@ -1,3 +1,4 @@
+mod history;
 use super::Workspace;
 use super::connection_kind::{ConnectionKind, target};
 use crate::app::forms::SettingsSection;
@@ -10,6 +11,7 @@ use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, SharedString,
     Subscription, Window, div, px, rgb, rgba,
 };
+use history::{HistoryAction, HistoryRecord, history_items};
 use rustterm::config::{
     AppConfig, Connection, Group, QuickCommand, QuickOpenOrder, ShortcutAction, Uuid,
 };
@@ -47,6 +49,7 @@ pub(super) struct Palette {
     scope: PaletteScope,
     query: Entity<TextInput>,
     quick_open: QuickOpenResults,
+    displayed_commands: Option<(String, Rc<[Item]>)>,
     name: Entity<TextInput>,
     command: Entity<TextInput>,
     editing: Option<Option<Uuid>>,
@@ -59,6 +62,15 @@ struct Item {
     label: SharedString,
     detail: SharedString,
     action: Action,
+}
+
+impl Item {
+    fn history_record(&self) -> Option<HistoryRecord> {
+        match self.action {
+            Action::History(record) => Some(record),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -176,9 +188,8 @@ enum Action {
     Connect { index: usize, id: Uuid },
     QuickOpen,
     PasteSaved { run: Uuid, text: String },
-    InsertCommand { run: Uuid, command: u64 },
-    CopyOutput { run: Uuid, command: u64 },
-    SaveCommand(String),
+    OpenHistory,
+    History(HistoryRecord),
     Edit(Uuid),
     NewTerminal,
     Settings,
@@ -189,6 +200,12 @@ enum Action {
     AddCommand,
 }
 impl Palette {
+    pub(super) fn hide(&mut self) {
+        self.open = false;
+        self.displayed_commands = None;
+        self.invalidate_connections();
+    }
+
     pub(super) fn invalidate_connections(&mut self) {
         self.quick_open.invalidate();
     }
@@ -245,6 +262,7 @@ impl Palette {
             scope: PaletteScope::Commands,
             query,
             quick_open: QuickOpenResults::default(),
+            displayed_commands: None,
             name,
             command,
             editing: None,
@@ -281,6 +299,7 @@ impl Workspace {
             }
         }
         self.palette.open = true;
+        self.palette.displayed_commands = None;
         self.palette.invalidate_connections();
         self.palette.scope = scope;
         self.palette.editing = None;
@@ -297,8 +316,7 @@ impl Workspace {
         cx.notify();
     }
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette.open = false;
-        self.palette.invalidate_connections();
+        self.palette.hide();
         self.palette.editing = None;
         self.palette.command.update(cx, |input, cx| input.clear(cx));
         self.restore_focus(window, cx);
@@ -442,6 +460,7 @@ impl Workspace {
                 "",
                 Action::AddCommand,
             ),
+            (i18n_key::WORKSPACE_COMMAND_HISTORY, "", Action::OpenHistory),
             (i18n_key::SFTP_FILE_MANAGER_DIALOG, "", Action::Files),
             (
                 if matches!(self.panes.get(&self.focused), Some(Pane::Terminal(terminal))
@@ -451,7 +470,7 @@ impl Workspace {
                 } else {
                     i18n_key::WORKSPACE_FOLLOW_TERMINAL_DIRECTORY_IN_SFTP
                 },
-                "",
+                "SFTP",
                 Action::SyncFiles,
             ),
             (
@@ -502,64 +521,36 @@ impl Workspace {
                 action: Action::Edit(command.id),
             });
         }
-        items.extend(connections);
-        if let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused)
-            && let Some(run) = terminal_run
-        {
-            for command in terminal.read(cx).command_records().iter().rev().take(32) {
-                let detail: SharedString = command
-                    .exit_status
-                    .map_or_else(
-                        || tr(i18n_key::WORKSPACE_RUNNING).to_owned(),
-                        |status| format!("{} {status}", tr(i18n_key::WORKSPACE_EXIT_STATUS)),
-                    )
-                    .into();
-                items.push(Item {
-                    label: rustterm::trf!(
-                        i18n_key::WORKSPACE_INSERT_COMMAND_COMMAND,
-                        command = command.command
-                    )
-                    .into(),
-                    detail: detail.clone(),
-                    action: Action::InsertCommand {
-                        run,
-                        command: command.id,
-                    },
-                });
-                if command.output.is_some() {
-                    items.push(Item {
-                        label: rustterm::trf!(
-                            i18n_key::WORKSPACE_COPY_OUTPUT_COMMAND,
-                            command = command.command
-                        )
-                        .into(),
-                        detail,
-                        action: Action::CopyOutput {
-                            run,
-                            command: command.id,
-                        },
-                    });
-                }
-                items.push(Item {
-                    label: rustterm::trf!(
-                        i18n_key::WORKSPACE_SAVE_COMMAND_COMMAND,
-                        command = command.command
-                    )
-                    .into(),
-                    detail: SharedString::default(),
-                    action: Action::SaveCommand(command.command.clone()),
-                });
-            }
-        }
-        items
+        let actions = items
             .into_iter()
             .filter(|item| self.palette_action_available(&item.action, cx))
             .filter(|item| {
-                matches!(item.action, Action::Connect { .. })
-                    || format!("{} {}", item.label, item.detail)
-                        .to_lowercase()
-                        .contains(&query)
-            })
+                format!("{} {}", item.label, item.detail)
+                    .to_lowercase()
+                    .contains(&query)
+            });
+        let history = match self.panes.get(&self.focused) {
+            Some(Pane::Terminal(view))
+                if !query.is_empty()
+                    && let Some(run) = terminal_run =>
+            {
+                let terminal = view.read(cx);
+                if terminal.history_actions_allowed(cx) {
+                    history_items(
+                        run,
+                        &terminal.command_records(),
+                        &query,
+                        !self.utility_overlay && terminal.can_insert_history_command(run),
+                    )
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+        actions
+            .chain(history)
+            .chain(connections)
             .take(128)
             .collect()
     }
@@ -570,8 +561,7 @@ impl Workspace {
             | Action::SyncFiles
             | Action::Forwards
             | Action::PasteSaved { .. }
-            | Action::InsertCommand { .. }
-            | Action::CopyOutput { .. } => {
+            | Action::OpenHistory => {
                 let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused) else {
                     return false;
                 };
@@ -587,24 +577,7 @@ impl Workspace {
                             && terminal.history_actions_allowed(cx)
                             && terminal.can_insert_history_command(*run)
                     }
-                    Action::InsertCommand { run, command } => {
-                        !self.utility_overlay
-                            && terminal.history_actions_allowed(cx)
-                            && terminal.can_insert_history_command(*run)
-                            && terminal.command_records().iter().any(|record| {
-                                record.id == *command
-                                    && !record.command.is_empty()
-                                    && !record.command.chars().any(char::is_control)
-                            })
-                    }
-                    Action::CopyOutput { run, command } => {
-                        terminal.history_actions_allowed(cx)
-                            && terminal.history_run() == Some(*run)
-                            && terminal
-                                .command_records()
-                                .iter()
-                                .any(|record| record.id == *command && record.output.is_some())
-                    }
+                    Action::OpenHistory => terminal.history_actions_allowed(cx),
                     _ => false,
                 }
             }
@@ -612,14 +585,27 @@ impl Workspace {
         }
     }
     fn run_palette_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.lock_screen.locked || self.palette.query.read(cx).is_composing() {
+        if !self.palette.open
+            || self.palette.editing.is_some()
+            || self.lock_screen.locked
+            || self.palette.query.read(cx).is_composing()
+        {
             return;
         }
-        let items = self.palette_items(cx);
+        let items = self.palette_navigation_items(cx);
         let Some(item) = items.get(self.palette.selected) else {
             return;
         };
         self.run_palette_action(item.action.clone(), window, cx);
+    }
+
+    fn palette_navigation_items(&mut self, cx: &App) -> Rc<[Item]> {
+        if let Some((query, displayed)) = &self.palette.displayed_commands
+            && query == self.palette.query.read(cx).value()
+        {
+            return Rc::clone(displayed);
+        }
+        self.palette_items(cx)
     }
     fn edit_quick_command(
         &mut self,
@@ -715,8 +701,8 @@ impl Workspace {
                 self.edit_quick_command(Some(id), String::new(), window, cx);
                 return;
             }
-            Action::SaveCommand(text) => {
-                self.edit_quick_command(None, text, window, cx);
+            Action::History(record) => {
+                self.run_history_action(record, HistoryAction::Insert, window, cx);
                 return;
             }
             _ => self.close_palette(window, cx),
@@ -742,22 +728,7 @@ impl Workspace {
                     });
                 }
             }
-            Action::InsertCommand { run, command } => {
-                if let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused) {
-                    terminal.update(cx, |terminal, cx| {
-                        terminal.insert_history_command(run, command, cx);
-                    });
-                }
-            }
-            Action::CopyOutput { run, command } => {
-                if let Some(Pane::Terminal(terminal)) = self.panes.get(&self.focused) {
-                    terminal.update(cx, |terminal, cx| {
-                        if terminal.history_run() == Some(run) {
-                            terminal.copy_command_output(command, cx);
-                        }
-                    });
-                }
-            }
+            Action::OpenHistory => self.open_commands(window, cx),
             Action::NewTerminal => self.pane_event(&PaneEvent::NewTab, window, cx),
             Action::Files => self.open_files(window, cx),
             Action::SyncFiles => self.follow_terminal_directory(window, cx),
@@ -887,6 +858,25 @@ impl Workspace {
                 );
         } else {
             let items = self.palette_items(cx);
+            if self.palette.scope == PaletteScope::Commands {
+                let query = self.palette.query.read(cx).value();
+                if let Some((previous_query, displayed)) = &self.palette.displayed_commands
+                    && previous_query == query
+                    && let Some(previous) = displayed
+                        .get(self.palette.selected)
+                        .and_then(Item::history_record)
+                    && let Some(index) = items.iter().position(|item| {
+                        item.history_record()
+                            .is_some_and(|record| previous.same_execution(record))
+                    })
+                    && index != self.palette.selected
+                {
+                    self.palette.selected = index;
+                    self.palette.scroll.scroll_to_item(index);
+                }
+                self.palette.selected = self.palette.selected.min(items.len().saturating_sub(1));
+                self.palette.displayed_commands = Some((query.to_owned(), Rc::clone(&items)));
+            }
             let selected_hint = items.get(self.palette.selected).and_then(|item| {
                 if let (PaletteScope::Connections, Action::Connect { index, id }) =
                     (self.palette.scope, &item.action)
@@ -898,7 +888,8 @@ impl Workspace {
                         .filter(|profile| profile.id == *id)?;
                     self.profile_open_action(profile).hint(&profile.connection)
                 } else {
-                    None
+                    item.history_record()
+                        .map(|record| tr(record.hint()).to_owned())
                 }
             });
             let empty_connections =
@@ -930,6 +921,8 @@ impl Workspace {
                     ))
                     .children(items.iter().enumerate().map(|(index, item)| {
                         let rows = Rc::clone(&items);
+                        let selected = index == self.palette.selected;
+                        let history = item.history_record();
                         let description = div()
                             .flex()
                             .items_center()
@@ -942,9 +935,14 @@ impl Workspace {
                                     .text_size(px(11.))
                                     .text_color(rgb(ui::colors().muted))
                                     .child(item.detail.clone()),
-                            );
+                            )
+                            .when_some(history, |row, record| {
+                                row.child(self.history_buttons(record, selected, cx)
+                                    .when(!selected, |buttons| buttons.opacity(0.).group_hover("palette-history-row", |s| s.opacity(1.))))
+                            });
                         div()
                             .id(("palette-item", index))
+                            .when(history.is_some(), |row| row.group("palette-history-row"))
                             .px_3()
                             .py_2()
                             .cursor_pointer()
@@ -964,7 +962,9 @@ impl Workspace {
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(item) = rows.get(index) {
+                                    this.palette.selected = index;
                                     this.run_palette_action(item.action.clone(), window, cx);
+                                    cx.notify();
                                 }
                             }))
                     }))
@@ -1016,13 +1016,14 @@ impl Workspace {
                 if this.palette.editing.is_none()
                     && matches!(event.keystroke.key.as_str(), "up" | "down")
                 {
-                    let count = this.palette_items(cx).len().max(1);
+                    let count = this.palette_navigation_items(cx).len().max(1);
                     this.palette.selected = if event.keystroke.key == "up" {
                         (this.palette.selected + count - 1) % count
                     } else {
                         (this.palette.selected + 1) % count
                     };
                     this.palette.scroll.scroll_to_item(this.palette.selected);
+                    this.palette.query.read(cx).focus(window);
                     cx.notify();
                     window.prevent_default();
                     cx.stop_propagation();

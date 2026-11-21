@@ -47,7 +47,7 @@ impl Workspace {
         }
         self.remember_popup_focus(window, cx);
         self.menu = None;
-        self.palette.open = false;
+        self.palette.hide();
         let form = cx.new(|cx| {
             SettingsForm::new(
                 &self.config.settings,

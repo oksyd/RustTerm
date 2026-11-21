@@ -1690,18 +1690,13 @@ impl Render for FileTransferView {
             )
             .child(div().flex_1())
             .child(
-                text_button(
+                ui::choice_button(
                     "follow-terminal",
                     i18n_key::WORKSPACE_FOLLOW_TERMINAL,
-                    ButtonStyle::Neutral,
+                    self.followed_directory.is_some(),
+                    !self.closed && !self.native_pending && !self.prompts.is_blocked(),
                 )
-                .tab_index(0)
                 .flex_shrink_0()
-                .when(self.followed_directory.is_some(), |button| {
-                    button
-                        .bg(rgb(ui::colors().selected))
-                        .text_color(rgb(ui::colors().accent))
-                })
                 .tooltip({
                     let label = if self.followed_directory.is_some() {
                         i18n_key::WORKSPACE_STOP_FOLLOWING_TERMINAL_DIRECTORY

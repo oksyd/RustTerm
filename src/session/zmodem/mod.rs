@@ -23,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const HEX_PREFIX: &[u8] = b"**\x18B";
 const HEADER_LEN: usize = 20;
+#[cfg(target_os = "linux")]
 const QUEUE_CAPACITY: usize = 16;
 const CHUNK_BYTES: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
@@ -182,11 +183,27 @@ pub struct Outcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
+    #[cfg(target_os = "linux")]
     Write(Vec<u8>),
     /// Ordinary terminal output after the final protocol boundary.
     Terminal(Vec<u8>),
+    #[cfg(target_os = "linux")]
     Progress(Progress),
+    #[cfg(any(target_os = "linux", test))]
     Finished(Outcome),
+}
+
+impl Event {
+    fn is_finished(&self) -> bool {
+        #[cfg(any(target_os = "linux", test))]
+        {
+            matches!(self, Self::Finished(_))
+        }
+        #[cfg(not(any(target_os = "linux", test)))]
+        {
+            false
+        }
+    }
 }
 
 struct InputState {
@@ -362,12 +379,14 @@ impl Drop for Engine {
 /// Only recognizes completion after the *local* helper emits ZFIN. In
 /// particular, a ZFIN-looking byte sequence in downloaded binary data does not
 /// arm the OO scanner or turn file content into terminal output.
+#[cfg(any(target_os = "linux", test))]
 struct FinishGate {
     direction: Direction,
     pending: Vec<u8>,
     finished: bool,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl FinishGate {
     fn new(direction: Direction) -> Self {
         Self {
@@ -422,10 +441,12 @@ impl FinishGate {
 }
 
 #[derive(Default)]
+#[cfg(target_os = "linux")]
 struct FinalHeaderScanner {
     tail: Vec<u8>,
 }
 
+#[cfg(target_os = "linux")]
 impl FinalHeaderScanner {
     fn feed(&mut self, bytes: &[u8]) -> bool {
         self.tail.extend_from_slice(bytes);

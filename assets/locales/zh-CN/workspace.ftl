@@ -75,6 +75,9 @@ workspace-quick-open-switch-session = 回车切到已打开的会话
 
 workspace-command-text = 命令内容
 
+workspace-command-history = 命令历史
+workspace-history-insert-keys = Enter 插入到终端 · Tab 选择其他操作
+
 workspace-commands = 命令
 
 workspace-configuration-needs-attention-error = 配置保存需要处理：{ $error }
@@ -96,8 +99,6 @@ workspace-connections = 连接
 workspace-enabled-port-count = 已启用的端口转发：{ $count }
 
 workspace-copy-connection-address = 复制连接地址
-
-workspace-copy-output-command = 复制输出：{ $command }
 
 workspace-copy-paste = 复制 / 粘贴
 
@@ -189,9 +190,9 @@ workspace-filter-connection-profiles = 筛选连接配置
 
 workspace-filter-sessions = 筛选会话
 
-workspace-follow-terminal = 跟随终端
+workspace-follow-terminal = 跟随终端目录
 
-workspace-follow-terminal-directory-in-sftp = 在 SFTP 中打开终端当前目录
+workspace-follow-terminal-directory-in-sftp = 开始跟随终端目录
 
 workspace-font-size = 字号
 
@@ -225,8 +226,6 @@ workspace-history-per-pane-mib = 单分屏历史 MiB
 workspace-host = 主机
 
 workspace-increase-decrease-reset-font-size = 放大 / 缩小 / 重置字号
-
-workspace-insert-command-command = 插入命令：{ $command }
 
 workspace-invalid-public-key = 无效公钥
 
@@ -380,7 +379,7 @@ workspace-running-sessions-are-unaffected-you-can-also-remove-credentials-that =
 
 workspace-rustterm-version-linux-desktop-terminal = RustTerm { $version } · Linux 桌面终端
 
-workspace-save-command-command = 收藏命令：{ $command }
+workspace-save-history-command = 收藏命令…
 
 workspace-save-your-changes = 保存修改吗？
 

@@ -134,19 +134,17 @@ pub(super) async fn run(
     shared: Arc<Shared>,
 ) {
     let worker_shared = shared.clone();
-    let transport =
+    let opened =
         tokio::task::spawn_blocking(move || open(options, columns, rows, worker_shared)).await;
-    let transport = match transport {
-        Ok(Ok(transport)) => {
+    let transport = match opened
+        .map_err(|error| error.to_string())
+        .and_then(|result| result.map_err(|error| format!("{error:#}")))
+    {
+        Ok(transport) => {
             shared.transition(LifecycleEvent::Connected);
             Some(transport)
         }
-        result => {
-            let message = match result {
-                Ok(Err(error)) => format!("{error:#}"),
-                Err(error) => error.to_string(),
-                _ => unreachable!(),
-            };
+        Err(message) => {
             if shared.io_stop.is_cancelled() {
                 shared.transition(LifecycleEvent::Disconnected { exit_code: None });
             } else {

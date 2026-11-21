@@ -6,8 +6,8 @@ use crate::session::state::LifecycleEvent;
 use crate::i18n::messages as i18n_key;
 
 use super::{
-    Detector, Direction as ZmodemDirection, Engine, Event, Outcome, Progress as ZmodemProgress,
-    Request, Selection as ZmodemSelection,
+    CANCEL_BYTES, Detector, Direction as ZmodemDirection, Engine, Event, Outcome,
+    Progress as ZmodemProgress, Request, Selection as ZmodemSelection,
 };
 use crate::session::{
     FailureKind,
@@ -50,7 +50,6 @@ impl ZmodemStatus {
 
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PENDING_BYTES: usize = 64 * 1024;
-const CANCEL: &[u8] = b"\x18\x18\x18\x18\x18\x18\x18\x18\x08\x08\x08\x08\x08\x08\x08\x08";
 
 pub(in crate::session) struct Transfer {
     shared: Arc<Shared>,
@@ -152,7 +151,7 @@ impl Transfer {
     async fn cancel_wire(&self) -> std::result::Result<(), FailureKind> {
         enqueue_write(
             &self.wire,
-            WriteCommand::Data(CANCEL.to_vec()),
+            WriteCommand::Data(CANCEL_BYTES.to_vec()),
             &self.shared,
         )
         .await
@@ -247,7 +246,7 @@ impl Transfer {
                 tokio::select! {
                     biased;
                     Some(event) = self.events.recv() => {
-                        completed |= matches!(event, Event::Finished(_));
+                        completed |= event.is_finished();
                         visible.extend(self.event(event).await?);
                     }
                     result = &mut feeding => break result,
@@ -258,7 +257,7 @@ impl Transfer {
                     // Finalization can race the outer actor's output selection.
                     // Render all older tail events before the unaccepted suffix.
                     while let Ok(event) = self.events.try_recv() {
-                        completed |= matches!(event, Event::Finished(_));
+                        completed |= event.is_finished();
                         visible.extend(self.event(event).await?);
                     }
                     visible.extend(self.terminal_bytes(error.bytes, !completed)?);
@@ -361,14 +360,23 @@ impl Transfer {
     }
     pub async fn event(&mut self, event: Event) -> std::result::Result<Vec<u8>, FailureKind> {
         match event {
+            #[cfg(target_os = "linux")]
             Event::Write(bytes) => {
-                enqueue_write(&self.wire, WriteCommand::Data(bytes), &self.shared).await?
+                enqueue_write(&self.wire, WriteCommand::Data(bytes), &self.shared).await?;
+                Ok(Vec::new())
             }
-            Event::Terminal(bytes) => return self.terminal_bytes(bytes, true),
-            Event::Progress(progress) => self.update(|s| s.progress = progress),
-            Event::Finished(outcome) => self.finish(outcome),
+            Event::Terminal(bytes) => self.terminal_bytes(bytes, true),
+            #[cfg(target_os = "linux")]
+            Event::Progress(progress) => {
+                self.update(|s| s.progress = progress);
+                Ok(Vec::new())
+            }
+            #[cfg(any(target_os = "linux", test))]
+            Event::Finished(outcome) => {
+                self.finish(outcome);
+                Ok(Vec::new())
+            }
         }
-        Ok(Vec::new())
     }
     pub async fn shutdown(&mut self) -> Vec<u8> {
         if let Some(engine) = &self.engine {
@@ -387,11 +395,14 @@ impl Transfer {
                         visible.extend(bytes);
                     }
                 }
+                #[cfg(any(target_os = "linux", test))]
                 Event::Finished(outcome) => {
                     self.next_request = None;
                     self.finish(outcome);
                 }
+                #[cfg(target_os = "linux")]
                 Event::Progress(progress) => self.update(|s| s.progress = progress),
+                #[cfg(target_os = "linux")]
                 Event::Write(_) => {}
             }
         }
@@ -559,7 +570,9 @@ mod tests {
         transfer.cancel(status.id + 1).await.unwrap();
         assert!(transfer.active());
         transfer.cancel(status.id).await.unwrap();
-        assert!(matches!(writes.try_recv(), Ok(WriteCommand::Data(bytes)) if bytes == CANCEL));
+        assert!(
+            matches!(writes.try_recv(), Ok(WriteCommand::Data(bytes)) if bytes == CANCEL_BYTES)
+        );
         assert_eq!(
             session.zmodem_status().unwrap().phase,
             ZmodemPhase::Cancelled
@@ -583,7 +596,9 @@ mod tests {
         transfer.receive(vec![0; MAX_PENDING_BYTES]).await.unwrap();
         assert!(!transfer.active());
         assert_eq!(session.zmodem_status().unwrap().phase, ZmodemPhase::Failed);
-        assert!(matches!(writes.try_recv(), Ok(WriteCommand::Data(bytes)) if bytes == CANCEL));
+        assert!(
+            matches!(writes.try_recv(), Ok(WriteCommand::Data(bytes)) if bytes == CANCEL_BYTES)
+        );
     }
 
     #[tokio::test]
